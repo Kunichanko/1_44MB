@@ -1,4 +1,4 @@
-// 依存: editor_ui.h
+// 依存: editor_ui.h、../Shered/player.h（editor_ui.h 経由）
 #include "editor_ui.h"
 
 #include "raylib.h"

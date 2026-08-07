@@ -13,13 +13,19 @@ typedef struct Player {
     float moveSpeed;
     Texture2D appearance;
     bool hasAppearance;
+    Texture2D defaultAppearance;
+    bool hasDefaultAppearance;
+    int animationFrame;
+    float animationElapsed;
 } Player;
 
 Player Player_Create(Vector2 startPosition);
+bool Player_LoadDefaultAppearance(Player *player, const char *filePath);
 void Player_Update(Player *player, float deltaTime, float worldWidth);
 void Player_Draw(const Player *player, float groundY);
 bool Player_SetAppearance(Player *player, const char *filePath);
 void Player_UnloadAppearance(Player *player);
+void Player_UnloadDefaultAppearance(Player *player);
 Rectangle Player_GetBounds(const Player *player, float groundY);
 
 #endif

@@ -1,4 +1,4 @@
-// 依存: player.h
+// 依存: ../Shered/player.h
 #ifndef EDITOR_UI_H
 #define EDITOR_UI_H
 

@@ -1,4 +1,4 @@
-// 依存: player.h、stage.h
+// 依存: ../Shered/player.h、../Shered/stage.h
 #include "raylib.h"
 #include "raymath.h"
 
@@ -41,7 +41,7 @@ static void DrawGame(const Player *player, const Stage *stage, const Camera2D *c
 
     DrawRectangle(16, 16, 380, 62, Fade(RAYWHITE, 0.86f));
     DrawText("A / D または ← / → で移動", 28, 28, 22, DARKGRAY);
-    DrawText("仮キャラクター・横スクロール土台", 28, 52, 16, GRAY);
+    DrawText("ZIPPER アニメーション・横スクロール土台", 28, 52, 16, GRAY);
     EndDrawing();
 }
 
@@ -52,6 +52,10 @@ int main(void)
 
     Stage stage = Stage_Create();
     Player player = Player_Create((Vector2){ 120.0f, stage.groundY });
+    // 実行時のカレントフォルダに左右されないよう、実行ファイルの隣にある assets/Sprite から画像を読む。
+    Player_LoadDefaultAppearance(&player,
+                                 TextFormat("%s../assets/Sprite/ZIPPER.png",
+                                            GetApplicationDirectory()));
     Camera2D camera = CreateCamera();
 
     while (!WindowShouldClose()) {
@@ -60,6 +64,7 @@ int main(void)
         DrawGame(&player, &stage, &camera);
     }
 
+    Player_UnloadDefaultAppearance(&player);
     CloseWindow();
     return 0;
 }

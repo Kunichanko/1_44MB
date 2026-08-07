@@ -1,4 +1,4 @@
-# 依存: src/Play/main.c、src/Editor/main.c、src/Editor/editor_ui.c、src/Editor/file_dialog.c、src/Shered/player.c、src/Shered/stage.c
+# 依存: src/Play/main.c、src/Editor/main.c、src/Editor/editor_ui.c、src/Editor/file_dialog.c、src/Shered/enemy.c、src/Shered/enemy_group.c、src/Shered/enemy_settings.c、src/Shered/game_font.c、src/Shered/player.c、src/Shered/stage.c
 cmake_minimum_required(VERSION 3.20)
 project(side_scroller_starter C)
 
@@ -9,6 +9,10 @@ find_package(raylib 5.0 REQUIRED)
 
 add_executable(side_scroller
     src/Play/main.c
+    src/Shered/enemy.c
+    src/Shered/enemy_group.c
+    src/Shered/enemy_settings.c
+    src/Shered/game_font.c
     src/Shered/player.c
     src/Shered/stage.c
 )
@@ -21,6 +25,10 @@ add_executable(side_scroller_editor
     src/Editor/main.c
     src/Editor/editor_ui.c
     src/Editor/file_dialog.c
+    src/Shered/enemy.c
+    src/Shered/enemy_group.c
+    src/Shered/enemy_settings.c
+    src/Shered/game_font.c
     src/Shered/player.c
     src/Shered/stage.c
 )

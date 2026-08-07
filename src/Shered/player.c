@@ -9,13 +9,15 @@ enum {
 };
 
 static const float ANIMATION_FRAME_DURATION = 0.12f;
+static const float PLAYER_BASE_WIDTH = 48.0f;
+static const float PLAYER_BASE_HEIGHT = 60.0f;
 
 Player Player_Create(Vector2 startPosition)
 {
     Player player = {
         .position = startPosition,
-        .width = 48.0f,
-        .height = 60.0f,
+        .width = PLAYER_BASE_WIDTH * 1.5f,
+        .height = PLAYER_BASE_HEIGHT * 1.5f,
         .moveSpeed = 300.0f,
         .appearance = {0},
         .hasAppearance = false,
@@ -23,6 +25,9 @@ Player Player_Create(Vector2 startPosition)
         .hasDefaultAppearance = false,
         .animationFrame = 0,
         .animationElapsed = 0.0f,
+        .actionActive = false,
+        .actionStarted = false,
+        .facingDirection = 1,
     };
 
     return player;
@@ -45,6 +50,31 @@ void Player_Update(Player *player, float deltaTime, float worldWidth)
 {
     float direction = 0.0f;
 
+    player->actionStarted = false;
+
+    // アクション中はアニメーションを最後まで再生し、移動を含む操作を受け付けない。
+    if (player->actionActive) {
+        player->animationElapsed += deltaTime;
+        if (player->animationElapsed >= ANIMATION_FRAME_DURATION) {
+            player->animationElapsed -= ANIMATION_FRAME_DURATION;
+            player->animationFrame++;
+            if (player->animationFrame >= ANIMATION_FRAME_COUNT) {
+                player->animationFrame = 0;
+                player->animationElapsed = 0.0f;
+                player->actionActive = false;
+            }
+        }
+        return;
+    }
+
+    if (IsKeyPressed(KEY_SPACE)) {
+        player->actionActive = true;
+        player->actionStarted = true;
+        player->animationFrame = 0;
+        player->animationElapsed = 0.0f;
+        return;
+    }
+
     if (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT)) {
         direction -= 1.0f;
     }
@@ -52,23 +82,37 @@ void Player_Update(Player *player, float deltaTime, float worldWidth)
         direction += 1.0f;
     }
 
-    player->position.x += direction * player->moveSpeed * deltaTime;
-
-    // 移動中だけスプライトシートの5フレームを順番に進め、停止時は先頭フレームへ戻す。
     if (direction != 0.0f) {
-        player->animationElapsed += deltaTime;
-        if (player->animationElapsed >= ANIMATION_FRAME_DURATION) {
-            player->animationElapsed = 0.0f;
-            player->animationFrame = (player->animationFrame + 1) % ANIMATION_FRAME_COUNT;
-        }
-    } else {
-        player->animationFrame = 0;
-        player->animationElapsed = 0.0f;
+        player->facingDirection = direction > 0.0f ? 1 : -1;
     }
+
+    player->position.x += direction * player->moveSpeed * deltaTime;
 
     // プレイヤーがステージ外へ出ないよう、中心座標を移動可能な範囲に制限する。
     player->position.x = Clamp(player->position.x, player->width / 2.0f,
                                worldWidth - player->width / 2.0f);
+}
+
+bool Player_ConsumeActionStarted(Player *player)
+{
+    bool actionStarted = player->actionStarted;
+    player->actionStarted = false;
+    return actionStarted;
+}
+
+bool Player_IsActionActive(const Player *player)
+{
+    return player->actionActive;
+}
+
+int Player_GetFacingDirection(const Player *player)
+{
+    return player->facingDirection;
+}
+
+float Player_GetMoveSpeed(const Player *player)
+{
+    return player->moveSpeed;
 }
 
 void Player_Draw(const Player *player, float groundY)
@@ -131,6 +175,17 @@ void Player_UnloadDefaultAppearance(Player *player)
         player->defaultAppearance = (Texture2D){0};
         player->hasDefaultAppearance = false;
     }
+}
+
+void Player_SetScale(Player *player, float scale)
+{
+    player->width = PLAYER_BASE_WIDTH * scale;
+    player->height = PLAYER_BASE_HEIGHT * scale;
+}
+
+float Player_GetScale(const Player *player)
+{
+    return player->width / PLAYER_BASE_WIDTH;
 }
 
 Rectangle Player_GetBounds(const Player *player, float groundY)

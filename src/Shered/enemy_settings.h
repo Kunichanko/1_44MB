@@ -12,6 +12,7 @@ typedef struct EnemyFollowSettings {
     Color subordinateColor;
     float playerScale;
     float enemyScale;
+    float gridOverlayOpacity;
 } EnemyFollowSettings;
 
 EnemyFollowSettings EnemySettings_Default(void);

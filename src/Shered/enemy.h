@@ -16,6 +16,7 @@ typedef struct Enemy {
     int moveDirection;
     Texture2D appearance;
     bool hasAppearance;
+    bool isActive;
     bool isSubordinate;
     int followOrder;
     float followTargetX;

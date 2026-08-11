@@ -44,3 +44,36 @@ set_target_properties(side_scroller PROPERTIES
 set_target_properties(side_scroller_editor PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
 )
+
+add_executable(rpg_version
+    src/Rpg/main.c
+    src/Rpg/rpg_character.c
+    src/Rpg/rpg_dialogue.c
+    src/Rpg/rpg_layout.c
+    src/Rpg/rpg_stage.c
+    src/Shered/game_font.c
+)
+
+target_compile_options(rpg_version PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(rpg_version PRIVATE raylib)
+target_include_directories(rpg_version PRIVATE src/Rpg src/Shered)
+
+set_target_properties(rpg_version PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
+)
+
+add_executable(rpg_editor
+    src/Rpg/editor_main.c
+    src/Rpg/rpg_character.c
+    src/Rpg/rpg_dialogue.c
+    src/Rpg/rpg_layout.c
+    src/Rpg/rpg_stage.c
+    src/Shered/game_font.c
+)
+
+target_compile_options(rpg_editor PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(rpg_editor PRIVATE raylib imm32)
+target_include_directories(rpg_editor PRIVATE src/Rpg src/Shered)
+set_target_properties(rpg_editor PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
+)

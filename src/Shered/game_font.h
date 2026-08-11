@@ -7,7 +7,9 @@
 #include <stdbool.h>
 
 bool GameFont_Load(const char *filePath);
+bool GameFont_AddText(const char *text);
 void GameFont_Unload(void);
 void GameFont_Draw(const char *text, float x, float y, float fontSize, Color color);
+Vector2 GameFont_MeasureText(const char *text, float fontSize);
 
 #endif

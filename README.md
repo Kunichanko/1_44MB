@@ -15,6 +15,7 @@ raylib を使った 2D 横スクロールゲームの土台です。
 - `assets/Settings`: エディターで保存するゲーム設定
 - `assets/Fonts`: 日本語表示用フォント（`NotoSansJP-VF.ttf`）
 - `build`: 実行ファイルと必要な DLL
+- `experiment`: 実験用スペース（各自ローカル。`.gitignore` 済み。詳細は `experiment/README.md` と `experiment/RULES.md`）
 
 ## 操作
 

@@ -12,7 +12,11 @@ bool EditorUI_DrawInspector(Player *player, const char *appearancePath,
                             bool *requestedSave);
 bool EditorUI_DrawEnemyInspector(EnemyGroup *group, bool selected, bool acceptsInput,
                                  const char *message);
+bool EditorUI_DrawGlobalInspector(float *gridOverlayOpacity, int *selectedTileType,
+                                  bool *isGridEditing, bool selected, bool acceptsInput,
+                                  const char *message);
 bool EditorUI_DrawPlayButton(bool isPlaying);
+void EditorUI_DrawGlobalButton(bool selected);
 void EditorUI_DrawHint(bool playerSelected, bool enemySelected, bool isPlaying);
 void EditorUI_ResetInput(void);
 

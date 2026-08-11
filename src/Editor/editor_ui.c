@@ -2,6 +2,7 @@
 #include "editor_ui.h"
 
 #include "game_font.h"
+#include "stage.h"
 
 #include "raylib.h"
 
@@ -16,6 +17,7 @@ enum {
     NUMERIC_INPUT_SPEED,
     NUMERIC_INPUT_PLAYER_SCALE,
     NUMERIC_INPUT_ENEMY_SCALE,
+    NUMERIC_INPUT_GRID_OPACITY,
 };
 
 static int activeNumericInput = NUMERIC_INPUT_NONE;
@@ -261,6 +263,66 @@ bool EditorUI_DrawEnemyInspector(EnemyGroup *group, bool selected, bool acceptsI
     return isSavePressed;
 }
 
+bool EditorUI_DrawGlobalInspector(float *gridOverlayOpacity, int *selectedTileType,
+                                  bool *isGridEditing, bool selected, bool acceptsInput,
+                                  const char *message)
+{
+    const Rectangle panel = { 620.0f, 24.0f, 316.0f, 404.0f };
+    const Rectangle opacitySlider = { 644.0f, 128.0f, 268.0f, 18.0f };
+    const Rectangle opacityInput = { 832.0f, 96.0f, 80.0f, 25.0f };
+    const Rectangle editButton = { 644.0f, 174.0f, 268.0f, 36.0f };
+    const Rectangle emptyButton = { 644.0f, 250.0f, 76.0f, 38.0f };
+    const Rectangle blockButton = { 740.0f, 250.0f, 76.0f, 38.0f };
+    const Rectangle enemyButton = { 836.0f, 250.0f, 76.0f, 38.0f };
+    const Rectangle saveButton = { 644.0f, 324.0f, 268.0f, 40.0f };
+
+    if (!selected) {
+        return false;
+    }
+    uiAcceptsInput = acceptsInput;
+
+    DrawRectangleRec(panel, Fade(RAYWHITE, 0.95f));
+    DrawRectangleLinesEx(panel, 2.0f, DARKGRAY);
+    DrawText("Global Inspector", 644, 46, 24, DARKGRAY);
+    DrawText("Grid opacity", 644, 94, 18, DARKGRAY);
+    *gridOverlayOpacity = DrawSlider(opacitySlider, *gridOverlayOpacity, 0.05f, 0.95f);
+    *gridOverlayOpacity = DrawNumericInput(opacityInput, *gridOverlayOpacity,
+                                           0.05f, 0.95f, NUMERIC_INPUT_GRID_OPACITY, 2);
+
+    if (uiAcceptsInput && CheckCollisionPointRec(GetMousePosition(), editButton) &&
+        IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        *isGridEditing = !*isGridEditing;
+    }
+    DrawRectangleRec(editButton, *isGridEditing ? MAROON : DARKGREEN);
+    DrawText(*isGridEditing ? "Grid edit: ON" : "Grid edit: OFF", 696, 183, 18, RAYWHITE);
+    if (*isGridEditing) {
+        DrawText("Tile to place", 644, 222, 18, DARKGRAY);
+        DrawRectangleRec(emptyButton, *selectedTileType == STAGE_TILE_EMPTY ? DARKBLUE : GRAY);
+        DrawRectangleRec(blockButton, *selectedTileType == STAGE_TILE_BLOCK ? DARKBLUE : GRAY);
+        DrawRectangleRec(enemyButton, *selectedTileType == STAGE_TILE_ENEMY ? DARKBLUE : GRAY);
+        DrawText("0", 676, 258, 20, RAYWHITE);
+        DrawText("1", 772, 258, 20, RAYWHITE);
+        DrawText("2", 868, 258, 20, RAYWHITE);
+    }
+    if (*isGridEditing && uiAcceptsInput && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        Vector2 mousePosition = GetMousePosition();
+        if (CheckCollisionPointRec(mousePosition, emptyButton)) {
+            *selectedTileType = STAGE_TILE_EMPTY;
+        } else if (CheckCollisionPointRec(mousePosition, blockButton)) {
+            *selectedTileType = STAGE_TILE_BLOCK;
+        } else if (CheckCollisionPointRec(mousePosition, enemyButton)) {
+            *selectedTileType = STAGE_TILE_ENEMY;
+        }
+    }
+
+    bool isSavePressed = uiAcceptsInput && CheckCollisionPointRec(GetMousePosition(), saveButton) &&
+                         IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    DrawRectangleRec(saveButton, isSavePressed ? BLUE : DARKBLUE);
+    GameFont_Draw("設定を保存", 724, 333, 20, RAYWHITE);
+    GameFont_Draw(message, 644, 378, 14, isSavePressed ? DARKBLUE : MAROON);
+    return isSavePressed;
+}
+
 bool EditorUI_DrawPlayButton(bool isPlaying)
 {
     const Rectangle button = { 20.0f, 82.0f, 132.0f, 38.0f };
@@ -268,6 +330,13 @@ bool EditorUI_DrawPlayButton(bool isPlaying)
     GameFont_Draw(isPlaying ? "停止" : "Play", 60, 90, 22, RAYWHITE);
     return CheckCollisionPointRec(GetMousePosition(), button) &&
            IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+}
+
+void EditorUI_DrawGlobalButton(bool selected)
+{
+    const Rectangle button = { 170.0f, 82.0f, 140.0f, 38.0f };
+    DrawRectangleRec(button, selected ? BLUE : DARKBLUE);
+    DrawText("Global", 204, 92, 20, RAYWHITE);
 }
 
 void EditorUI_DrawHint(bool playerSelected, bool enemySelected, bool isPlaying)

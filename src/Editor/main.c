@@ -27,7 +27,12 @@ typedef struct EditorState {
     Camera2D camera;
     bool playerSelected;
     bool enemySelected;
+    bool globalSelected;
     bool isPlaying;
+    bool showGrid;
+    float gridOverlayOpacity;
+    int selectedTileType;
+    bool isGridEditing;
     bool inspectorOpenedThisFrame;
     char appearancePath[APPEARANCE_PATH_SIZE];
     char message[128];
@@ -53,7 +58,7 @@ static void GameCamera_Update(Camera2D *camera, const Player *player, const Stag
 static bool IsEnemyGroupClicked(const EnemyGroup *group, float groundY, Vector2 worldMousePosition)
 {
     for (int index = 0; index < ENEMY_GROUP_MAX_COUNT; index++) {
-        if (CheckCollisionPointRec(worldMousePosition,
+        if (group->enemies[index].isActive && CheckCollisionPointRec(worldMousePosition,
                                    Enemy_GetBounds(&group->enemies[index], groundY))) {
             return true;
         }
@@ -62,16 +67,37 @@ static bool IsEnemyGroupClicked(const EnemyGroup *group, float groundY, Vector2 
     return false;
 }
 
+static void UpdateStageEnemyTiles(Stage *stage, const EnemyGroup *enemyGroup)
+{
+    Stage_ClearEnemyTiles(stage);
+    for (int index = 0; index < ENEMY_GROUP_MAX_COUNT; index++) {
+        if (enemyGroup->enemies[index].isActive) {
+            Stage_SetEnemyTile(stage, enemyGroup->enemies[index].position);
+        }
+    }
+}
+
+static void ApplyStageEnemySpawns(const Stage *stage, EnemyGroup *enemyGroup)
+{
+    Vector2 positions[ENEMY_GROUP_MAX_COUNT];
+    int count = Stage_GetEnemySpawnPositions(stage, positions, ENEMY_GROUP_MAX_COUNT);
+    EnemyGroup_SetSpawnPositions(enemyGroup, positions, count, STAGE_GRID_TILE_SIZE * 1.5f);
+}
+
 static bool IsInsideSelectedInspector(const EditorState *editor, Vector2 screenMousePosition)
 {
     const Rectangle playerInspector = { 620.0f, 24.0f, 316.0f, 360.0f };
     const Rectangle enemyInspector = { 620.0f, 24.0f, 316.0f, 490.0f };
+    const Rectangle globalInspector = { 620.0f, 24.0f, 316.0f, 404.0f };
 
     if (editor->playerSelected) {
         return CheckCollisionPointRec(screenMousePosition, playerInspector);
     }
     if (editor->enemySelected) {
         return CheckCollisionPointRec(screenMousePosition, enemyInspector);
+    }
+    if (editor->globalSelected) {
+        return CheckCollisionPointRec(screenMousePosition, globalInspector);
     }
     return false;
 }
@@ -80,7 +106,9 @@ static EditorState Editor_Create(void)
 {
     EditorState editor = {0};
     editor.stage = Stage_Create();
-    editor.player = Player_Create((Vector2){ 280.0f, editor.stage.groundY });
+    Stage_Load(TextFormat("%s../assets/Settings/stage_grid.cfg", GetApplicationDirectory()),
+               &editor.stage);
+    editor.player = Player_Create(Stage_GetCellCenter(7, 7));
     Player_LoadDefaultAppearance(&editor.player,
                                  TextFormat("%s../assets/Sprite/ZIPPER.png",
                                             GetApplicationDirectory()));
@@ -94,13 +122,16 @@ static EditorState Editor_Create(void)
                                  settings.interpolationSpeed, settings.subordinateColor);
     Player_SetScale(&editor.player, settings.playerScale);
     EnemyGroup_SetScale(&editor.enemyGroup, settings.enemyScale);
+    editor.gridOverlayOpacity = settings.gridOverlayOpacity;
+    ApplyStageEnemySpawns(&editor.stage, &editor.enemyGroup);
+    UpdateStageEnemyTiles(&editor.stage, &editor.enemyGroup);
     editor.camera = CreateCamera();
     snprintf(editor.appearancePath, sizeof(editor.appearancePath), "未指定");
     snprintf(editor.message, sizeof(editor.message), "主人公をクリックして選択");
     return editor;
 }
 
-static bool Editor_SaveEnemySettings(EditorState *editor)
+static bool Editor_SaveSettings(EditorState *editor)
 {
     EnemyFollowSettings settings = {
         .spacing = EnemyGroup_GetFollowSpacing(&editor->enemyGroup),
@@ -108,10 +139,15 @@ static bool Editor_SaveEnemySettings(EditorState *editor)
         .subordinateColor = EnemyGroup_GetSubordinateColor(&editor->enemyGroup),
         .playerScale = Player_GetScale(&editor->player),
         .enemyScale = EnemyGroup_GetScale(&editor->enemyGroup),
+        .gridOverlayOpacity = editor->gridOverlayOpacity,
     };
 
-    if (EnemySettings_Save(TextFormat("%s../assets/Settings/enemy_settings.cfg",
-                                      GetApplicationDirectory()), &settings)) {
+    bool settingsSaved = EnemySettings_Save(TextFormat("%s../assets/Settings/enemy_settings.cfg",
+                                                       GetApplicationDirectory()), &settings);
+    bool stageSaved = Stage_Save(&editor->stage,
+                                 TextFormat("%s../assets/Settings/stage_grid.cfg",
+                                            GetApplicationDirectory()));
+    if (settingsSaved && stageSaved) {
         snprintf(editor->message, sizeof(editor->message), "敵設定を保存しました");
         return true;
     } else {
@@ -136,13 +172,36 @@ static void Editor_Update(EditorState *editor)
 {
     float deltaTime = GetFrameTime();
 
+    if (IsKeyPressed(KEY_Q)) {
+        editor->showGrid = !editor->showGrid;
+    }
+
     if (!editor->isPlaying && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         Vector2 screenMousePosition = GetMousePosition();
-        if (editor->playerSelected || editor->enemySelected) {
+        const Rectangle globalButton = { 170.0f, 82.0f, 140.0f, 38.0f };
+        if (CheckCollisionPointRec(screenMousePosition, globalButton)) {
+            EditorUI_ResetInput();
+            editor->playerSelected = false;
+            editor->enemySelected = false;
+            editor->globalSelected = !editor->globalSelected;
+            editor->isGridEditing = false;
+            editor->inspectorOpenedThisFrame = true;
+        } else if (editor->globalSelected && editor->isGridEditing &&
+                   !IsInsideSelectedInspector(editor, screenMousePosition)) {
+            Vector2 worldMousePosition = GetScreenToWorld2D(screenMousePosition, editor->camera);
+            if (Stage_SetTileAtWorldPosition(&editor->stage, worldMousePosition,
+                                             editor->selectedTileType)) {
+                ApplyStageEnemySpawns(&editor->stage, &editor->enemyGroup);
+                UpdateStageEnemyTiles(&editor->stage, &editor->enemyGroup);
+                snprintf(editor->message, sizeof(editor->message), "Grid tile updated");
+            }
+        } else if (editor->playerSelected || editor->enemySelected || editor->globalSelected) {
             // インスペクターの外側を押した時は、UI操作へ渡さず選択を閉じる。
             if (!IsInsideSelectedInspector(editor, screenMousePosition)) {
                 editor->playerSelected = false;
                 editor->enemySelected = false;
+                editor->globalSelected = false;
+                editor->isGridEditing = false;
                 EditorUI_ResetInput();
             }
         } else {
@@ -152,12 +211,16 @@ static void Editor_Update(EditorState *editor)
                                        Player_GetBounds(&editor->player, editor->stage.groundY))) {
                 EditorUI_ResetInput();
                 editor->playerSelected = true;
+                editor->globalSelected = false;
+                editor->isGridEditing = false;
                 editor->inspectorOpenedThisFrame = true;
                 snprintf(editor->message, sizeof(editor->message), "主人公を選択しました");
             } else if (IsEnemyGroupClicked(&editor->enemyGroup, editor->stage.groundY,
                                            worldMousePosition)) {
                 EditorUI_ResetInput();
                 editor->enemySelected = true;
+                editor->globalSelected = false;
+                editor->isGridEditing = false;
                 editor->inspectorOpenedThisFrame = true;
                 snprintf(editor->message, sizeof(editor->message), "敵を選択しました");
             }
@@ -179,6 +242,7 @@ static void Editor_Update(EditorState *editor)
                           Player_GetScale(&editor->player),
                           Player_GetMoveSpeed(&editor->player));
     }
+    UpdateStageEnemyTiles(&editor->stage, &editor->enemyGroup);
     GameCamera_Update(&editor->camera, &editor->player, &editor->stage);
 }
 
@@ -195,9 +259,14 @@ static bool Editor_Draw(EditorState *editor)
     }
     if (editor->enemySelected) {
         for (int index = 0; index < ENEMY_GROUP_MAX_COUNT; index++) {
-            DrawRectangleLinesEx(Enemy_GetBounds(&editor->enemyGroup.enemies[index],
-                                                 editor->stage.groundY), 3.0f, PURPLE);
+            if (editor->enemyGroup.enemies[index].isActive) {
+                DrawRectangleLinesEx(Enemy_GetBounds(&editor->enemyGroup.enemies[index],
+                                                     editor->stage.groundY), 3.0f, PURPLE);
+            }
         }
+    }
+    if (editor->showGrid) {
+        Stage_DrawGridOverlay(&editor->stage, editor->gridOverlayOpacity);
     }
     EndMode2D();
 
@@ -207,18 +276,27 @@ static bool Editor_Draw(EditorState *editor)
     bool requestedFile = EditorUI_DrawInspector(&editor->player, editor->appearancePath,
                                                 editor->playerSelected, inspectorAcceptsInput,
                                                 editor->message, &requestedPlayerSave);
-    bool requestedSave = EditorUI_DrawEnemyInspector(&editor->enemyGroup, editor->enemySelected,
-                                                      inspectorAcceptsInput, editor->message);
+    bool requestedEnemySave = EditorUI_DrawEnemyInspector(&editor->enemyGroup,
+                                                           editor->enemySelected, inspectorAcceptsInput,
+                                                      editor->message);
+    bool requestedGlobalSave = EditorUI_DrawGlobalInspector(&editor->gridOverlayOpacity,
+                                                             &editor->selectedTileType,
+                                                             &editor->isGridEditing,
+                                                             editor->globalSelected,
+                                                             inspectorAcceptsInput, editor->message);
     bool requestedPlayToggle = EditorUI_DrawPlayButton(editor->isPlaying);
+    EditorUI_DrawGlobalButton(editor->globalSelected);
     EndDrawing();
 
     if (requestedFile) {
         Editor_ApplySelectedPng(editor);
     }
-    if (requestedPlayerSave || requestedSave) {
-        if (Editor_SaveEnemySettings(editor)) {
+    if (requestedPlayerSave || requestedEnemySave || requestedGlobalSave) {
+        if (Editor_SaveSettings(editor)) {
             editor->playerSelected = false;
             editor->enemySelected = false;
+            editor->globalSelected = false;
+            editor->isGridEditing = false;
         }
         EditorUI_ResetInput();
     }

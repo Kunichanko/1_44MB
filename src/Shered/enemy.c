@@ -44,6 +44,7 @@ Enemy Enemy_Create(float startX, float groundY, float patrolLeft, float patrolRi
         .moveDirection = 1,
         .appearance = {0},
         .hasAppearance = false,
+        .isActive = true,
         .isSubordinate = false,
         .followOrder = 0,
         .followTargetX = startX,
@@ -70,6 +71,9 @@ bool Enemy_TryBecomeSubordinate(Enemy *enemy, Vector2 leaderPosition, int leader
                                 Vector2 actionOriginPosition, float leaderScale,
                                 float actionRange, int followOrder)
 {
+    if (!enemy->isActive) {
+        return false;
+    }
     float distanceX = enemy->position.x - actionOriginPosition.x;
     if (distanceX < 0.0f) {
         distanceX = -distanceX;
@@ -89,6 +93,9 @@ bool Enemy_TryBecomeSubordinate(Enemy *enemy, Vector2 leaderPosition, int leader
 void Enemy_Update(Enemy *enemy, float deltaTime, Vector2 leaderPosition, int leaderDirection,
                   float leaderScale, float maximumMoveSpeed)
 {
+    if (!enemy->isActive) {
+        return;
+    }
     if (enemy->isSubordinate) {
         // 従属順に応じた間隔で目標位置を更新し、後ろの敵ほど少し遅れて追従させる。
         enemy->followTargetX = leaderPosition.x -
@@ -150,6 +157,9 @@ Rectangle Enemy_GetBounds(const Enemy *enemy, float groundY)
 
 void Enemy_Draw(const Enemy *enemy, float groundY)
 {
+    if (!enemy->isActive) {
+        return;
+    }
     Rectangle destination = Enemy_GetBounds(enemy, groundY);
 
     if (enemy->hasAppearance) {

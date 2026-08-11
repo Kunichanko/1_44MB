@@ -12,6 +12,7 @@ EnemyFollowSettings EnemySettings_Default(void)
         .subordinateColor = LIME,
         .playerScale = 1.5f,
         .enemyScale = 1.5f,
+        .gridOverlayOpacity = 0.55f,
     };
 }
 
@@ -34,7 +35,8 @@ bool EnemySettings_Load(const char *filePath, EnemyFollowSettings *settings)
         if (sscanf(line, "spacing=%f", &settings->spacing) == 1 ||
             sscanf(line, "interpolation_speed=%f", &settings->interpolationSpeed) == 1 ||
             sscanf(line, "player_scale=%f", &settings->playerScale) == 1 ||
-            sscanf(line, "enemy_scale=%f", &settings->enemyScale) == 1) {
+            sscanf(line, "enemy_scale=%f", &settings->enemyScale) == 1 ||
+            sscanf(line, "grid_overlay_opacity=%f", &settings->gridOverlayOpacity) == 1) {
             loadedAnyValue = true;
         } else if (sscanf(line, "color=%d,%d,%d,%d", &red, &green, &blue, &alpha) == 4) {
             settings->subordinateColor = (Color){ (unsigned char)red, (unsigned char)green,
@@ -54,11 +56,11 @@ bool EnemySettings_Save(const char *filePath, const EnemyFollowSettings *setting
     }
 
     fprintf(file, "spacing=%.2f\ninterpolation_speed=%.2f\ncolor=%u,%u,%u,%u\n"
-                  "player_scale=%.2f\nenemy_scale=%.2f\n",
+                  "player_scale=%.2f\nenemy_scale=%.2f\ngrid_overlay_opacity=%.2f\n",
             settings->spacing, settings->interpolationSpeed,
             settings->subordinateColor.r, settings->subordinateColor.g,
             settings->subordinateColor.b, settings->subordinateColor.a,
-            settings->playerScale, settings->enemyScale);
+            settings->playerScale, settings->enemyScale, settings->gridOverlayOpacity);
     fclose(file);
     return true;
 }

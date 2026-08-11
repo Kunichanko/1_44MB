@@ -83,9 +83,9 @@ EnemyGroup EnemyGroup_Create(float groundY)
 {
     return (EnemyGroup){
         .enemies = {
-            Enemy_Create(700.0f, groundY, 560.0f, 840.0f),
-            Enemy_Create(1000.0f, groundY, 880.0f, 1120.0f),
-            Enemy_Create(1300.0f, groundY, 1180.0f, 1420.0f),
+            Enemy_Create(720.0f, groundY, 528.0f, 816.0f),
+            Enemy_Create(1104.0f, groundY, 912.0f, 1200.0f),
+            Enemy_Create(1488.0f, groundY, 1296.0f, 1584.0f),
         },
         .followSpacing = 20.0f,
         .followInterpolationSpeed = 6.0f,
@@ -95,8 +95,13 @@ EnemyGroup EnemyGroup_Create(float groundY)
 
 void EnemyGroup_LoadAppearance(EnemyGroup *group, const char *filePath)
 {
-    for (int index = 0; index < ENEMY_GROUP_MAX_COUNT; index++) {
-        Enemy_LoadAppearance(&group->enemies[index], filePath);
+    // 全ての敵が同一PNGを使うため、GPUテクスチャは一度だけ読み込み、各敵で共有する。
+    if (!Enemy_LoadAppearance(&group->enemies[0], filePath)) {
+        return;
+    }
+    for (int index = 1; index < ENEMY_GROUP_MAX_COUNT; index++) {
+        group->enemies[index].appearance = group->enemies[0].appearance;
+        group->enemies[index].hasAppearance = true;
     }
 }
 
@@ -110,7 +115,7 @@ bool EnemyGroup_TrySubordinateNearest(EnemyGroup *group, Vector2 leaderPosition,
     for (int index = 0; index < ENEMY_GROUP_MAX_COUNT; index++) {
         Enemy *enemy = &group->enemies[index];
         float distance = GetHorizontalDistance(enemy->position.x, leaderPosition.x);
-        if (!enemy->isSubordinate && distance <= nearestDistance) {
+        if (enemy->isActive && !enemy->isSubordinate && distance <= nearestDistance) {
             nearestIndex = index;
             nearestDistance = distance;
         }
@@ -127,6 +132,30 @@ bool EnemyGroup_TrySubordinateNearest(EnemyGroup *group, Vector2 leaderPosition,
     return Enemy_TryBecomeSubordinate(&group->enemies[nearestIndex], targetLeaderPosition,
                                       leaderDirection, leaderPosition, leaderScale,
                                       actionRange, followOrder);
+}
+
+void EnemyGroup_SetSpawnPositions(EnemyGroup *group, const Vector2 *positions, int count,
+                                  float patrolHalfWidth)
+{
+    if (count < 0) {
+        count = 0;
+    } else if (count > ENEMY_GROUP_MAX_COUNT) {
+        count = ENEMY_GROUP_MAX_COUNT;
+    }
+
+    for (int index = 0; index < ENEMY_GROUP_MAX_COUNT; index++) {
+        Enemy *enemy = &group->enemies[index];
+        enemy->isActive = index < count;
+        enemy->isSubordinate = false;
+        enemy->followOrder = 0;
+        if (index < count) {
+            enemy->position = positions[index];
+            enemy->patrolLeft = positions[index].x - patrolHalfWidth;
+            enemy->patrolRight = positions[index].x + patrolHalfWidth;
+            enemy->moveDirection = 1;
+            enemy->followTargetX = positions[index].x;
+        }
+    }
 }
 
 void EnemyGroup_Update(EnemyGroup *group, float deltaTime, Vector2 leaderPosition,
@@ -186,6 +215,17 @@ int EnemyGroup_GetSubordinateCount(const EnemyGroup *group)
     return count;
 }
 
+int EnemyGroup_GetActiveCount(const EnemyGroup *group)
+{
+    int count = 0;
+    for (int index = 0; index < ENEMY_GROUP_MAX_COUNT; index++) {
+        if (group->enemies[index].isActive) {
+            count++;
+        }
+    }
+    return count;
+}
+
 void EnemyGroup_SetFollowSettings(EnemyGroup *group, float spacing,
                                   float interpolationSpeed, Color subordinateColor)
 {
@@ -228,7 +268,9 @@ float EnemyGroup_GetScale(const EnemyGroup *group)
 
 void EnemyGroup_UnloadAppearance(EnemyGroup *group)
 {
-    for (int index = 0; index < ENEMY_GROUP_MAX_COUNT; index++) {
-        Enemy_UnloadAppearance(&group->enemies[index]);
+    Enemy_UnloadAppearance(&group->enemies[0]);
+    for (int index = 1; index < ENEMY_GROUP_MAX_COUNT; index++) {
+        group->enemies[index].appearance = (Texture2D){0};
+        group->enemies[index].hasAppearance = false;
     }
 }

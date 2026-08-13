@@ -1,0 +1,7 @@
+# 実験用スペース。各自のローカル環境なのでコミットしない（他者とコンフリクトさせないため）
+/experiment/
+
+# CMake の生成物
+/cmake-build*/
+/CMakeFiles/
+CMakeCache.txt

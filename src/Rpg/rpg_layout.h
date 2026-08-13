@@ -8,6 +8,9 @@ typedef struct RpgLayout {
     Vector2 playerPosition;
     Vector2 npcPosition;
     float playerMoveSpeed;
+    float playerScale;
+    float npcScale;
+    bool stage3IntroEnabled;
 } RpgLayout;
 
 RpgLayout RpgLayout_Default(void);

@@ -6,6 +6,7 @@
 RpgCharacter RpgCharacter_Create(Vector2 position, Color shirtColor, Color hairColor)
 {
     return (RpgCharacter){ .position = position, .isGrounded = true, .moveSpeed = 180.0f,
+                           .scale = 1.0f,
                            .shirtColor = shirtColor, .hairColor = hairColor };
 }
 
@@ -45,12 +46,13 @@ Rectangle RpgCharacter_GetFootBounds(const RpgCharacter *character)
 void RpgCharacter_Draw(const RpgCharacter *character, const char *name)
 {
     Vector2 position = character->position;
-    DrawEllipse((int)position.x, (int)position.y + 4, 19, 5, Fade(BLACK, 0.18f));
-    DrawRectangle((int)position.x - 12, (int)position.y - 46, 24, 26, character->shirtColor);
-    DrawRectangle((int)position.x - 11, (int)position.y - 20, 9, 20, DARKBLUE);
-    DrawRectangle((int)position.x + 2, (int)position.y - 20, 9, 20, DARKBLUE);
-    DrawCircle((int)position.x, (int)position.y - 58, 13, (Color){ 255, 220, 185, 255 });
-    DrawCircleSector((Vector2){ position.x, position.y - 58.0f }, 14.0f, 190.0f, 350.0f, 16,
+    float scale = character->scale;
+    DrawEllipse((int)position.x, (int)position.y + (int)(4 * scale), (int)(19 * scale), (int)(5 * scale), Fade(BLACK, 0.18f));
+    DrawRectangle((int)(position.x - 12 * scale), (int)(position.y - 46 * scale), (int)(24 * scale), (int)(26 * scale), character->shirtColor);
+    DrawRectangle((int)(position.x - 11 * scale), (int)(position.y - 20 * scale), (int)(9 * scale), (int)(20 * scale), DARKBLUE);
+    DrawRectangle((int)(position.x + 2 * scale), (int)(position.y - 20 * scale), (int)(9 * scale), (int)(20 * scale), DARKBLUE);
+    DrawCircle((int)position.x, (int)(position.y - 58 * scale), 13.0f * scale, (Color){ 255, 220, 185, 255 });
+    DrawCircleSector((Vector2){ position.x, position.y - 58.0f * scale }, 14.0f * scale, 190.0f, 350.0f, 16,
                      character->hairColor);
     DrawText(name, (int)position.x - MeasureText(name, 16) / 2, (int)position.y - 90, 16, DARKGRAY);
 }

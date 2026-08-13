@@ -1,0 +1,67 @@
+// 依存する自プロジェクト内ファイル: rpg_stage3_event.h
+#include "rpg_stage3_event.h"
+
+#include <stdio.h>
+#include <string.h>
+
+RpgStage3Event RpgStage3Event_Default(void)
+{
+    RpgStage3Event event = { .enabled = true, .zipperScale = 1.0f };
+    event.dialogue.lineCount = 1;
+    strcpy(event.dialogue.speakers[0], "Zipper");
+    strcpy(event.dialogue.lines[0], "ようこそ、最後のステージへ。");
+    return event;
+}
+
+bool RpgStage3Event_Load(const char *filePath, RpgStage3Event *event)
+{
+    FILE *file = fopen(filePath, "r");
+    if (file == NULL) return false;
+    int enabled = 1;
+    int lineCount = 0;
+    int readCount = fscanf(file, "%d %f %d\n", &enabled, &event->zipperScale, &lineCount);
+    if (readCount == 2) {
+        event->enabled = enabled != 0;
+        if (fgets(event->dialogue.speakers[0], RPG_DIALOGUE_SPEAKER_LENGTH, file) != NULL &&
+            fgets(event->dialogue.lines[0], RPG_DIALOGUE_LINE_LENGTH, file) != NULL) {
+            event->dialogue.lineCount = 1;
+            event->dialogue.speakers[0][strcspn(event->dialogue.speakers[0], "\r\n")] = '\0';
+            event->dialogue.lines[0][strcspn(event->dialogue.lines[0], "\r\n")] = '\0';
+            fclose(file);
+            return true;
+        }
+    }
+    if (readCount == 3 && lineCount > 0 && lineCount <= RPG_DIALOGUE_MAX_LINES) {
+        event->enabled = enabled != 0;
+        event->dialogue.lineCount = 0;
+        for (int index = 0; index < lineCount; index++) {
+            char line[RPG_DIALOGUE_SPEAKER_LENGTH + RPG_DIALOGUE_LINE_LENGTH + 2];
+            if (fgets(line, sizeof(line), file) == NULL) break;
+            char *separator = strchr(line, '\t');
+            if (separator == NULL) continue;
+            *separator = '\0';
+            separator++;
+            line[strcspn(line, "\r\n")] = '\0';
+            separator[strcspn(separator, "\r\n")] = '\0';
+            strcpy(event->dialogue.speakers[event->dialogue.lineCount], line);
+            strcpy(event->dialogue.lines[event->dialogue.lineCount], separator);
+            event->dialogue.lineCount++;
+        }
+        fclose(file);
+        return event->dialogue.lineCount > 0;
+    }
+    fclose(file);
+    return false;
+}
+
+bool RpgStage3Event_Save(const char *filePath, const RpgStage3Event *event)
+{
+    FILE *file = fopen(filePath, "w");
+    if (file == NULL) return false;
+    fprintf(file, "%d %.2f %d\n", event->enabled ? 1 : 0, event->zipperScale,
+            event->dialogue.lineCount);
+    for (int index = 0; index < event->dialogue.lineCount; index++) {
+        fprintf(file, "%s\t%s\n", event->dialogue.speakers[index], event->dialogue.lines[index]);
+    }
+    return fclose(file) == 0;
+}

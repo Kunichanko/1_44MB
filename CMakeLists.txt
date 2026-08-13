@@ -50,6 +50,8 @@ add_executable(rpg_version
     src/Rpg/rpg_character.c
     src/Rpg/rpg_dialogue.c
     src/Rpg/rpg_layout.c
+    src/Rpg/rpg_inspect.c
+    src/Rpg/rpg_stage3_event.c
     src/Rpg/rpg_stage.c
     src/Shered/game_font.c
 )
@@ -67,6 +69,8 @@ add_executable(rpg_editor
     src/Rpg/rpg_character.c
     src/Rpg/rpg_dialogue.c
     src/Rpg/rpg_layout.c
+    src/Rpg/rpg_inspect.c
+    src/Rpg/rpg_stage3_event.c
     src/Rpg/rpg_stage.c
     src/Shered/game_font.c
 )

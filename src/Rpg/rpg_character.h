@@ -9,6 +9,7 @@ typedef struct RpgCharacter {
     float verticalSpeed;
     bool isGrounded;
     float moveSpeed;
+    float scale;
     Color shirtColor;
     Color hairColor;
 } RpgCharacter;

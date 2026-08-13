@@ -6,11 +6,13 @@
 
 enum {
     RPG_DIALOGUE_MAX_LINES = 64,
-    RPG_DIALOGUE_LINE_LENGTH = 192
+    RPG_DIALOGUE_LINE_LENGTH = 192,
+    RPG_DIALOGUE_SPEAKER_LENGTH = 64
 };
 
 typedef struct RpgDialogue {
     int lineCount;
+    char speakers[RPG_DIALOGUE_MAX_LINES][RPG_DIALOGUE_SPEAKER_LENGTH];
     char lines[RPG_DIALOGUE_MAX_LINES][RPG_DIALOGUE_LINE_LENGTH];
 } RpgDialogue;
 

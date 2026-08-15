@@ -13,30 +13,30 @@
 #include "rpg_inspect.h"
 #include "rpg_stage3_event.h"
 #include "rpg_stage.h"
+#include "rpg_zipper.h"
 
 enum { RPG_SCREEN_WIDTH = 960, RPG_SCREEN_HEIGHT = 540 };
 
-static float zipperX = RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE * 2.0f +
-                       RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE / 2.0f;
 static const char *npcTalkPrompt = u8"[E] \u8a71\u3057\u304b\u3051\u308b";
 static const char *zipperInspectPrompt = u8"[I] \u8abf\u3079\u308b";
 
-static void DrawZipper(Texture2D zipperTexture, float scale)
+static void DrawZipper(Texture2D zipperTexture, const RpgCharacter *zipper)
 {
     // ZIPPER.png は32x40のフレームが並ぶため、停止状態として先頭フレームだけを描画する。
     Rectangle source = { 0.0f, 0.0f, 32.0f, 40.0f };
-    Rectangle destination = { zipperX - 24.0f * scale, 380.0f - 60.0f * scale,
-                              48.0f * scale, 60.0f * scale };
+    Rectangle destination = { zipper->position.x - 24.0f * zipper->scale,
+                              380.0f - 60.0f * zipper->scale,
+                              48.0f * zipper->scale, 60.0f * zipper->scale };
     DrawTexturePro(zipperTexture, source, destination, (Vector2){ 0.0f, 0.0f }, 0.0f, WHITE);
 }
 
 static void DrawMoveSprite(Texture2D zipperTexture, const RpgCharacter *player, const RpgCharacter *npc,
-                           const RpgStage3Event *event, RpgInspectMoveTarget target, float x)
+                           const RpgZipper *zipper, RpgInspectMoveTarget target, float x)
 {
     if (target == RPG_INSPECT_MOVE_ZIPPER) {
         Rectangle source = { 0, 0, 32, 40 };
-        Rectangle destination = { x - 24.0f * event->zipperScale, 340.0f - 60.0f * event->zipperScale,
-                                  48.0f * event->zipperScale, 60.0f * event->zipperScale };
+        Rectangle destination = { x - 24.0f * zipper->character.scale, 340.0f - 60.0f * zipper->character.scale,
+                                  48.0f * zipper->character.scale, 60.0f * zipper->character.scale };
         DrawTexturePro(zipperTexture, source, destination, (Vector2){0}, 0, Fade(WHITE, 0.75f));
     } else {
         RpgCharacter sprite = target == RPG_INSPECT_MOVE_PLAYER ? *player : *npc;
@@ -61,14 +61,25 @@ static void UpdateRpgCamera(Camera2D *camera, float playerX, bool followsPlayer)
     camera->target.y = RPG_SCREEN_HEIGHT / 2.0f;
 }
 
+static void UpdateZipperFollow(RpgZipper *zipper, const RpgCharacter *player, float deltaTime)
+{
+    // 調べるFunction列が完了した後だけ、Zipperを主人公の少し後ろへ滑らかに追従させる。
+    float targetX = player->position.x - 48.0f * player->scale;
+    float distance = targetX - zipper->character.position.x;
+    float maximumStep = player->moveSpeed * deltaTime;
+    zipper->character.position.x += Clamp(distance, -maximumStep, maximumStep);
+}
+
 static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
                          const RpgStage *stage, Camera2D camera, bool followsPlayer,
                          int currentMap, bool canTalk, const RpgDialogue *dialogue,
-                         int dialogueIndex, int stage3IntroIndex, const RpgStage3Event *stage3Event,
+                         int dialogueIndex, int stage3IntroIndex, const RpgStage3Event *stage3Event, const RpgZipper *zipper,
                          Texture2D zipperTexture, const RpgInspect *inspect, const RpgInspect *zipperInspect,
                          int inspectTarget, int inspectFunctionIndex, int inspectLineIndex,
-                         bool isMoveSpriteVisible, float moveSpriteX, RpgInspectMoveTarget moveSpriteTarget)
+                         bool isMoveSpriteVisible, float moveSpriteX, RpgInspectMoveTarget moveSpriteTarget,
+                         bool npcInspectCompleted, bool zipperInspectCompleted)
 {
+    (void)npcInspectCompleted;
     BeginDrawing();
     ClearBackground((Color){ 135, 206, 235, 255 });
     DrawCircle(780, 95, 42, Fade(YELLOW, 0.9f));
@@ -78,8 +89,8 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
     DrawRectangle(0, 400, RPG_STAGE_WORLD_WIDTH, 140, (Color){ 103, 161, 70, 255 });
     RpgStage_Draw(stage, false);
     DrawRectangle(0, 400, RPG_STAGE_WORLD_WIDTH, 14, DARKGREEN);
-    DrawZipper(zipperTexture, stage3Event->zipperScale);
-    if (isMoveSpriteVisible) DrawMoveSprite(zipperTexture, player, npc, stage3Event, moveSpriteTarget, moveSpriteX);
+    DrawZipper(zipperTexture, &zipper->character);
+    if (isMoveSpriteVisible) DrawMoveSprite(zipperTexture, player, npc, zipper, moveSpriteTarget, moveSpriteX);
     RpgCharacter_Draw(npc, "NPC");
     RpgCharacter_Draw(player, "Hero");
     if (canTalk && dialogueIndex < 0) {
@@ -92,8 +103,9 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
                       Fade(RAYWHITE, 0.9f));
         GameFont_Draw(npcTalkPrompt, npc->position.x - 54, npc->position.y - 112, 16, MAROON);
     }
-    if (fabsf(player->position.x - zipperX) <= 72.0f && inspectTarget < 0 && zipperInspect->enabled) {
-        GameFont_Draw(zipperInspectPrompt, zipperX - 44.0f, 270.0f, 16, MAROON);
+    if (fabsf(player->position.x - zipper->character.position.x) <= 72.0f && inspectTarget < 0 &&
+        zipperInspect->enabled && !zipperInspectCompleted) {
+        GameFont_Draw(zipperInspectPrompt, zipper->character.position.x - 44.0f, 270.0f, 16, MAROON);
     }
     EndMode2D();
     DrawText("RPG Version  -  Move: A/D or Arrow keys  Jump: W / Space", 24, 22, 22, DARKGRAY);
@@ -148,6 +160,8 @@ int main(void)
     RpgStage3Event stage3Event = RpgStage3Event_Default();
     RpgStage3Event_Load(TextFormat("%s../assets/Settings/rpg_stage3_event.cfg",
                                    GetApplicationDirectory()), &stage3Event);
+    RpgZipper zipper = RpgZipper_Default();
+    RpgZipper_Load(TextFormat("%s../assets/Settings/rpg_zipper.cfg", GetApplicationDirectory()), &zipper);
     for (int lineIndex = 0; lineIndex < stage3Event.dialogue.lineCount; lineIndex++) {
         GameFont_AddText(stage3Event.dialogue.speakers[lineIndex]);
         GameFont_AddText(stage3Event.dialogue.lines[lineIndex]);
@@ -160,12 +174,11 @@ int main(void)
             GameFont_AddText(inspect.functions[functionIndex].dialogue.lines[lineIndex]);
         }
     }
-    RpgInspect zipperInspect = RpgInspect_Default("Zipper", "Nothing unusual here.");
-    RpgInspect_Load(TextFormat("%s../assets/Settings/rpg_zipper_inspect.cfg", GetApplicationDirectory()), &zipperInspect);
-    for (int functionIndex = 0; functionIndex < zipperInspect.functionCount; functionIndex++) {
-        for (int lineIndex = 0; lineIndex < zipperInspect.functions[functionIndex].dialogue.lineCount; lineIndex++) {
-            GameFont_AddText(zipperInspect.functions[functionIndex].dialogue.speakers[lineIndex]);
-            GameFont_AddText(zipperInspect.functions[functionIndex].dialogue.lines[lineIndex]);
+    RpgInspect_Load(TextFormat("%s../assets/Settings/rpg_zipper_inspect.cfg", GetApplicationDirectory()), &zipper.inspect);
+    for (int functionIndex = 0; functionIndex < zipper.inspect.functionCount; functionIndex++) {
+        for (int lineIndex = 0; lineIndex < zipper.inspect.functions[functionIndex].dialogue.lineCount; lineIndex++) {
+            GameFont_AddText(zipper.inspect.functions[functionIndex].dialogue.speakers[lineIndex]);
+            GameFont_AddText(zipper.inspect.functions[functionIndex].dialogue.lines[lineIndex]);
         }
     }
     RpgCharacter player = RpgCharacter_Create(layout.playerPosition, BLUE, BROWN);
@@ -184,6 +197,9 @@ int main(void)
     float inspectMoveElapsed = 0.0f;
     float inspectMoveStartX = 0.0f;
     bool stage3IntroShown = false;
+    bool zipperFollowsPlayer = false;
+    bool npcInspectCompleted = false;
+    bool zipperInspectCompleted = false;
     int previousMap = (int)(player.position.x / (RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE)) + 1;
     bool cameraFollowsPlayer = false;
     Camera2D camera = { .offset = { RPG_SCREEN_WIDTH / 2.0f, RPG_SCREEN_HEIGHT / 2.0f }, .zoom = 1.0f };
@@ -198,27 +214,33 @@ int main(void)
                 player.position = previousPosition;
             }
         }
+        if (zipperFollowsPlayer && inspectTarget < 0 && dialogueIndex < 0 && stage3IntroIndex < 0)
+            UpdateZipperFollow(&zipper, &player, GetFrameTime());
         bool canTalk = RpgCharacter_IsNear(&player, &npc, 72.0f);
         // 調べる機能列のMoveは、対象を指定時間で補間して完了後に次の機能へ進める。
         if (inspectTarget >= 0) {
-            RpgInspect *activeInspect = inspectTarget == 2 ? &zipperInspect : &inspect;
+            RpgInspect *activeInspect = inspectTarget == 2 ? &zipper.inspect : &inspect;
             if (activeInspect->functions[inspectFunctionIndex].type == RPG_INSPECT_MOVE) {
                 RpgInspectMove *move = &activeInspect->functions[inspectFunctionIndex].move;
                 if (!isInspectMoveRunning) {
                     isInspectMoveRunning = true;
                     inspectMoveElapsed = 0.0f;
                     inspectMoveStartX = move->target == RPG_INSPECT_MOVE_PLAYER ? player.position.x :
-                                        move->target == RPG_INSPECT_MOVE_NPC ? npc.position.x : zipperX;
+                                        move->target == RPG_INSPECT_MOVE_NPC ? npc.position.x : zipper.character.position.x;
                 }
                 inspectMoveElapsed += GetFrameTime();
                 float progress = Clamp(inspectMoveElapsed / move->duration, 0.0f, 1.0f);
                 float *targetX = move->target == RPG_INSPECT_MOVE_PLAYER ? &player.position.x :
-                                 move->target == RPG_INSPECT_MOVE_NPC ? &npc.position.x : &zipperX;
+                                 move->target == RPG_INSPECT_MOVE_NPC ? &npc.position.x : &zipper.character.position.x;
                 *targetX = inspectMoveStartX + (move->destinationX - inspectMoveStartX) * progress;
                 if (progress >= 1.0f) {
                     isInspectMoveRunning = false;
                     inspectFunctionIndex++;
                     if (inspectFunctionIndex >= activeInspect->functionCount) {
+                        if (inspectTarget == 2) {
+                            zipperFollowsPlayer = true;
+                            zipperInspectCompleted = true;
+                        } else npcInspectCompleted = true;
                         inspectTarget = -1;
                         inspectFunctionIndex = -1;
                         inspectLineIndex = -1;
@@ -234,13 +256,17 @@ int main(void)
         previousMap = currentMap;
         if (IsKeyPressed(KEY_E)) {
             if (inspectTarget >= 0 && !isInspectMoveRunning) {
-                const RpgInspect *activeInspect = inspectTarget == 2 ? &zipperInspect : &inspect;
+                const RpgInspect *activeInspect = inspectTarget == 2 ? &zipper.inspect : &inspect;
                 if (activeInspect->functions[inspectFunctionIndex].type == RPG_INSPECT_DIALOGUE) {
                     inspectLineIndex++;
                     if (inspectLineIndex >= activeInspect->functions[inspectFunctionIndex].dialogue.lineCount) {
                         inspectFunctionIndex++;
                         inspectLineIndex = 0;
                         if (inspectFunctionIndex >= activeInspect->functionCount) {
+                            if (inspectTarget == 2) {
+                                zipperFollowsPlayer = true;
+                                zipperInspectCompleted = true;
+                            } else npcInspectCompleted = true;
                             inspectTarget = -1;
                             inspectFunctionIndex = -1;
                             inspectLineIndex = -1;
@@ -258,13 +284,13 @@ int main(void)
                 dialogueIndex = 0;
             }
         }
-        bool canInspectZipper = fabsf(player.position.x - zipperX) <= 72.0f;
-        if (IsKeyPressed(KEY_I) && inspectTarget < 0 && inspect.enabled && canTalk &&
+        bool canInspectZipper = fabsf(player.position.x - zipper.character.position.x) <= 72.0f;
+        if (IsKeyPressed(KEY_I) && inspectTarget < 0 && inspect.enabled && !npcInspectCompleted && canTalk &&
             dialogueIndex < 0 && stage3IntroIndex < 0) {
             inspectTarget = 1;
             inspectFunctionIndex = 0;
             inspectLineIndex = 0;
-        } else if (IsKeyPressed(KEY_I) && inspectTarget < 0 && zipperInspect.enabled && canInspectZipper &&
+        } else if (IsKeyPressed(KEY_I) && inspectTarget < 0 && zipper.inspect.enabled && !zipperInspectCompleted && canInspectZipper &&
                    dialogueIndex < 0 && stage3IntroIndex < 0) {
             inspectTarget = 2;
             inspectFunctionIndex = 0;
@@ -272,8 +298,9 @@ int main(void)
         }
         UpdateRpgCamera(&camera, player.position.x, cameraFollowsPlayer);
         DrawRpgWorld(&player, &npc, &stage, camera, cameraFollowsPlayer, currentMap, canTalk,
-                     &dialogue, dialogueIndex, stage3IntroIndex, &stage3Event, zipperTexture, &inspect, &zipperInspect,
-                     inspectTarget, inspectFunctionIndex, inspectLineIndex, false, 0.0f, RPG_INSPECT_MOVE_PLAYER);
+                     &dialogue, dialogueIndex, stage3IntroIndex, &stage3Event, &zipper, zipperTexture, &inspect, &zipper.inspect,
+                     inspectTarget, inspectFunctionIndex, inspectLineIndex, false, 0.0f, RPG_INSPECT_MOVE_PLAYER,
+                     npcInspectCompleted, zipperInspectCompleted);
     }
     UnloadTexture(zipperTexture);
     GameFont_Unload();

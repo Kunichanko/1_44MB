@@ -1,4 +1,4 @@
-// 依存する自プロジェクト内ファイル: なし
+// 依存する自プロジェクト内ファイル: rpg_dialogue.h
 #ifndef RPG_STAGE3_EVENT_H
 #define RPG_STAGE3_EVENT_H
 
@@ -8,7 +8,6 @@
 
 typedef struct RpgStage3Event {
     bool enabled;
-    float zipperScale;
     RpgDialogue dialogue;
 } RpgStage3Event;
 

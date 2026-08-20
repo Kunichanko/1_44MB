@@ -11,6 +11,7 @@ typedef struct RpgLayout {
     float playerScale;
     float npcScale;
     bool stage3IntroEnabled;
+    float electricCellDelay;
 } RpgLayout;
 
 RpgLayout RpgLayout_Default(void);
@@ -18,3 +19,4 @@ bool RpgLayout_Load(const char *filePath, RpgLayout *layout);
 bool RpgLayout_Save(const char *filePath, const RpgLayout *layout);
 
 #endif
+// 役割: RPG レイアウト設定の構造と保存 API を宣言する。

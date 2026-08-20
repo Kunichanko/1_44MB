@@ -352,3 +352,4 @@ void EditorUI_ResetInput(void)
     activeNumericInput = NUMERIC_INPUT_NONE;
     replaceNumericValueOnInput = false;
 }
+// 役割: 横スクロール用エディターの共通 UI 描画と入力補助を提供する。

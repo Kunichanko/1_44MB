@@ -42,3 +42,4 @@ float EnemyGroup_GetScale(const EnemyGroup *group);
 void EnemyGroup_UnloadAppearance(EnemyGroup *group);
 
 #endif
+// 役割: 横スクロール敵グループの状態と操作 API を宣言する。

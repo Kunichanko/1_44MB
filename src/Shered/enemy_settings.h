@@ -20,3 +20,4 @@ bool EnemySettings_Load(const char *filePath, EnemyFollowSettings *settings);
 bool EnemySettings_Save(const char *filePath, const EnemyFollowSettings *settings);
 
 #endif
+// 役割: 横スクロール敵設定の保存 API を宣言する。

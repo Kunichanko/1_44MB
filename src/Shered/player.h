@@ -38,3 +38,4 @@ float Player_GetScale(const Player *player);
 Rectangle Player_GetBounds(const Player *player, float groundY);
 
 #endif
+// 役割: 横スクロールプレイヤーの状態と操作 API を宣言する。

@@ -42,3 +42,4 @@ RpgInspect RpgInspect_Default(const char *speaker, const char *text);
 bool RpgInspect_Load(const char *filePath, RpgInspect *inspect);
 bool RpgInspect_Save(const char *filePath, const RpgInspect *inspect);
 #endif
+// 役割: 調べる Function 列の構造と保存 API を宣言する。

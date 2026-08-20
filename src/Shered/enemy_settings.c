@@ -64,3 +64,4 @@ bool EnemySettings_Save(const char *filePath, const EnemyFollowSettings *setting
     fclose(file);
     return true;
 }
+// 役割: 横スクロールゲームの敵設定を保存・読み込みする。

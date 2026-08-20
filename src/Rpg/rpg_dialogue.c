@@ -102,3 +102,4 @@ bool RpgDialogue_MoveLine(RpgDialogue *dialogue, int sourceIndex, int destinatio
     memcpy(dialogue->speakers[destinationIndex], movedSpeaker, sizeof(movedSpeaker));
     return true;
 }
+// 役割: 会話データの初期化、読み書き、編集用の操作を管理する。

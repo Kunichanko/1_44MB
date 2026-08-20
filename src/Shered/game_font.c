@@ -86,3 +86,4 @@ Vector2 GameFont_MeasureText(const char *text, float fontSize)
     if (isGameFontLoaded) return MeasureTextEx(gameFont, text, fontSize, 1.0f);
     return (Vector2){ (float)MeasureText(text, (int)fontSize), fontSize };
 }
+// 役割: 日本語を含むゲーム内文字の登録、計測、描画を共通提供する。

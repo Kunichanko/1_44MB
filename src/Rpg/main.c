@@ -1,32 +1,159 @@
-// 依存する自プロジェクト内ファイル: rpg_character.h
+// 依存する自プロジェクト内ファイル: rpg_attachment.h, rpg_character.h, rpg_block_inventory.h, rpg_data_shot.h, rpg_map_event.h, rpg_object_folder.h, rpg_receiver.h, rpg_wire.h
 // 依存関係を更新: game_font.h, rpg_dialogue.h を追加した。
 // 依存関係を更新: rpg_stage3_event.h を追加した。
 #include "raylib.h"
 #include "raymath.h"
 #include <stddef.h>
 #include <math.h>
+#include <stdio.h>
+#include <string.h>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOGDI
+#define NOUSER
+#include <windows.h>
+#include <shellapi.h>
+#endif
 
 #include "game_font.h"
 #include "rpg_character.h"
+#include "rpg_attachment.h"
+#include "rpg_button_event.h"
+#include "rpg_data_shot.h"
+#include "rpg_block_inventory.h"
 #include "rpg_dialogue.h"
 #include "rpg_layout.h"
 #include "rpg_inspect.h"
+#include "rpg_item.h"
+#include "rpg_map_event.h"
+#include "rpg_object_folder.h"
+#include "rpg_receiver.h"
+#include "rpg_signal_block.h"
 #include "rpg_stage3_event.h"
 #include "rpg_stage.h"
+#include "rpg_wire.h"
 #include "rpg_zipper.h"
 
 enum { RPG_SCREEN_WIDTH = 960, RPG_SCREEN_HEIGHT = 540 };
 
 static const char *npcTalkPrompt = u8"[E] \u8a71\u3057\u304b\u3051\u308b";
 static const char *zipperInspectPrompt = u8"[I] \u8abf\u3079\u308b";
+static const Rectangle referenceTextCloseButton = { 648.0f, 262.0f, 144.0f, 26.0f };
 
-static void DrawZipper(Texture2D zipperTexture, const RpgCharacter *zipper)
+static bool LoadReferenceText(const char *filePath, char *text, size_t textSize)
 {
-    // ZIPPER.png は32x40のフレームが並ぶため、停止状態として先頭フレームだけを描画する。
-    Rectangle source = { 0.0f, 0.0f, 32.0f, 40.0f };
-    Rectangle destination = { zipper->position.x - 24.0f * zipper->scale,
-                              380.0f - 60.0f * zipper->scale,
-                              48.0f * zipper->scale, 60.0f * zipper->scale };
+    FILE *file = NULL;
+#ifdef _WIN32
+    wchar_t widePath[RPG_STAGE_REFERENCE_PATH_LENGTH];
+    if (MultiByteToWideChar(CP_UTF8, 0, filePath, -1, widePath,
+                            RPG_STAGE_REFERENCE_PATH_LENGTH) > 0)
+        file = _wfopen(widePath, L"rb");
+#else
+    file = fopen(filePath, "rb");
+#endif
+    if (file == NULL || textSize == 0) return false;
+    size_t readSize = fread(text, 1, textSize - 1, file);
+    text[readSize] = '\0';
+    fclose(file);
+    return true;
+}
+
+static const char *GetReferenceFileName(const char *filePath)
+{
+    const char *backslash = strrchr(filePath, '\\');
+    const char *slash = strrchr(filePath, '/');
+    const char *fileName = backslash != NULL ? backslash + 1 : filePath;
+    if (slash != NULL && slash + 1 > fileName) fileName = slash + 1;
+    return fileName[0] != '\0' ? fileName : "FILE.txt";
+}
+
+#ifdef _WIN32
+static bool GetZipperDirectoryPath(char *path, size_t pathSize)
+{
+    return snprintf(path, pathSize, "%s../assets/Settings/Zipper", GetApplicationDirectory()) > 0;
+}
+
+static bool ConvertUtf8PathToWide(const char *path, wchar_t *widePath, int widePathCount)
+{
+    return MultiByteToWideChar(CP_UTF8, 0, path, -1, widePath, widePathCount) > 0;
+}
+
+static void OpenZipperDirectoryInExplorer(void)
+{
+    char directoryPath[1024];
+    wchar_t wideDirectoryPath[1024];
+    if (!GetZipperDirectoryPath(directoryPath, sizeof(directoryPath)) ||
+        !ConvertUtf8PathToWide(directoryPath, wideDirectoryPath, 1024)) return;
+    CreateDirectoryW(wideDirectoryPath, NULL);
+    ShellExecuteW(NULL, L"open", wideDirectoryPath, NULL, NULL, 1);
+}
+
+#else
+static void OpenZipperDirectoryInExplorer(void) { }
+#endif
+
+static void RegisterReferenceFileNames(const RpgStage *stage)
+{
+    for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
+        if (stage->blocks[row][column] == RPG_BLOCK_REFERENCE_FILE)
+            GameFont_AddText(GetReferenceFileName(RpgStage_GetReferencePathAtCell(stage, row, column)));
+    }
+}
+
+static void OpenTextFile(const char *path, char *fileName, size_t fileNameSize,
+                         char *text, size_t textSize, bool *isOpen)
+{
+    snprintf(fileName, fileNameSize, "%s", GetReferenceFileName(path));
+    if (path[0] != '\0' && LoadReferenceText(path, text, textSize)) {
+        GameFont_AddText(text);
+    } else {
+        snprintf(text, textSize, "Text file is not assigned or cannot be read.");
+    }
+    GameFont_AddText(fileName);
+    *isOpen = true;
+}
+
+// File.png の配置元にかかわらず、選択表示とドラッグ表示を同じ矩形で扱う。
+static Rectangle GetReferenceTargetBounds(const RpgReferenceObjects *objects, RpgReferenceTarget target)
+{
+    if (target.kind == RPG_REFERENCE_TARGET_CELL)
+        return (Rectangle){ target.column * RPG_STAGE_TILE_SIZE, target.row * RPG_STAGE_TILE_SIZE,
+                            RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE };
+    if (target.kind == RPG_REFERENCE_TARGET_DROP && target.dropIndex >= 0 && target.dropIndex < objects->count) {
+        Vector2 position = objects->entries[target.dropIndex].position;
+        return (Rectangle){ position.x - 24.0f, position.y - 24.0f, 48.0f, 48.0f };
+    }
+    return (Rectangle){ 0 };
+}
+
+static void DrawReferenceTextPanel(const char *fileName, const char *text)
+{
+    Rectangle panel = { 150.0f, 110.0f, 660.0f, 190.0f };
+    DrawRectangleRec(panel, Fade(RAYWHITE, 0.96f));
+    DrawRectangleLinesEx(panel, 2.0f, DARKBLUE);
+    GameFont_Draw(fileName, 172.0f, 122.0f, 20.0f, DARKBLUE);
+    int textOffset = 0;
+    for (int row = 0; row < 7 && text[textOffset] != '\0'; row++) {
+        char line[256] = { 0 };
+        int length = 0;
+        while (text[textOffset] != '\0' && text[textOffset] != '\n' && length < (int)sizeof(line) - 1)
+            line[length++] = text[textOffset++];
+        if (text[textOffset] == '\n') textOffset++;
+        GameFont_Draw(line, 172.0f, 154.0f + row * 20.0f, 18.0f, DARKGRAY);
+    }
+    DrawRectangleRec(referenceTextCloseButton, Fade(DARKBLUE, 0.9f));
+    DrawRectangleLinesEx(referenceTextCloseButton, 1.0f, RAYWHITE);
+    GameFont_Draw("E: 閉じる", 674.0f, 267.0f, 16.0f, RAYWHITE);
+}
+
+static void DrawZipper(Texture2D zipperTexture, const RpgCharacter *zipper, float animationElapsed)
+{
+    int frameCount = zipperTexture.width / 32;
+    int frameIndex = animationElapsed >= 0.0f && frameCount > 1 ?
+        (int)Clamp(animationElapsed / 0.60f * frameCount, 0.0f, (float)(frameCount - 1)) : 0;
+    Rectangle source = { frameIndex * 32.0f, 0.0f, 32.0f, 40.0f };
+    Rectangle destination = RpgZipper_GetSpriteBounds(zipper, 380.0f);
     DrawTexturePro(zipperTexture, source, destination, (Vector2){ 0.0f, 0.0f }, 0.0f, WHITE);
 }
 
@@ -63,21 +190,227 @@ static void UpdateRpgCamera(Camera2D *camera, float playerX, bool followsPlayer)
 
 static void UpdateZipperFollow(RpgZipper *zipper, const RpgCharacter *player, float deltaTime)
 {
-    // 調べるFunction列が完了した後だけ、Zipperを主人公の少し後ろへ滑らかに追従させる。
-    float targetX = player->position.x - 48.0f * player->scale;
-    float distance = targetX - zipper->character.position.x;
-    float maximumStep = player->moveSpeed * deltaTime;
-    zipper->character.position.x += Clamp(distance, -maximumStep, maximumStep);
+    // 帰還時は主人公の少し後ろ・同じ足元へ、X/Yをまとめて滑らかに追従させる。
+    Vector2 target = { player->position.x - 48.0f * player->scale, player->position.y };
+    Vector2 distance = Vector2Subtract(target, zipper->character.position);
+    float maximumStep = zipper->returnSpeed * deltaTime;
+    float distanceLength = Vector2Length(distance);
+    if (distanceLength <= maximumStep) zipper->character.position = target;
+    else zipper->character.position = Vector2Add(zipper->character.position,
+                                                  Vector2Scale(distance, maximumStep / distanceLength));
+}
+
+static Rectangle GetZipperCollisionBounds(const RpgZipper *zipper)
+{
+    // 見た目全体ではなく本体部分だけをブロック判定にし、接触時に確実に停止させる。
+    Rectangle spriteBounds = RpgZipper_GetSpriteBounds(&zipper->character, 380.0f);
+    return (Rectangle){ spriteBounds.x + spriteBounds.width * 0.20f,
+                        spriteBounds.y + spriteBounds.height * 0.18f,
+                        spriteBounds.width * 0.60f, spriteBounds.height * 0.82f };
+}
+
+static Vector2 GetZipperCollisionCenter(const RpgZipper *zipper)
+{
+    Rectangle bounds = GetZipperCollisionBounds(zipper);
+    return (Vector2){ bounds.x + bounds.width * 0.5f, bounds.y + bounds.height * 0.5f };
+}
+
+static void MoveZipperCollisionCenterTo(RpgZipper *zipper, Vector2 targetCenter)
+{
+    // Zipperの座標は足元基準のため、当たり判定の中心を対象中心へ合わせて見た目と判定の上下ずれを防ぐ。
+    Vector2 currentCenter = GetZipperCollisionCenter(zipper);
+    zipper->character.position = Vector2Add(zipper->character.position,
+                                             Vector2Subtract(targetCenter, currentCenter));
+}
+
+static bool GetStageCellAtCenter(Vector2 center, RpgGridCell *cell)
+{
+    int row = (int)floorf(center.y / RPG_STAGE_TILE_SIZE);
+    int column = (int)floorf(center.x / RPG_STAGE_TILE_SIZE);
+    if (row < 0 || row >= RPG_STAGE_ROWS || column < 0 || column >= RPG_STAGE_WORLD_COLUMNS) return false;
+    *cell = (RpgGridCell){ row, column };
+    return true;
+}
+
+static Rectangle GetZipperForwardCollisionBounds(Rectangle bounds, Vector2 velocity)
+{
+    // 射出方向の前半面を判定面にし、背面で重なった物体には衝突・追従しないようにする。
+    if (fabsf(velocity.x) >= fabsf(velocity.y)) {
+        bounds.width *= 0.5f;
+        if (velocity.x >= 0.0f) bounds.x += bounds.width;
+    } else {
+        bounds.height *= 0.5f;
+        if (velocity.y >= 0.0f) bounds.y += bounds.height;
+    }
+    return bounds;
+}
+
+static bool DoesZipperHitReferenceFile(const RpgStage *stage, Rectangle bounds, Vector2 *center)
+{
+    for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
+        if (stage->blocks[row][column] != RPG_BLOCK_REFERENCE_FILE) continue;
+        Rectangle cell = { column * RPG_STAGE_TILE_SIZE, row * RPG_STAGE_TILE_SIZE,
+                           RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE };
+        if (CheckCollisionRecs(bounds, cell)) {
+            *center = (Vector2){ cell.x + cell.width * 0.5f, cell.y + cell.height * 0.5f };
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool DoesZipperHitAttachment(const RpgAttachments *attachments, Rectangle bounds, Vector2 *center,
+                                    RpgGridCell *attachmentCell, int *attachmentIndex)
+{
+    for (int index = 0; index < attachments->count; index++) {
+        Vector2 position = RpgAttachments_GetPosition(&attachments->entries[index], 0);
+        Rectangle attachmentBounds = { position.x - 22.0f, position.y - 22.0f, 44.0f, 44.0f };
+        if (CheckCollisionRecs(bounds, attachmentBounds)) {
+            *center = position;
+            *attachmentCell = attachments->entries[index].cell;
+            *attachmentIndex = index;
+            return true;
+        }
+    }
+    return false;
+}
+
+static int FindDataShotHit(const RpgDataShots *shots, Rectangle bounds)
+{
+    for (int index = 0; index < RPG_DATA_SHOT_MAX_COUNT; index++) {
+        const RpgDataShot *shot = &shots->entries[index];
+        if (shot->active && CheckCollisionCircleRec(shot->position, shot->size, bounds)) return index;
+    }
+    return -1;
+}
+
+static void UpdateLaunchedZipper(RpgZipper *zipper, Vector2 *velocity, const RpgStage *stage,
+                                 const RpgAttachments *attachments, const RpgDataShots *shots,
+                                 float deltaTime, bool *isLaunched, int *attachedDataShotIndex,
+                                 Vector2 *attachedDataShotOffset,
+                                 bool *isAttachedToBlock, RpgGridCell *attachedBlockCell,
+                                 int *attachedAttachmentIndex)
+{
+    // 高速設定でも壁をすり抜けないよう、移動を小さな単位に分けて衝突を確認する。
+    float distance = Vector2Length(*velocity) * deltaTime;
+    int stepCount = (int)ceilf(distance / 4.0f);
+    if (stepCount < 1) stepCount = 1;
+    Vector2 step = Vector2Scale(*velocity, deltaTime / (float)stepCount);
+    for (int index = 0; index < stepCount; index++) {
+        RpgZipper candidate = *zipper;
+        candidate.character.position = Vector2Add(candidate.character.position, step);
+        Rectangle collisionBounds = GetZipperCollisionBounds(&candidate);
+        Rectangle forwardCollisionBounds = GetZipperForwardCollisionBounds(collisionBounds, *velocity);
+        int dataShotIndex = FindDataShotHit(shots, forwardCollisionBounds);
+        if (dataShotIndex >= 0) {
+            // 動くデータ弾には相対位置を記録してくっつき、弾が消えるまで一緒に動かす。
+            MoveZipperCollisionCenterTo(&candidate, shots->entries[dataShotIndex].position);
+            *attachedDataShotIndex = dataShotIndex;
+            *attachedDataShotOffset = Vector2Subtract(candidate.character.position,
+                                                       shots->entries[dataShotIndex].position);
+            *isLaunched = false;
+            *isAttachedToBlock = false;
+            *attachedAttachmentIndex = -1;
+            *zipper = candidate;
+            return;
+        }
+        Vector2 collisionCenter;
+        RpgGridCell attachmentCell = { -1, -1 };
+        int hitAttachmentIndex = -1;
+        bool hitReferenceFile = DoesZipperHitReferenceFile(stage, forwardCollisionBounds, &collisionCenter);
+        bool hitAttachment = !hitReferenceFile &&
+            DoesZipperHitAttachment(attachments, forwardCollisionBounds, &collisionCenter, &attachmentCell,
+                                     &hitAttachmentIndex);
+        if (hitReferenceFile || hitAttachment) {
+            MoveZipperCollisionCenterTo(&candidate, collisionCenter);
+            *isLaunched = false;
+            *isAttachedToBlock = true;
+            if (hitAttachment) {
+                *attachedBlockCell = attachmentCell;
+                *attachedAttachmentIndex = hitAttachmentIndex;
+            } else {
+                GetStageCellAtCenter(collisionCenter, attachedBlockCell);
+                *attachedAttachmentIndex = -1;
+            }
+            *zipper = candidate;
+            return;
+        }
+        bool hitWorldEdge = forwardCollisionBounds.x < 0.0f ||
+            forwardCollisionBounds.x + forwardCollisionBounds.width > RPG_STAGE_WORLD_WIDTH ||
+            forwardCollisionBounds.y < 0.0f ||
+            forwardCollisionBounds.y + forwardCollisionBounds.height > RPG_SCREEN_HEIGHT;
+        if (hitWorldEdge || RpgStage_FindSolidCollisionCenter(stage, forwardCollisionBounds, &collisionCenter)) {
+            if (!hitWorldEdge) {
+                MoveZipperCollisionCenterTo(&candidate, collisionCenter);
+                GetStageCellAtCenter(collisionCenter, attachedBlockCell);
+            }
+            *velocity = (Vector2){ 0.0f, 0.0f };
+            *isLaunched = false;
+            *isAttachedToBlock = true;
+            *attachedAttachmentIndex = -1;
+            *zipper = candidate;
+            return;
+        }
+        *zipper = candidate;
+    }
+}
+
+static void UpdateZipperAttachedToDataShot(RpgZipper *zipper, const RpgDataShots *shots,
+                                           int *attachedDataShotIndex,
+                                           Vector2 attachedDataShotOffset,
+                                           bool *zipperFollowsPlayer, bool *isAttachedToBlock,
+                                           RpgGridCell *attachedBlockCell)
+{
+    if (*attachedDataShotIndex < 0) return;
+    const RpgDataShot *shot = &shots->entries[*attachedDataShotIndex];
+    // 電気化した時点で弾本体は壁衝突として消費済みなので、Zipper は追従へ戻す。
+    if (shot->isElectric) {
+        *zipperFollowsPlayer = true;
+        *isAttachedToBlock = false;
+        *attachedDataShotIndex = -1;
+        return;
+    }
+    if (shot->active) {
+        zipper->character.position = Vector2Add(shot->position, attachedDataShotOffset);
+        return;
+    }
+    // 弾が壁へ当たって消えた場合は、その衝突位置へ残す。空中消滅なら主人公へ戻す。
+    if (shot->hitWall) {
+        MoveZipperCollisionCenterTo(zipper, shot->impactPosition);
+        GetStageCellAtCenter(shot->impactPosition, attachedBlockCell);
+        *isAttachedToBlock = true;
+    } else {
+        *zipperFollowsPlayer = true;
+        *isAttachedToBlock = false;
+    }
+    *attachedDataShotIndex = -1;
 }
 
 static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
-                         const RpgStage *stage, Camera2D camera, bool followsPlayer,
+                         const RpgStage *stage,
+                         Camera2D camera, bool followsPlayer,
                          int currentMap, bool canTalk, const RpgDialogue *dialogue,
                          int dialogueIndex, int stage3IntroIndex, const RpgStage3Event *stage3Event, const RpgZipper *zipper,
-                         Texture2D zipperTexture, const RpgInspect *inspect, const RpgInspect *zipperInspect,
+                         Texture2D zipperTexture, Texture2D fileTexture, const RpgInspect *inspect, const RpgInspect *zipperInspect,
                          int inspectTarget, int inspectFunctionIndex, int inspectLineIndex,
-                         bool isMoveSpriteVisible, float moveSpriteX, RpgInspectMoveTarget moveSpriteTarget,
-                         bool npcInspectCompleted, bool zipperInspectCompleted)
+                          bool isMoveSpriteVisible, float moveSpriteX, RpgInspectMoveTarget moveSpriteTarget,
+                          bool npcInspectCompleted, bool zipperInspectCompleted,
+                          bool isZipperPointerHovered, bool isZipperPointerSelected,
+                          const RpgItems *items,
+                          const RpgReferenceObjects *referenceDrops,
+                          const RpgWires *wires,
+                          const RpgReceivers *receivers,
+                          const RpgAttachments *attachments,
+                          const RpgDataShots *dataShots,
+                          const RpgMapEvents *events, const char *itemMessage, float itemMessageTimer,
+                          RpgReferenceTarget nearbyReferenceTarget,
+                          const char *referenceFileName, const char *referenceText, bool isReferenceTextOpen,
+                          RpgReferenceTarget hoveredReferenceTarget,
+                          RpgReferenceTarget selectedReferenceTarget,
+                          bool isReferencePointerFeedbackSuppressed,
+                          bool isReferenceDragActive, RpgReferenceTarget draggedReferenceTarget,
+                          Vector2 referenceDragPosition,
+                          float zipperAnimationElapsed)
 {
     (void)npcInspectCompleted;
     BeginDrawing();
@@ -88,11 +421,71 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
     BeginMode2D(camera);
     DrawRectangle(0, 400, RPG_STAGE_WORLD_WIDTH, 140, (Color){ 103, 161, 70, 255 });
     RpgStage_Draw(stage, false);
+    // 通常ブロックへ紐づけたファイルは、そのブロック自体を強調する。
+    for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
+        RpgObjectFolder objectFolder = { .cell = { row, column } };
+        if (!RpgObjectFolder_BlockHasLinkedFiles(&objectFolder, stage->blocks[row][column])) continue;
+        Rectangle objectBounds = { column * RPG_STAGE_TILE_SIZE, row * RPG_STAGE_TILE_SIZE,
+                                   RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE };
+        DrawRectangleRec(objectBounds, Fade(GOLD, 0.30f));
+        DrawRectangleLinesEx(objectBounds, 2.0f, ORANGE);
+    }
+    // ファイルを紐づけた設置物だけを、実際の描画位置に合わせて強調する。
+    for (int index = 0; index < attachments->count; index++) {
+        const RpgAttachment *attachment = &attachments->entries[index];
+        if (!RpgObjectFolder_AttachmentHasLinkedFiles(attachment)) continue;
+        Vector2 position = RpgAttachments_GetPosition(attachment, 0);
+        DrawCircleV(position, 27.0f, Fade(GOLD, 0.30f));
+        DrawCircleLines((int)position.x, (int)position.y, 27.0f, ORANGE);
+    }
+    for (int index = 0; index < RPG_DATA_SHOT_MAX_COUNT; index++) {
+        const RpgDataShot *shot = &dataShots->entries[index];
+        if (!shot->active || !RpgObjectFolder_DataShotHasLinkedFiles(shot)) continue;
+        DrawCircleV(shot->position, shot->size + 8.0f, Fade(GOLD, 0.30f));
+        DrawCircleLines((int)shot->position.x, (int)shot->position.y, shot->size + 8.0f, ORANGE);
+    }
+    RpgStage_DrawReferenceObjectsExcept(stage, fileTexture,
+                                        isReferenceDragActive && draggedReferenceTarget.kind == RPG_REFERENCE_TARGET_CELL ?
+                                            draggedReferenceTarget.row : -1,
+                                        isReferenceDragActive && draggedReferenceTarget.kind == RPG_REFERENCE_TARGET_CELL ?
+                                            draggedReferenceTarget.column : -1);
+    RpgReferenceObjects_DrawExcept(referenceDrops, fileTexture,
+                                   isReferenceDragActive && draggedReferenceTarget.kind == RPG_REFERENCE_TARGET_DROP ?
+                                       draggedReferenceTarget.dropIndex : -1);
+    if (isReferenceDragActive && draggedReferenceTarget.kind == RPG_REFERENCE_TARGET_CELL)
+        RpgStage_DrawReferenceObject(fileTexture, GetReferenceTargetBounds(referenceDrops, draggedReferenceTarget),
+                                     Fade(WHITE, 0.28f));
+    RpgItems_Draw(items);
+    RpgMapEvents_Draw(events);
     DrawRectangle(0, 400, RPG_STAGE_WORLD_WIDTH, 14, DARKGREEN);
-    DrawZipper(zipperTexture, &zipper->character);
+    RpgStage_DrawEffects(stage);
+    RpgWires_Draw(wires, stage);
+    RpgWires_DrawElectric(wires, dataShots, 0, RPG_STAGE_WORLD_COLUMNS);
+    RpgReceivers_Draw(receivers);
+    RpgAttachments_Draw(attachments);
+    RpgDataShots_Draw(dataShots);
+    DrawZipper(zipperTexture, &zipper->character, zipperAnimationElapsed);
     if (isMoveSpriteVisible) DrawMoveSprite(zipperTexture, player, npc, zipper, moveSpriteTarget, moveSpriteX);
     RpgCharacter_Draw(npc, "NPC");
     RpgCharacter_Draw(player, "Hero");
+    RpgZipper_DrawPointerFeedback(RpgZipper_GetSpriteBounds(&zipper->character, 380.0f),
+                                  isZipperPointerHovered, isZipperPointerSelected);
+    if (!isReferencePointerFeedbackSuppressed && selectedReferenceTarget.kind != RPG_REFERENCE_TARGET_NONE) {
+        Rectangle selectedBounds = GetReferenceTargetBounds(referenceDrops, selectedReferenceTarget);
+        RpgZipper_DrawPointerFeedback(selectedBounds, false, true);
+    }
+    if (!isReferencePointerFeedbackSuppressed && hoveredReferenceTarget.kind != RPG_REFERENCE_TARGET_NONE) {
+        Rectangle hoveredBounds = GetReferenceTargetBounds(referenceDrops, hoveredReferenceTarget);
+        bool isSelected = hoveredReferenceTarget.kind == selectedReferenceTarget.kind &&
+            hoveredReferenceTarget.row == selectedReferenceTarget.row &&
+            hoveredReferenceTarget.column == selectedReferenceTarget.column &&
+            hoveredReferenceTarget.dropIndex == selectedReferenceTarget.dropIndex;
+        RpgZipper_DrawPointerFeedback(hoveredBounds, true, isSelected);
+    }
+    if (isReferenceDragActive)
+        RpgStage_DrawReferenceObject(fileTexture, (Rectangle){ referenceDragPosition.x - 24.0f,
+                                                                referenceDragPosition.y - 24.0f,
+                                                                RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE }, WHITE);
     if (canTalk && dialogueIndex < 0) {
         DrawRectangle((int)npc->position.x - 48, (int)npc->position.y - 116, 96, 24,
                       Fade(RAYWHITE, 0.9f));
@@ -107,12 +500,24 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
         zipperInspect->enabled && !zipperInspectCompleted) {
         GameFont_Draw(zipperInspectPrompt, zipper->character.position.x - 44.0f, 270.0f, 16, MAROON);
     }
+    if (nearbyReferenceTarget.kind != RPG_REFERENCE_TARGET_NONE && !isReferenceTextOpen) {
+        Rectangle referenceBounds = GetReferenceTargetBounds(referenceDrops, nearbyReferenceTarget);
+        float x = referenceBounds.x + referenceBounds.width * 0.5f;
+        float y = referenceBounds.y - 38.0f;
+        float fileNameWidth = GameFont_MeasureText(referenceFileName, 16.0f).x;
+        DrawRectangle((int)(x - fileNameWidth / 2.0f - 6.0f), (int)y, (int)fileNameWidth + 12, 44,
+                      Fade(RAYWHITE, 0.9f));
+        GameFont_Draw(referenceFileName, x - fileNameWidth / 2.0f, y + 3.0f, 16.0f, DARKBLUE);
+        GameFont_Draw("[E] 開く", x - 24.0f, y + 22.0f, 15.0f, MAROON);
+    }
     EndMode2D();
-    DrawText("RPG Version  -  Move: A/D or Arrow keys  Jump: W / Space", 24, 22, 22, DARKGRAY);
+    DrawText("RPG Version  -  Move: A/D or Arrow keys  Jump: W  Launch Zipper: Space", 24, 22, 22, DARKGRAY);
     DrawText("Approach the NPC and press E", 24, 48, 18, DARKGRAY);
     DrawText(followsPlayer ? "Camera: Follow [C]" : "Camera: Map Pivot [C]", 700, 48, 17,
              DARKBLUE);
-    DrawText(TextFormat("Map %d / %d", currentMap, RPG_STAGE_MAP_COUNT), 24, 500, 20, RAYWHITE);
+    DrawText(TextFormat("Map %d / %d", currentMap, RpgStage_GetMapCount(stage)), 24, 500, 20, RAYWHITE);
+    if (itemMessageTimer > 0.0f) GameFont_Draw(itemMessage, 300, 90, 24, MAROON);
+    if (isReferenceTextOpen) DrawReferenceTextPanel(referenceFileName, referenceText);
     const RpgInspect *activeInspect = inspectTarget == 2 ? zipperInspect : inspect;
     bool isInspectDialogue = inspectTarget >= 0 &&
                              activeInspect->functions[inspectFunctionIndex].type == RPG_INSPECT_DIALOGUE;
@@ -135,46 +540,79 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
 
 int main(void)
 {
-    const float groundY = 400.0f;
+    const float initialGroundY = RPG_STAGE_TILE_SIZE * 8.0f;
     InitWindow(RPG_SCREEN_WIDTH, RPG_SCREEN_HEIGHT, "1_44MB - RPG Version");
     SetTargetFPS(60);
     GameFont_Load(TextFormat("%s../assets/Fonts/NotoSansJP-VF.ttf", GetApplicationDirectory()));
     GameFont_AddText(npcTalkPrompt);
     GameFont_AddText(zipperInspectPrompt);
+    GameFont_AddText("開く閉じる");
     Texture2D zipperTexture = LoadTexture(TextFormat("%s../assets/Sprite/ZIPPER.png",
                                                       GetApplicationDirectory()));
+    Texture2D fileTexture = LoadTexture(TextFormat("%s../assets/Sprite/FILE.png",
+                                                    GetApplicationDirectory()));
 
     RpgLayout layout = RpgLayout_Default();
     RpgStage stage = RpgStage_Default();
-    RpgLayout_Load(TextFormat("%s../assets/Settings/rpg_layout.cfg", GetApplicationDirectory()),
+    RpgLayout_Load(TextFormat("%s../assets/Settings/Stage/rpg_layout.cfg", GetApplicationDirectory()),
                    &layout);
-    RpgStage_Load(TextFormat("%s../assets/Settings/rpg_stage.cfg", GetApplicationDirectory()),
+    RpgStage_Load(TextFormat("%s../assets/Settings/Stage/rpg_stage.cfg", GetApplicationDirectory()),
                   &stage);
+    // 保存済みの日本語ファイル名を描画より先にフォントへ登録し、? 表示を防ぐ。
+    RegisterReferenceFileNames(&stage);
+    RpgItems items = RpgItems_Default();
+    RpgItems_Load(TextFormat("%s../assets/Settings/Stage/rpg_items.cfg", GetApplicationDirectory()), &items);
+    RpgReferenceObjects referenceDrops = RpgReferenceObjects_Default();
+    RpgWires wires = RpgWires_Default();
+    RpgWires_Load(TextFormat("%s../assets/Settings/Stage/rpg_wires.cfg", GetApplicationDirectory()), &wires);
+    RpgWires_RemoveBroken(&wires, &stage);
+    RpgReceivers receivers = RpgReceivers_Default();
+    RpgReceivers_Load(TextFormat("%s../assets/Settings/Stage/rpg_receivers.cfg", GetApplicationDirectory()),
+                      &receivers);
+    RpgReceivers_RemoveBroken(&receivers, &stage);
+    RpgAttachments attachments = RpgAttachments_Default();
+    RpgAttachments_Load(TextFormat("%s../assets/Settings/Stage/rpg_attachments.cfg", GetApplicationDirectory()),
+                        &attachments);
+    RpgAttachments_MigrateLegacyButtons(&attachments, &stage);
+    RpgAttachments_RemoveBroken(&attachments, &stage);
+    RpgSignalBlocks signalBlocks = RpgSignalBlocks_Default();
+    RpgSignalBlocks_Load(TextFormat("%s../assets/Settings/Stage/rpg_signal_blocks.cfg", GetApplicationDirectory()),
+                         &signalBlocks);
+    RpgSignalBlocks_RemoveBroken(&signalBlocks, &stage);
+    RpgDataShots dataShots = RpgDataShots_Default();
+    RpgButtonEvent buttonEvent = RpgButtonEvent_Default();
+    // 前回が異常終了しても、プレイ中だけ使う実フォルダとInboxを残さない。
+    RpgObjectFolders_ClearSessionStorage();
+    RpgObjectFolders_PrepareAttachmentFolders(&attachments);
+    RpgObjectFolder_PrepareZipperAnimationCommand();
+    RpgMapEvents events = RpgMapEvents_Default();
+    RpgMapEvents_Load(TextFormat("%s../assets/Settings/Stage/rpg_map_events.cfg", GetApplicationDirectory()), &events);
+    for (int index = 0; index < items.count; index++) GameFont_AddText(items.entries[index].name);
     RpgDialogue dialogue = RpgDialogue_Default();
-    RpgDialogue_Load(TextFormat("%s../assets/Settings/rpg_dialogue.txt",
+    RpgDialogue_Load(TextFormat("%s../assets/Settings/Stage/rpg_dialogue.txt",
                                 GetApplicationDirectory()), &dialogue);
     for (int lineIndex = 0; lineIndex < dialogue.lineCount; lineIndex++) {
         GameFont_AddText(dialogue.lines[lineIndex]);
         GameFont_AddText(dialogue.speakers[lineIndex]);
     }
     RpgStage3Event stage3Event = RpgStage3Event_Default();
-    RpgStage3Event_Load(TextFormat("%s../assets/Settings/rpg_stage3_event.cfg",
+    RpgStage3Event_Load(TextFormat("%s../assets/Settings/Stage/rpg_stage3_event.cfg",
                                    GetApplicationDirectory()), &stage3Event);
     RpgZipper zipper = RpgZipper_Default();
-    RpgZipper_Load(TextFormat("%s../assets/Settings/rpg_zipper.cfg", GetApplicationDirectory()), &zipper);
+    RpgZipper_Load(TextFormat("%s../assets/Settings/Zipper/rpg_zipper.cfg", GetApplicationDirectory()), &zipper);
     for (int lineIndex = 0; lineIndex < stage3Event.dialogue.lineCount; lineIndex++) {
         GameFont_AddText(stage3Event.dialogue.speakers[lineIndex]);
         GameFont_AddText(stage3Event.dialogue.lines[lineIndex]);
     }
     RpgInspect inspect = RpgInspect_Default("Inspect", "Nothing unusual here.");
-    RpgInspect_Load(TextFormat("%s../assets/Settings/rpg_inspect.cfg", GetApplicationDirectory()), &inspect);
+    RpgInspect_Load(TextFormat("%s../assets/Settings/Stage/rpg_inspect.cfg", GetApplicationDirectory()), &inspect);
     for (int functionIndex = 0; functionIndex < inspect.functionCount; functionIndex++) {
         for (int lineIndex = 0; lineIndex < inspect.functions[functionIndex].dialogue.lineCount; lineIndex++) {
             GameFont_AddText(inspect.functions[functionIndex].dialogue.speakers[lineIndex]);
             GameFont_AddText(inspect.functions[functionIndex].dialogue.lines[lineIndex]);
         }
     }
-    RpgInspect_Load(TextFormat("%s../assets/Settings/rpg_zipper_inspect.cfg", GetApplicationDirectory()), &zipper.inspect);
+    RpgInspect_Load(TextFormat("%s../assets/Settings/Zipper/rpg_zipper_inspect.cfg", GetApplicationDirectory()), &zipper.inspect);
     for (int functionIndex = 0; functionIndex < zipper.inspect.functionCount; functionIndex++) {
         for (int lineIndex = 0; lineIndex < zipper.inspect.functions[functionIndex].dialogue.lineCount; lineIndex++) {
             GameFont_AddText(zipper.inspect.functions[functionIndex].dialogue.speakers[lineIndex]);
@@ -183,10 +621,10 @@ int main(void)
     }
     RpgCharacter player = RpgCharacter_Create(layout.playerPosition, BLUE, BROWN);
     RpgCharacter npc = RpgCharacter_Create(layout.npcPosition, PURPLE, DARKBROWN);
-    player.position.y = groundY;
+    player.position.y = initialGroundY;
     player.moveSpeed = layout.playerMoveSpeed;
     player.scale = layout.playerScale;
-    npc.position.y = groundY;
+    npc.position.y = initialGroundY;
     npc.scale = layout.npcScale;
     int dialogueIndex = -1;
     int stage3IntroIndex = -1;
@@ -198,25 +636,193 @@ int main(void)
     float inspectMoveStartX = 0.0f;
     bool stage3IntroShown = false;
     bool zipperFollowsPlayer = false;
+    bool isZipperLaunched = false;
+    Vector2 zipperLaunchVelocity = { 0.0f, 0.0f };
+    int attachedDataShotIndex = -1;
+    int attachedAttachmentIndex = -1;
+    Vector2 attachedDataShotOffset = { 0.0f, 0.0f };
+    bool isZipperAttachedToBlock = false;
+    RpgGridCell zipperAttachedBlockCell = { -1, -1 };
+    bool zipperPointerSelected = false;
+    bool isZipperPointerFeedbackSuppressed = false;
+    double lastZipperPointerClickTime = -1.0;
+    RpgReferenceTarget selectedReferencePointerTarget = { .kind = RPG_REFERENCE_TARGET_NONE,
+                                                            .row = -1, .column = -1, .dropIndex = -1 };
+    bool isReferencePointerFeedbackSuppressed = false;
+    bool isReferencePointerPressed = false;
+    RpgReferenceTarget pressedReferenceTarget = { .kind = RPG_REFERENCE_TARGET_NONE,
+                                                   .row = -1, .column = -1, .dropIndex = -1 };
+    Vector2 referencePressPosition = { 0.0f, 0.0f };
+    bool isReferenceDragActive = false;
+    RpgReferenceTarget draggedReferenceTarget = { .kind = RPG_REFERENCE_TARGET_NONE,
+                                                   .row = -1, .column = -1, .dropIndex = -1 };
+    Vector2 referenceDragPosition = { 0.0f, 0.0f };
+    double lastReferencePointerClickTime = -1.0;
+    float zipperAnimationElapsed = -1.0f;
     bool npcInspectCompleted = false;
     bool zipperInspectCompleted = false;
+    // 追従状態とは別に、調べる完了後だけ射出・帰還を許可する。
+    bool isZipperControllable = false;
+    bool wasDataButtonPressed = false;
     int previousMap = (int)(player.position.x / (RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE)) + 1;
     bool cameraFollowsPlayer = false;
+    char itemMessage[96] = { 0 };
+    float itemMessageTimer = 0.0f;
+    char referenceText[2048] = { 0 };
+    char referenceFileName[RPG_STAGE_REFERENCE_PATH_LENGTH] = "FILE.txt";
+    bool isReferenceTextOpen = false;
     Camera2D camera = { .offset = { RPG_SCREEN_WIDTH / 2.0f, RPG_SCREEN_HEIGHT / 2.0f }, .zoom = 1.0f };
     while (!WindowShouldClose()) {
         if (IsKeyPressed(KEY_C)) cameraFollowsPlayer = !cameraFollowsPlayer;
-        if (dialogueIndex < 0 && stage3IntroIndex < 0 && inspectTarget < 0) {
+        bool hasPlayerMoveInput = IsKeyDown(KEY_A) || IsKeyDown(KEY_D) || IsKeyDown(KEY_LEFT) ||
+                                  IsKeyDown(KEY_RIGHT) || IsKeyPressed(KEY_W);
+        if (hasPlayerMoveInput && !isReferenceTextOpen) {
+            selectedReferencePointerTarget.kind = RPG_REFERENCE_TARGET_NONE;
+            isReferencePointerFeedbackSuppressed = true;
+        }
+        if (zipperFollowsPlayer && hasPlayerMoveInput) {
+            // 移動を始めた時は、Zipperの選択表示を通常状態へ戻す。
+            zipperPointerSelected = false;
+            isZipperPointerFeedbackSuppressed = true;
+        }
+        if (dialogueIndex < 0 && stage3IntroIndex < 0 && inspectTarget < 0 && !isReferenceTextOpen) {
             Vector2 previousPosition = player.position;
-            RpgCharacter_UpdatePlayer(&player, GetFrameTime(), groundY, 32.0f,
-                                      RPG_STAGE_WORLD_WIDTH - 32.0f);
+            int standingBlockType = RpgStage_GetBlockTypeAtPosition(&stage, player.position);
+            float savedMoveSpeed = player.moveSpeed;
+            // 遅延ブロックの減速はプレイヤー設定値を変更せず、このフレームだけに適用する。
+            if (standingBlockType == RPG_BLOCK_EFFECT_SLOW) player.moveSpeed *= 0.55f;
+            RpgCharacter_UpdatePlayerWithStage(&player, GetFrameTime(), &stage, 32.0f,
+                                               RPG_STAGE_WORLD_WIDTH - 32.0f);
+            player.moveSpeed = savedMoveSpeed;
+            // 跳ねるブロックは接地した瞬間に再び上向きの速度を与える。
+            if (RpgBlockInventory_IsBounceEffect(standingBlockType) && player.isGrounded) {
+                player.verticalSpeed = -620.0f;
+                player.isGrounded = false;
+            }
             if (CheckCollisionRecs(RpgCharacter_GetFootBounds(&player),
                                    RpgCharacter_GetFootBounds(&npc))) {
                 player.position = previousPosition;
             }
         }
-        if (zipperFollowsPlayer && inspectTarget < 0 && dialogueIndex < 0 && stage3IntroIndex < 0)
+        if (IsKeyPressed(KEY_SPACE) && isZipperControllable && dialogueIndex < 0 && stage3IntroIndex < 0 && inspectTarget < 0 &&
+            !isReferenceTextOpen && !isReferenceDragActive) {
+            if (zipperFollowsPlayer) {
+                // 射出開始位置は常に主人公。カーソルへ向かう単位ベクトルを固定して直進させる。
+                zipper.character.position = player.position;
+                Vector2 direction = Vector2Subtract(GetScreenToWorld2D(GetMousePosition(), camera),
+                                                    GetZipperCollisionCenter(&zipper));
+                if (Vector2LengthSqr(direction) < 0.001f) direction = (Vector2){ 1.0f, 0.0f };
+                zipperLaunchVelocity = Vector2Scale(Vector2Normalize(direction), zipper.launchSpeed);
+                isZipperLaunched = true;
+                zipperFollowsPlayer = false;
+                attachedDataShotIndex = -1;
+                attachedAttachmentIndex = -1;
+                isZipperAttachedToBlock = false;
+                zipperAttachedBlockCell = (RpgGridCell){ -1, -1 };
+                zipperPointerSelected = false;
+            } else if (!isZipperLaunched) {
+                RpgGridCell returnedBlockCell = zipperAttachedBlockCell;
+                int returnedAttachmentIndex = attachedAttachmentIndex;
+                int returnedDataShotIndex = attachedDataShotIndex;
+                // 帰還操作を受け付けた時点を画面に示し、Explorerの更新待ちと処理開始を区別できるようにする。
+                snprintf(itemMessage, sizeof(itemMessage), "帰還開始：Inboxのobjectフォルダを削除");
+                GameFont_AddText(itemMessage);
+                itemMessageTimer = 2.5f;
+                // ブロックへ停止した射出後は、同じキーで追従状態へ復帰できる。
+                zipperFollowsPlayer = true;
+                attachedDataShotIndex = -1;
+                attachedAttachmentIndex = -1;
+                isZipperAttachedToBlock = false;
+                if (returnedDataShotIndex >= 0 && returnedDataShotIndex < RPG_DATA_SHOT_MAX_COUNT &&
+                    dataShots.entries[returnedDataShotIndex].active) {
+                    RpgObjectFolder_ReturnDataShotFromZipper(&dataShots.entries[returnedDataShotIndex]);
+                } else if (returnedAttachmentIndex >= 0 && returnedAttachmentIndex < attachments.count) {
+                    RpgObjectFolder_ReturnAttachmentFromZipper(&attachments.entries[returnedAttachmentIndex]);
+                } else if (returnedBlockCell.row >= 0 && returnedBlockCell.column >= 0) {
+                    RpgObjectFolder blockFolder = { .cell = returnedBlockCell };
+                    RpgObjectFolder_ReturnBlockFromZipper(&blockFolder,
+                        stage.blocks[returnedBlockCell.row][returnedBlockCell.column]);
+                }
+                // 帰還後はZipper内に見せていた対象フォルダのコピーだけを片付ける。
+                zipperPointerSelected = false;
+            }
+        }
+        bool isDataButtonPressed = player.isGrounded &&
+                                   RpgAttachments_IsButtonPressed(&attachments, player.position);
+        if (isDataButtonPressed && !wasDataButtonPressed) {
+            // ボタンは用途を決めず、押された事実だけを全体通知として発行する。
+            RpgButtonEvent_Publish(&buttonEvent);
+        }
+        wasDataButtonPressed = isDataButtonPressed;
+        RpgDataShots_ConsumeButtonEvent(&dataShots, &attachments, &buttonEvent);
+        RpgSignalBlocks_Update(&signalBlocks, &stage, &buttonEvent, GetFrameTime());
+        // フォルダの変更を移動前に反映し、ファイル数と容量が弾の見た目・速度へ直ちに反映されるようにする。
+        RpgObjectFolders_UpdateDataShotLifetimes(&dataShots, &attachments, &referenceDrops);
+        RpgDataShots_Update(&dataShots, &attachments, &stage, &receivers, &wires,
+                             layout.electricCellDelay, GetFrameTime(), false);
+        // 電気化で失われた弾本体のフォルダを同フレームで処理し、追加ファイルをドロップする。
+        RpgObjectFolders_UpdateDataShotLifetimes(&dataShots, &attachments, &referenceDrops);
+        UpdateZipperAttachedToDataShot(&zipper, &dataShots, &attachedDataShotIndex,
+                                       attachedDataShotOffset,
+                                       &zipperFollowsPlayer, &isZipperAttachedToBlock,
+                                       &zipperAttachedBlockCell);
+        if (isZipperLaunched)
+            UpdateLaunchedZipper(&zipper, &zipperLaunchVelocity, &stage, &attachments, &dataShots,
+                                 GetFrameTime(), &isZipperLaunched, &attachedDataShotIndex,
+                                 &attachedDataShotOffset,
+                                 &isZipperAttachedToBlock, &zipperAttachedBlockCell,
+                                 &attachedAttachmentIndex);
+        else if (zipperFollowsPlayer && inspectTarget < 0 && dialogueIndex < 0 && stage3IntroIndex < 0 && !isReferenceTextOpen)
             UpdateZipperFollow(&zipper, &player, GetFrameTime());
+        if (RpgObjectFolder_ConsumeZipperAnimationRequest()) {
+            zipperAnimationElapsed = 0.0f;
+            if (attachedDataShotIndex >= 0 && attachedDataShotIndex < RPG_DATA_SHOT_MAX_COUNT &&
+                dataShots.entries[attachedDataShotIndex].active) {
+                RpgObjectFolder_MoveDataShotToZipper(&dataShots.entries[attachedDataShotIndex]);
+            } else if (isZipperAttachedToBlock && zipperAttachedBlockCell.row >= 0 &&
+                zipperAttachedBlockCell.column >= 0) {
+                if (attachedAttachmentIndex >= 0 && attachedAttachmentIndex < attachments.count)
+                    RpgObjectFolder_MoveAttachmentToZipper(&attachments.entries[attachedAttachmentIndex]);
+                else {
+                    RpgObjectFolder blockFolder = { .cell = zipperAttachedBlockCell };
+                    RpgObjectFolder_MoveBlockToZipper(&blockFolder,
+                        stage.blocks[zipperAttachedBlockCell.row][zipperAttachedBlockCell.column]);
+                }
+            }
+        }
+        if (zipperAnimationElapsed >= 0.0f) {
+            zipperAnimationElapsed += GetFrameTime();
+            if (zipperAnimationElapsed >= 0.60f) zipperAnimationElapsed = -1.0f;
+        }
         bool canTalk = RpgCharacter_IsNear(&player, &npc, 72.0f);
+        RpgReferenceTarget nearbyReferenceTarget = { .kind = RPG_REFERENCE_TARGET_NONE,
+                                                       .row = -1, .column = -1, .dropIndex = -1 };
+        bool canReadReference = RpgReferenceObjects_FindNearbyTarget(&stage, &referenceDrops,
+                                                                       player.position, 72.0f,
+                                                                       &nearbyReferenceTarget);
+        if (canReadReference) {
+            const char *referencePath = RpgReferenceObjects_GetTargetPath(&stage, &referenceDrops,
+                                                                           nearbyReferenceTarget);
+            snprintf(referenceFileName, sizeof(referenceFileName), "%s", GetReferenceFileName(referencePath));
+            GameFont_AddText(referenceFileName);
+        }
+        if (itemMessageTimer > 0.0f) itemMessageTimer -= GetFrameTime();
+        RpgReferenceObjects_Update(&referenceDrops, GetFrameTime());
+        for (int index = 0; index < items.count; index++) if (!items.entries[index].collected &&
+            fabsf(player.position.x - items.entries[index].position.x) <= 28.0f) {
+            items.entries[index].collected = true;
+            snprintf(itemMessage, sizeof(itemMessage), "%s を手に入れた", items.entries[index].name);
+            GameFont_AddText(itemMessage);
+            itemMessageTimer = 2.5f;
+        }
+        for (int index = 0; index < events.count && inspectTarget < 0 && dialogueIndex < 0 && stage3IntroIndex < 0 && !isReferenceTextOpen; index++) if (!events.entries[index].triggered &&
+            Vector2Distance(player.position, events.entries[index].position) <= 36.0f) {
+            events.entries[index].triggered = true;
+            // 位置イベントは既存の調べるFunction列を起動し、会話・移動を同じ実装で再利用する。
+            inspectTarget = 1;
+            inspectFunctionIndex = 0;
+            inspectLineIndex = 0;
+        }
         // 調べる機能列のMoveは、対象を指定時間で補間して完了後に次の機能へ進める。
         if (inspectTarget >= 0) {
             RpgInspect *activeInspect = inspectTarget == 2 ? &zipper.inspect : &inspect;
@@ -239,6 +845,7 @@ int main(void)
                     if (inspectFunctionIndex >= activeInspect->functionCount) {
                         if (inspectTarget == 2) {
                             zipperFollowsPlayer = true;
+                            isZipperControllable = true;
                             zipperInspectCompleted = true;
                         } else npcInspectCompleted = true;
                         inspectTarget = -1;
@@ -254,8 +861,15 @@ int main(void)
             stage3IntroShown = true;
         }
         previousMap = currentMap;
-        if (IsKeyPressed(KEY_E)) {
-            if (inspectTarget >= 0 && !isInspectMoveRunning) {
+        bool isReferenceCloseClicked = isReferenceTextOpen && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+                                       CheckCollisionPointRec(GetMousePosition(), referenceTextCloseButton);
+        if (isReferenceCloseClicked) {
+            isReferenceTextOpen = false;
+        } else if (IsKeyPressed(KEY_E)) {
+            if (isReferenceTextOpen) {
+                // ファイル表示も会話と同じく、Eで閉じるまでプレイヤー操作を止める。
+                isReferenceTextOpen = false;
+            } else if (inspectTarget >= 0 && !isInspectMoveRunning) {
                 const RpgInspect *activeInspect = inspectTarget == 2 ? &zipper.inspect : &inspect;
                 if (activeInspect->functions[inspectFunctionIndex].type == RPG_INSPECT_DIALOGUE) {
                     inspectLineIndex++;
@@ -265,6 +879,7 @@ int main(void)
                         if (inspectFunctionIndex >= activeInspect->functionCount) {
                             if (inspectTarget == 2) {
                                 zipperFollowsPlayer = true;
+                                isZipperControllable = true;
                                 zipperInspectCompleted = true;
                             } else npcInspectCompleted = true;
                             inspectTarget = -1;
@@ -282,28 +897,131 @@ int main(void)
                 if (dialogueIndex >= dialogue.lineCount) dialogueIndex = -1;
             } else if (canTalk) {
                 dialogueIndex = 0;
+            } else if (canReadReference) {
+                OpenTextFile(RpgReferenceObjects_GetTargetPath(&stage, &referenceDrops,
+                                                                nearbyReferenceTarget),
+                             referenceFileName, sizeof(referenceFileName), referenceText,
+                             sizeof(referenceText), &isReferenceTextOpen);
+                selectedReferencePointerTarget.kind = RPG_REFERENCE_TARGET_NONE;
+                isReferencePointerFeedbackSuppressed = true;
             }
         }
         bool canInspectZipper = fabsf(player.position.x - zipper.character.position.x) <= 72.0f;
         if (IsKeyPressed(KEY_I) && inspectTarget < 0 && inspect.enabled && !npcInspectCompleted && canTalk &&
-            dialogueIndex < 0 && stage3IntroIndex < 0) {
+            dialogueIndex < 0 && stage3IntroIndex < 0 && !isReferenceTextOpen) {
             inspectTarget = 1;
             inspectFunctionIndex = 0;
             inspectLineIndex = 0;
         } else if (IsKeyPressed(KEY_I) && inspectTarget < 0 && zipper.inspect.enabled && !zipperInspectCompleted && canInspectZipper &&
-                   dialogueIndex < 0 && stage3IntroIndex < 0) {
+                   dialogueIndex < 0 && stage3IntroIndex < 0 && !isReferenceTextOpen) {
             inspectTarget = 2;
             inspectFunctionIndex = 0;
             inspectLineIndex = 0;
         }
         UpdateRpgCamera(&camera, player.position.x, cameraFollowsPlayer);
+        RpgReferenceTarget hoveredReferencePointerTarget = { .kind = RPG_REFERENCE_TARGET_NONE,
+                                                               .row = -1, .column = -1, .dropIndex = -1 };
+        bool isReferencePointerHovered = false;
+        if (!isReferenceTextOpen && inspectTarget < 0 && dialogueIndex < 0 && stage3IntroIndex < 0) {
+            Vector2 pointerWorldPosition = GetScreenToWorld2D(GetMousePosition(), camera);
+            isReferencePointerHovered = !isReferenceDragActive &&
+                                        RpgReferenceObjects_FindTarget(&stage, &referenceDrops,
+                                                                       pointerWorldPosition,
+                                                                       &hoveredReferencePointerTarget);
+            if (!isReferencePointerHovered) isReferencePointerFeedbackSuppressed = false;
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                if (isReferencePointerHovered) {
+                    if (lastReferencePointerClickTime >= 0.0 &&
+                        GetTime() - lastReferencePointerClickTime <= 0.35) {
+                        OpenTextFile(RpgReferenceObjects_GetTargetPath(&stage, &referenceDrops,
+                                                                        hoveredReferencePointerTarget),
+                                     referenceFileName, sizeof(referenceFileName),
+                                     referenceText, sizeof(referenceText), &isReferenceTextOpen);
+                        isReferencePointerPressed = false;
+                        lastReferencePointerClickTime = -1.0;
+                    } else {
+                        selectedReferencePointerTarget = hoveredReferencePointerTarget;
+                        isReferencePointerFeedbackSuppressed = false;
+                        isReferencePointerPressed = true;
+                        pressedReferenceTarget = hoveredReferencePointerTarget;
+                        referencePressPosition = pointerWorldPosition;
+                        lastReferencePointerClickTime = GetTime();
+                    }
+                } else {
+                    selectedReferencePointerTarget.kind = RPG_REFERENCE_TARGET_NONE;
+                    isReferencePointerFeedbackSuppressed = true;
+                }
+            }
+            if (isReferencePointerPressed && IsMouseButtonDown(MOUSE_BUTTON_LEFT) &&
+                Vector2Distance(referencePressPosition, pointerWorldPosition) > 6.0f) {
+                // クリックとドラッグを距離で分離し、ドラッグ中だけ元のマスから非表示にする。
+                isReferenceDragActive = true;
+                draggedReferenceTarget = pressedReferenceTarget;
+                isReferencePointerPressed = false;
+                selectedReferencePointerTarget.kind = RPG_REFERENCE_TARGET_NONE;
+                isReferencePointerFeedbackSuppressed = true;
+            }
+            if (isReferenceDragActive) {
+                referenceDragPosition = pointerWorldPosition;
+                if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+                    Rectangle zipperBounds = RpgZipper_GetSpriteBounds(&zipper.character, 380.0f);
+                    if (CheckCollisionPointRec(pointerWorldPosition, zipperBounds)) {
+                        const char *path = RpgReferenceObjects_GetTargetPath(&stage, &referenceDrops,
+                                                                               draggedReferenceTarget);
+                        if (RpgObjectFolder_CopyFileToZipperInbox(path)) {
+                            GameFont_AddText(GetReferenceFileName(path));
+                            RpgReferenceObjects_RemoveTarget(&stage, &referenceDrops, draggedReferenceTarget);
+                        }
+                    }
+                    isReferenceDragActive = false;
+                    draggedReferenceTarget.kind = RPG_REFERENCE_TARGET_NONE;
+                }
+            }
+            if (isReferencePointerPressed && IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+                isReferencePointerPressed = false;
+        }
+        bool isZipperPointerHovered = false;
+        if ((zipperFollowsPlayer || isZipperAttachedToBlock || attachedDataShotIndex >= 0) && inspectTarget < 0 && dialogueIndex < 0 &&
+            stage3IntroIndex < 0 && !isReferenceTextOpen) {
+            Vector2 pointerWorldPosition = GetScreenToWorld2D(GetMousePosition(), camera);
+            Rectangle zipperBounds = RpgZipper_GetSpriteBounds(&zipper.character, 380.0f);
+            isZipperPointerHovered = CheckCollisionPointRec(pointerWorldPosition, zipperBounds);
+            if (!isZipperPointerHovered) isZipperPointerFeedbackSuppressed = false;
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                if (isZipperPointerHovered && GetTime() - lastZipperPointerClickTime <= 0.35) {
+                    OpenZipperDirectoryInExplorer();
+                    lastZipperPointerClickTime = -1.0;
+                } else if (isZipperPointerHovered) {
+                    lastZipperPointerClickTime = GetTime();
+                    isZipperPointerFeedbackSuppressed = false;
+                }
+                else {
+                    zipperPointerSelected = false;
+                    isZipperPointerFeedbackSuppressed = true;
+                }
+                if (isZipperPointerHovered) zipperPointerSelected = true;
+            }
+        } else {
+            zipperPointerSelected = false;
+        }
         DrawRpgWorld(&player, &npc, &stage, camera, cameraFollowsPlayer, currentMap, canTalk,
-                     &dialogue, dialogueIndex, stage3IntroIndex, &stage3Event, &zipper, zipperTexture, &inspect, &zipper.inspect,
+                     &dialogue, dialogueIndex, stage3IntroIndex, &stage3Event, &zipper, zipperTexture, fileTexture, &inspect, &zipper.inspect,
                      inspectTarget, inspectFunctionIndex, inspectLineIndex, false, 0.0f, RPG_INSPECT_MOVE_PLAYER,
-                     npcInspectCompleted, zipperInspectCompleted);
+                     npcInspectCompleted, zipperInspectCompleted,
+                     isZipperPointerHovered && !isZipperPointerFeedbackSuppressed, zipperPointerSelected,
+                     &items, &referenceDrops, &wires, &receivers, &attachments, &dataShots, &events,
+                     itemMessage, itemMessageTimer, nearbyReferenceTarget,
+                     referenceFileName, referenceText, isReferenceTextOpen,
+                     hoveredReferencePointerTarget, selectedReferencePointerTarget,
+                     isReferencePointerFeedbackSuppressed, isReferenceDragActive,
+                     draggedReferenceTarget, referenceDragPosition,
+                     zipperAnimationElapsed);
     }
+    RpgObjectFolders_ClearSessionStorage();
     UnloadTexture(zipperTexture);
+    UnloadTexture(fileTexture);
     GameFont_Unload();
     CloseWindow();
     return 0;
 }
+// 役割: RPG 本編の初期化、ゲーム更新、描画、Zipper 操作を統合するエントリーポイント。

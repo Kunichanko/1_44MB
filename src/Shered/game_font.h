@@ -13,3 +13,4 @@ void GameFont_Draw(const char *text, float x, float y, float fontSize, Color col
 Vector2 GameFont_MeasureText(const char *text, float fontSize);
 
 #endif
+// 役割: 共通フォントの登録・描画 API を宣言する。

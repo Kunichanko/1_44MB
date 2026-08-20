@@ -1,0 +1,403 @@
+// 依存する自プロジェクト内ファイル: rpg_attachment.h
+#include "rpg_attachment.h"
+
+#include "raymath.h"
+
+#include <stdio.h>
+#include <string.h>
+
+static bool RpgAttachments_IsCellInStage(RpgGridCell cell)
+{
+    return cell.row >= 0 && cell.row < RPG_STAGE_ROWS && cell.column >= 0 &&
+           cell.column < RPG_STAGE_WORLD_COLUMNS;
+}
+
+static bool RpgAttachments_AreSame(const RpgAttachment *first, const RpgAttachment *second)
+{
+    return first->type == second->type && first->cell.row == second->cell.row &&
+           first->cell.column == second->cell.column && first->side == second->side;
+}
+
+// 取付先の辺の外側に、装置を収めるための空きマスがあるか確認する。
+static bool RpgAttachments_HasOuterEmptyCell(const RpgStage *stage, RpgGridCell cell,
+                                             RpgGridSide side)
+{
+    RpgGridCell outerCell = RpgGridPath_GetSideNeighbor(cell, side);
+    return RpgAttachments_IsCellInStage(outerCell) && stage->blocks[outerCell.row][outerCell.column] == 0;
+}
+
+RpgAttachments RpgAttachments_Default(void) { return (RpgAttachments){ 0 }; }
+
+// 保存済みの添付物と重複しないフォルダ識別子を返す。
+static int RpgAttachments_GetNextFolderId(const RpgAttachments *attachments)
+{
+    int nextFolderId = 1;
+    for (int index = 0; index < attachments->count; index++)
+        if (attachments->entries[index].folderId >= nextFolderId)
+            nextFolderId = attachments->entries[index].folderId + 1;
+    return nextFolderId;
+}
+
+// 旧保存形式の識別子欠落・重複を、読み込み時に安全な値へ補正する。
+static int RpgAttachments_RepairFolderId(const RpgAttachments *attachments, int folderId)
+{
+    if (folderId <= 0) return RpgAttachments_GetNextFolderId(attachments);
+    for (int index = 0; index < attachments->count; index++)
+        if (attachments->entries[index].folderId == folderId)
+            return RpgAttachments_GetNextFolderId(attachments);
+    return folderId;
+}
+
+bool RpgAttachments_Load(const char *filePath, RpgAttachments *attachments)
+{
+    FILE *file = fopen(filePath, "r");
+    RpgAttachments loaded = RpgAttachments_Default();
+    if (file == NULL) return false;
+    char format[16];
+    bool currentFormat = false;
+    bool previewFormat = false;
+    if (fscanf(file, "%15s", format) != 1) { fclose(file); return false; }
+    currentFormat = strcmp(format, "v2") == 0 || strcmp(format, "v3") == 0 || strcmp(format, "v4") == 0 || strcmp(format, "v5") == 0 || strcmp(format, "v6") == 0;
+    previewFormat = strcmp(format, "v3") == 0 || strcmp(format, "v4") == 0;
+    if ((currentFormat ? fscanf(file, "%d", &loaded.count) : sscanf(format, "%d", &loaded.count)) != 1 || loaded.count < 0 ||
+        loaded.count > RPG_ATTACHMENT_MAX_COUNT) {
+        fclose(file);
+        return false;
+    }
+    for (int index = 0; index < loaded.count; index++) {
+        RpgAttachment *attachment = &loaded.entries[index];
+        int side = 0;
+        int folderId = index + 1;
+        bool folderIdFormat = strcmp(format, "v4") == 0 || strcmp(format, "v5") == 0 || strcmp(format, "v6") == 0;
+        int fieldCount = folderIdFormat ?
+            fscanf(file, "%d %d %d %d %d", &attachment->type, &folderId, &attachment->cell.row,
+                   &attachment->cell.column, &side) :
+            fscanf(file, "%d %d %d %d", &attachment->type, &attachment->cell.row,
+                   &attachment->cell.column, &side);
+        if (fieldCount != (folderIdFormat ? 5 : 4) ||
+            !RpgBlockInventory_IsAttachment(attachment->type) ||
+            !RpgAttachments_IsCellInStage(attachment->cell) ||
+            side < RPG_GRID_SIDE_TOP || side > RPG_GRID_SIDE_LEFT) {
+            fclose(file);
+            return false;
+        }
+        attachment->folderId = RpgAttachments_RepairFolderId(&loaded, folderId);
+        attachment->side = (RpgGridSide)side;
+        RpgGridCell outerCell = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
+        attachment->dataSize = 8.0f;
+        attachment->dataSpeed = 120.0f;
+        attachment->dataInterval = 1.0f;
+        attachment->dataPreviewEnabled = false;
+        attachment->sizePerFile = 8.0f;
+        attachment->speedPerKilobyte = 1.0f / 64.0f;
+        attachment->previewFileCount = 2;
+        attachment->previewTotalBytes = 0;
+        attachment->dataPath = (RpgGridPath){ .cellCount = 1, .cells = { outerCell } };
+        if (currentFormat) {
+            int previewEnabled = 0;
+            float ignoredLegacyPreviewSize = 0.0f;
+            float ignoredLegacyPreviewSpeed = 0.0f;
+            bool currentSettingsFormat = strcmp(format, "v6") == 0;
+            bool legacyPreviewSettingsFormat = strcmp(format, "v5") == 0;
+            int readCount = currentSettingsFormat ?
+                fscanf(file, "%f %f %f %d %f %f %d %llu %d", &attachment->dataSize, &attachment->dataSpeed,
+                       &attachment->dataInterval, &previewEnabled, &attachment->sizePerFile,
+                       &attachment->speedPerKilobyte, &attachment->previewFileCount,
+                       &attachment->previewTotalBytes, &attachment->dataPath.cellCount) : legacyPreviewSettingsFormat ?
+                fscanf(file, "%f %f %f %d %f %f %d", &attachment->dataSize, &attachment->dataSpeed,
+                       &attachment->dataInterval, &previewEnabled, &ignoredLegacyPreviewSize,
+                       &ignoredLegacyPreviewSpeed, &attachment->dataPath.cellCount) : previewFormat ?
+                fscanf(file, "%f %f %f %d %d", &attachment->dataSize, &attachment->dataSpeed,
+                       &attachment->dataInterval, &previewEnabled, &attachment->dataPath.cellCount) :
+                fscanf(file, "%f %f %f %d", &attachment->dataSize, &attachment->dataSpeed,
+                       &attachment->dataInterval, &attachment->dataPath.cellCount);
+            if (readCount != (currentSettingsFormat ? 9 : legacyPreviewSettingsFormat ? 7 : previewFormat ? 5 : 4) ||
+                attachment->dataSize < 2.0f || attachment->dataSize > 24.0f ||
+                attachment->dataSpeed < 20.0f || attachment->dataSpeed > 480.0f ||
+                attachment->dataInterval < 0.1f || attachment->dataInterval > 10.0f ||
+                attachment->sizePerFile < 1.0f || attachment->sizePerFile > 64.0f ||
+                attachment->speedPerKilobyte < 0.0001f || attachment->speedPerKilobyte > 1.0f ||
+                attachment->previewFileCount < 1 || attachment->previewFileCount > 9999 ||
+                attachment->dataPath.cellCount < 1 || attachment->dataPath.cellCount > RPG_GRID_PATH_MAX_CELLS) {
+                fclose(file); return false;
+            }
+            attachment->dataPreviewEnabled = previewEnabled != 0;
+            for (int pathIndex = 0; pathIndex < attachment->dataPath.cellCount; pathIndex++)
+                if (fscanf(file, "%d %d", &attachment->dataPath.cells[pathIndex].row,
+                           &attachment->dataPath.cells[pathIndex].column) != 2 ||
+                    !RpgAttachments_IsCellInStage(attachment->dataPath.cells[pathIndex])) {
+                    fclose(file); return false;
+                }
+        }
+    }
+    if (fclose(file) != 0) return false;
+    *attachments = loaded;
+    return true;
+}
+
+bool RpgAttachments_Save(const char *filePath, const RpgAttachments *attachments)
+{
+    FILE *file = fopen(filePath, "w");
+    if (file == NULL) return false;
+    fprintf(file, "v6 %d\n", attachments->count);
+    for (int index = 0; index < attachments->count; index++) {
+        const RpgAttachment *attachment = &attachments->entries[index];
+        fprintf(file, "%d %d %d %d %d %.2f %.2f %.2f %d %.2f %.6f %d %llu %d", attachment->type, attachment->folderId, attachment->cell.row,
+                attachment->cell.column, attachment->side, attachment->dataSize,
+                attachment->dataSpeed, attachment->dataInterval, attachment->dataPreviewEnabled ? 1 : 0,
+                attachment->sizePerFile, attachment->speedPerKilobyte, attachment->previewFileCount,
+                attachment->previewTotalBytes, attachment->dataPath.cellCount);
+        for (int pathIndex = 0; pathIndex < attachment->dataPath.cellCount; pathIndex++)
+            fprintf(file, " %d %d", attachment->dataPath.cells[pathIndex].row,
+                    attachment->dataPath.cells[pathIndex].column);
+        fputc('\n', file);
+    }
+    return fclose(file) == 0;
+}
+
+bool RpgAttachments_Add(RpgAttachments *attachments, const RpgStage *stage, int type,
+                        RpgGridCell cell, RpgGridSide side)
+{
+    RpgGridCell outerCell = RpgGridPath_GetSideNeighbor(cell, side);
+    RpgAttachment attachment = { .type = type, .folderId = RpgAttachments_GetNextFolderId(attachments), .cell = cell, .side = side, .dataSize = 8.0f,
+                                 .dataSpeed = 120.0f, .dataInterval = 1.0f,
+                                 .sizePerFile = 8.0f, .speedPerKilobyte = 1.0f / 64.0f,
+                                 .previewFileCount = 2, .previewTotalBytes = 0,
+                                 .dataPath = { .cellCount = 1, .cells = { outerCell } } };
+    if (attachments->count >= RPG_ATTACHMENT_MAX_COUNT || !RpgBlockInventory_IsAttachment(type) ||
+        !RpgAttachments_IsCellInStage(cell) || stage->blocks[cell.row][cell.column] == 0 ||
+        !RpgAttachments_HasOuterEmptyCell(stage, cell, side) ||
+        side < RPG_GRID_SIDE_TOP || side > RPG_GRID_SIDE_LEFT) return false;
+    for (int index = 0; index < attachments->count; index++)
+        if (RpgAttachments_AreSame(&attachments->entries[index], &attachment)) return false;
+    attachments->entries[attachments->count++] = attachment;
+    return true;
+}
+
+bool RpgAttachments_MoveDataPathEndpoint(RpgAttachments *attachments, const RpgStage *stage,
+                                          int attachmentIndex, int row, int column)
+{
+    (void)stage;
+    if (attachmentIndex < 0 || attachmentIndex >= attachments->count ||
+        attachments->entries[attachmentIndex].type != RPG_BLOCK_ATTACHMENT_RADIO_EMITTER ||
+        row < 0 || row >= RPG_STAGE_ROWS ||
+        column < 0 || column >= RPG_STAGE_WORLD_COLUMNS) return false;
+    return RpgGridPath_MoveEndpoint(&attachments->entries[attachmentIndex].dataPath, false,
+                                    (RpgGridCell){ row, column }, 1);
+}
+
+bool RpgAttachments_FindDataPathEndpoint(const RpgAttachments *attachments, int row, int column,
+                                         int *attachmentIndex)
+{
+    for (int index = attachments->count - 1; index >= 0; index--) {
+        if (attachments->entries[index].type != RPG_BLOCK_ATTACHMENT_RADIO_EMITTER) continue;
+        const RpgGridPath *path = &attachments->entries[index].dataPath;
+        RpgGridCell end = path->cells[path->cellCount - 1];
+        if (end.row == row && end.column == column) { *attachmentIndex = index; return true; }
+    }
+    return false;
+}
+
+bool RpgAttachments_Remove(RpgAttachments *attachments, RpgAttachment attachment)
+{
+    for (int index = 0; index < attachments->count; index++) {
+        if (!RpgAttachments_AreSame(&attachments->entries[index], &attachment)) continue;
+        for (int next = index; next < attachments->count - 1; next++)
+            attachments->entries[next] = attachments->entries[next + 1];
+        attachments->count--;
+        return true;
+    }
+    return false;
+}
+
+void RpgAttachments_MigrateLegacyButtons(RpgAttachments *attachments, RpgStage *stage)
+{
+    // 旧来の単独ボタンを、同じ位置の隣にあるブロックへ取り付ける形式へ変換する。
+    for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
+        if (stage->blocks[row][column] != RPG_BLOCK_EFFECT_BUTTON) continue;
+        stage->blocks[row][column] = 0;
+        const RpgGridCell bases[] = {
+            { row + 1, column }, { row, column - 1 }, { row - 1, column }, { row, column + 1 }
+        };
+        const RpgGridSide sides[] = {
+            RPG_GRID_SIDE_TOP, RPG_GRID_SIDE_RIGHT, RPG_GRID_SIDE_BOTTOM, RPG_GRID_SIDE_LEFT
+        };
+        for (int index = 0; index < 4; index++) {
+            RpgGridCell base = bases[index];
+            if (base.row < 0 || base.row >= RPG_STAGE_ROWS || base.column < 0 ||
+                base.column >= RPG_STAGE_WORLD_COLUMNS || stage->blocks[base.row][base.column] == 0) continue;
+            if (RpgAttachments_Add(attachments, stage, RPG_BLOCK_ATTACHMENT_DATA_BUTTON,
+                                   base, sides[index])) break;
+        }
+    }
+}
+
+bool RpgAttachments_IsButtonPressed(const RpgAttachments *attachments, Vector2 playerPosition)
+{
+    for (int index = 0; index < attachments->count; index++) {
+        const RpgAttachment *attachment = &attachments->entries[index];
+        if (attachment->type != RPG_BLOCK_ATTACHMENT_DATA_BUTTON) continue;
+        Vector2 position = RpgAttachments_GetPosition(attachment, 0);
+        if (fabsf(playerPosition.x - position.x) <= 22.0f && fabsf(playerPosition.y - position.y) <= 24.0f)
+            return true;
+    }
+    return false;
+}
+
+Vector2 RpgAttachments_GetPosition(const RpgAttachment *attachment, int firstColumn)
+{
+    RpgGridCell outerCell = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
+    float x = (outerCell.column - firstColumn) * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f;
+    float y = outerCell.row * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f;
+    // 外側1マスのうち、土台だけを取付先ブロック側の辺へ寄せる。
+    float offset = RPG_STAGE_TILE_SIZE * 0.5f - 6.0f;
+    if (attachment->side == RPG_GRID_SIDE_TOP) y += offset;
+    else if (attachment->side == RPG_GRID_SIDE_RIGHT) x -= offset;
+    else if (attachment->side == RPG_GRID_SIDE_BOTTOM) y -= offset;
+    else x += offset;
+    return (Vector2){ x, y };
+}
+
+int RpgAttachments_FindAtPosition(const RpgAttachments *attachments, Vector2 position, float distance)
+{
+    for (int index = attachments->count - 1; index >= 0; index--) {
+        Vector2 attachmentPosition = RpgAttachments_GetPosition(&attachments->entries[index], 0);
+        if (Vector2Distance(attachmentPosition, position) <= distance) return index;
+    }
+    return -1;
+}
+
+bool RpgAttachments_FindSnap(const RpgStage *stage, int type, Vector2 position,
+                             RpgAttachment *attachment)
+{
+    float nearestDistance = RPG_STAGE_TILE_SIZE;
+    bool found = false;
+    for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
+        if (stage->blocks[row][column] == 0) continue;
+        for (int side = RPG_GRID_SIDE_TOP; side <= RPG_GRID_SIDE_LEFT; side++) {
+            RpgAttachment candidate = { .type = type, .cell = { row, column },
+                                        .side = (RpgGridSide)side };
+            if (!RpgAttachments_HasOuterEmptyCell(stage, candidate.cell, candidate.side)) continue;
+            float distance = Vector2Distance(position, RpgAttachments_GetPosition(&candidate, 0));
+            if (distance > nearestDistance) continue;
+            nearestDistance = distance;
+            *attachment = candidate;
+            found = true;
+        }
+    }
+    return found;
+}
+
+void RpgAttachments_RemoveBroken(RpgAttachments *attachments, const RpgStage *stage)
+{
+    for (int index = 0; index < attachments->count;) {
+        RpgGridCell cell = attachments->entries[index].cell;
+        if (RpgAttachments_IsCellInStage(cell) && stage->blocks[cell.row][cell.column] != 0 &&
+            RpgAttachments_HasOuterEmptyCell(stage, cell, attachments->entries[index].side)) {
+            index++;
+            continue;
+        }
+        for (int next = index; next < attachments->count - 1; next++)
+            attachments->entries[next] = attachments->entries[next + 1];
+        attachments->count--;
+    }
+}
+
+static void RpgAttachments_DrawIcon(int type, Vector2 position, RpgGridSide side, float alpha)
+{
+    if (type == RPG_BLOCK_ATTACHMENT_DATA_BUTTON) {
+        bool vertical = side == RPG_GRID_SIDE_TOP || side == RPG_GRID_SIDE_BOTTOM;
+        Rectangle base = vertical ? (Rectangle){ position.x - 17.0f, position.y - 5.0f, 34.0f, 10.0f } :
+                                  (Rectangle){ position.x - 5.0f, position.y - 17.0f, 10.0f, 34.0f };
+        DrawRectangleRec(base, Fade(DARKGRAY, alpha));
+        DrawRectangleLinesEx(base, 1.5f, Fade(RAYWHITE, alpha));
+        DrawCircleV(position, 7.0f, Fade(RED, alpha));
+        DrawCircleLines((int)position.x, (int)position.y, 7.0f, Fade(MAROON, alpha));
+        return;
+    }
+    if (type != RPG_BLOCK_ATTACHMENT_RADIO_EMITTER) return;
+    Vector2 direction = { 0.0f, -1.0f };
+    if (side == RPG_GRID_SIDE_RIGHT) direction = (Vector2){ 1.0f, 0.0f };
+    else if (side == RPG_GRID_SIDE_BOTTOM) direction = (Vector2){ 0.0f, 1.0f };
+    else if (side == RPG_GRID_SIDE_LEFT) direction = (Vector2){ -1.0f, 0.0f };
+    Vector2 perpendicular = { -direction.y, direction.x };
+    Vector2 coil = { position.x + direction.x * 12.0f, position.y + direction.y * 12.0f };
+    Vector2 sphere = { position.x + direction.x * 24.0f, position.y + direction.y * 24.0f };
+    // 土台・コイル・発生球を、向きに応じてマス内へ連ねて描く。
+    DrawLineEx((Vector2){ position.x - perpendicular.x * 9.0f, position.y - perpendicular.y * 9.0f },
+               (Vector2){ position.x + perpendicular.x * 9.0f, position.y + perpendicular.y * 9.0f },
+               9.0f, Fade(DARKGRAY, alpha));
+    DrawLineEx((Vector2){ position.x - perpendicular.x * 8.0f, position.y - perpendicular.y * 8.0f },
+               (Vector2){ position.x + perpendicular.x * 8.0f, position.y + perpendicular.y * 8.0f },
+               4.0f, Fade(GRAY, alpha));
+    DrawLineEx(position, coil, 3.0f, Fade(GOLD, alpha));
+    DrawCircleV(coil, 9.0f, Fade(DARKBLUE, alpha));
+    DrawCircleLines((int)coil.x, (int)coil.y, 9.0f, Fade(SKYBLUE, alpha));
+    DrawCircleLines((int)coil.x, (int)coil.y, 5.0f, Fade(RAYWHITE, alpha));
+    DrawLineEx(coil, sphere, 2.0f, Fade(SKYBLUE, alpha));
+    DrawCircleV(sphere, 8.0f, Fade((Color){ 98, 221, 255, 255 }, alpha));
+    DrawCircleLines((int)sphere.x, (int)sphere.y, 8.0f, Fade(RAYWHITE, alpha));
+    DrawCircleLines((int)sphere.x, (int)sphere.y, 12.0f, Fade(SKYBLUE, alpha * 0.65f));
+}
+
+static void RpgAttachments_DrawWithOffset(const RpgAttachments *attachments, int firstColumn,
+                                          int columnCount, int excludedIndex)
+{
+    int lastColumn = firstColumn + columnCount;
+    for (int index = 0; index < attachments->count; index++) {
+        if (index == excludedIndex) continue;
+        const RpgAttachment *attachment = &attachments->entries[index];
+        RpgGridCell outerCell = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
+        if (outerCell.column < firstColumn || outerCell.column >= lastColumn) continue;
+        Vector2 position = RpgAttachments_GetPosition(attachment, firstColumn);
+        RpgAttachments_DrawIcon(attachment->type, position, attachment->side, 0.94f);
+    }
+}
+
+void RpgAttachments_Draw(const RpgAttachments *attachments)
+{
+    RpgAttachments_DrawWithOffset(attachments, 0, RPG_STAGE_WORLD_COLUMNS, -1);
+}
+
+void RpgAttachments_DrawMap(const RpgAttachments *attachments, int mapIndex)
+{
+    RpgAttachments_DrawWithOffset(attachments, mapIndex * RPG_STAGE_COLUMNS, RPG_STAGE_COLUMNS, -1);
+}
+
+void RpgAttachments_DrawMapExcept(const RpgAttachments *attachments, int mapIndex, int excludedIndex)
+{
+    RpgAttachments_DrawWithOffset(attachments, mapIndex * RPG_STAGE_COLUMNS, RPG_STAGE_COLUMNS, excludedIndex);
+}
+
+void RpgAttachments_DrawGhost(int type, Vector2 position, RpgGridSide side, bool isSnapped)
+{
+    RpgAttachments_DrawIcon(type, position, side, isSnapped ? 0.74f : 0.42f);
+}
+
+void RpgAttachments_DrawDataPaths(const RpgAttachments *attachments, int mapIndex)
+{
+    int firstColumn = mapIndex * RPG_STAGE_COLUMNS;
+    int lastColumn = firstColumn + RPG_STAGE_COLUMNS;
+    for (int index = 0; index < attachments->count; index++) {
+        if (attachments->entries[index].type != RPG_BLOCK_ATTACHMENT_RADIO_EMITTER) continue;
+        const RpgGridPath *path = &attachments->entries[index].dataPath;
+        for (int cellIndex = 0; cellIndex < path->cellCount - 1; cellIndex++) {
+            RpgGridCell first = path->cells[cellIndex];
+            RpgGridCell second = path->cells[cellIndex + 1];
+            if (first.column < firstColumn || first.column >= lastColumn ||
+                second.column < firstColumn || second.column >= lastColumn) continue;
+            Vector2 start = { (first.column - firstColumn) * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f,
+                              first.row * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f };
+            Vector2 end = { (second.column - firstColumn) * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f,
+                            second.row * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f };
+            DrawLineEx(start, end, 3.0f, Fade(YELLOW, 0.75f));
+        }
+        RpgGridCell endCell = path->cells[path->cellCount - 1];
+        if (endCell.column >= firstColumn && endCell.column < lastColumn) {
+            Vector2 end = { (endCell.column - firstColumn) * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f,
+                            endCell.row * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f };
+            DrawCircleLines((int)end.x, (int)end.y, 8.0f, YELLOW);
+        }
+    }
+}
+// 役割: ブロックに付与する電波装置・ボタンなどの設置物を管理する。

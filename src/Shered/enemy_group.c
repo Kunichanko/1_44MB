@@ -274,3 +274,4 @@ void EnemyGroup_UnloadAppearance(EnemyGroup *group)
         group->enemies[index].hasAppearance = false;
     }
 }
+// 役割: 横スクロールゲームの複数敵と隊列追従を管理する。

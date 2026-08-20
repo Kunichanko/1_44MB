@@ -197,3 +197,4 @@ Rectangle Player_GetBounds(const Player *player, float groundY)
         player->height,
     };
 }
+// 役割: 横スクロールゲームのプレイヤー操作、アニメーション、描画を管理する。

@@ -106,7 +106,7 @@ static EditorState Editor_Create(void)
 {
     EditorState editor = {0};
     editor.stage = Stage_Create();
-    Stage_Load(TextFormat("%s../assets/Settings/stage_grid.cfg", GetApplicationDirectory()),
+    Stage_Load(TextFormat("%s../assets/Settings/Stage/stage_grid.cfg", GetApplicationDirectory()),
                &editor.stage);
     editor.player = Player_Create(Stage_GetCellCenter(7, 7));
     Player_LoadDefaultAppearance(&editor.player,
@@ -145,7 +145,7 @@ static bool Editor_SaveSettings(EditorState *editor)
     bool settingsSaved = EnemySettings_Save(TextFormat("%s../assets/Settings/enemy_settings.cfg",
                                                        GetApplicationDirectory()), &settings);
     bool stageSaved = Stage_Save(&editor->stage,
-                                 TextFormat("%s../assets/Settings/stage_grid.cfg",
+                                 TextFormat("%s../assets/Settings/Stage/stage_grid.cfg",
                                             GetApplicationDirectory()));
     if (settingsSaved && stageSaved) {
         snprintf(editor->message, sizeof(editor->message), "敵設定を保存しました");
@@ -332,3 +332,4 @@ int main(void)
     CloseWindow();
     return 0;
 }
+// 役割: 横スクロール用エディターの初期化、入力、描画、保存処理を統合する。

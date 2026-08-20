@@ -118,3 +118,4 @@ bool RpgInspect_Save(const char *filePath, const RpgInspect *inspect)
     }
     return fclose(file) == 0;
 }
+// 役割: 調べる機能の会話・移動 Function 列を保存・編集する。

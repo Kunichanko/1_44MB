@@ -159,7 +159,7 @@ int main(void)
     GameFont_Load(TextFormat("%s../assets/Fonts/NotoSansJP-VF.ttf", GetApplicationDirectory()));
 
     Stage stage = Stage_Create();
-    Stage_Load(TextFormat("%s../assets/Settings/stage_grid.cfg", GetApplicationDirectory()),
+    Stage_Load(TextFormat("%s../assets/Settings/Stage/stage_grid.cfg", GetApplicationDirectory()),
                &stage);
     Player player = Player_Create(Stage_GetCellCenter(1, 3));
     // 実行時のカレントフォルダに左右されないよう、実行ファイルの隣にある assets/Sprite から画像を読む。
@@ -212,3 +212,4 @@ int main(void)
     CloseWindow();
     return 0;
 }
+// 役割: 横スクロールゲームの起動、更新、描画を制御するエントリーポイント。

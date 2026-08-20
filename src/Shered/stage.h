@@ -39,3 +39,4 @@ bool Stage_Load(const char *filePath, Stage *stage);
 bool Stage_Save(const Stage *stage, const char *filePath);
 
 #endif
+// 役割: 横スクロールステージの状態と衝突 API を宣言する。

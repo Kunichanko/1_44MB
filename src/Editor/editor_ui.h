@@ -21,3 +21,4 @@ void EditorUI_DrawHint(bool playerSelected, bool enemySelected, bool isPlaying);
 void EditorUI_ResetInput(void);
 
 #endif
+// 役割: 横スクロール用エディターの共通 UI API を宣言する。

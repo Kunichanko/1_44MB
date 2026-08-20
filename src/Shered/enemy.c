@@ -181,3 +181,4 @@ void Enemy_UnloadAppearance(Enemy *enemy)
         enemy->hasAppearance = false;
     }
 }
+// 役割: 横スクロールゲームの敵一体の巡回・追従・描画を管理する。

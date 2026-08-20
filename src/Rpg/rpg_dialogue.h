@@ -24,3 +24,4 @@ bool RpgDialogue_DeleteLine(RpgDialogue *dialogue, int lineIndex);
 bool RpgDialogue_MoveLine(RpgDialogue *dialogue, int sourceIndex, int destinationIndex);
 
 #endif
+// 役割: 会話データの構造と編集・保存 API を宣言する。

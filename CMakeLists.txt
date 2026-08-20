@@ -47,17 +47,32 @@ set_target_properties(side_scroller_editor PROPERTIES
 
 add_executable(rpg_version
     src/Rpg/main.c
+    src/Rpg/rpg_attachment.c
+    src/Rpg/rpg_button_event.c
+    src/Rpg/rpg_block_inventory.c
     src/Rpg/rpg_character.c
+    src/Rpg/rpg_data_shot.c
     src/Rpg/rpg_dialogue.c
+    src/Rpg/rpg_grid_path.c
     src/Rpg/rpg_layout.c
     src/Rpg/rpg_inspect.c
+    src/Rpg/rpg_item.c
+    src/Rpg/rpg_map_event.c
+    src/Rpg/rpg_object_folder.c
+    src/Rpg/rpg_preview_event.c
+    src/Rpg/rpg_preview_system.c
+    src/Rpg/rpg_receiver.c
+    src/Rpg/rpg_signal_block.c
     src/Rpg/rpg_stage3_event.c
     src/Rpg/rpg_stage.c
+    src/Rpg/rpg_wire.c
+    src/Rpg/rpg_zipper.c
     src/Shered/game_font.c
 )
 
 target_compile_options(rpg_version PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(rpg_version PRIVATE raylib)
+target_link_options(rpg_version PRIVATE "-Wl,--stack,8388608")
+target_link_libraries(rpg_version PRIVATE raylib shell32)
 target_include_directories(rpg_version PRIVATE src/Rpg src/Shered)
 
 set_target_properties(rpg_version PROPERTIES
@@ -66,18 +81,36 @@ set_target_properties(rpg_version PROPERTIES
 
 add_executable(rpg_editor
     src/Rpg/editor_main.c
+    src/Rpg/rpg_editor_drag.c
+    src/Editor/file_dialog.c
+    src/Rpg/rpg_attachment.c
+    src/Rpg/rpg_button_event.c
+    src/Rpg/rpg_block_inventory.c
     src/Rpg/rpg_character.c
+    src/Rpg/rpg_data_shot.c
     src/Rpg/rpg_dialogue.c
+    src/Rpg/rpg_editor_text.c
+    src/Rpg/rpg_grid_path.c
     src/Rpg/rpg_layout.c
     src/Rpg/rpg_inspect.c
+    src/Rpg/rpg_item.c
+    src/Rpg/rpg_map_event.c
+    src/Rpg/rpg_object_folder.c
+    src/Rpg/rpg_preview_event.c
+    src/Rpg/rpg_preview_system.c
+    src/Rpg/rpg_receiver.c
+    src/Rpg/rpg_signal_block.c
     src/Rpg/rpg_stage3_event.c
     src/Rpg/rpg_stage.c
+    src/Rpg/rpg_wire.c
+    src/Rpg/rpg_zipper.c
     src/Shered/game_font.c
 )
 
 target_compile_options(rpg_editor PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(rpg_editor PRIVATE raylib imm32)
-target_include_directories(rpg_editor PRIVATE src/Rpg src/Shered)
+target_link_options(rpg_editor PRIVATE "-Wl,--stack,8388608")
+target_link_libraries(rpg_editor PRIVATE raylib imm32 comdlg32)
+target_include_directories(rpg_editor PRIVATE src/Rpg src/Shered src/Editor)
 set_target_properties(rpg_editor PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
 )

@@ -225,3 +225,4 @@ bool Stage_Save(const Stage *stage, const char *filePath)
     }
     return fclose(file) == 0;
 }
+// 役割: 横スクロールゲームの地面・壁グリッドと衝突判定を管理する。

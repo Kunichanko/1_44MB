@@ -16,3 +16,4 @@ bool RpgStage3Event_Load(const char *filePath, RpgStage3Event *event);
 bool RpgStage3Event_Save(const char *filePath, const RpgStage3Event *event);
 
 #endif
+// 役割: ステージ3導入イベントの構造と保存 API を宣言する。

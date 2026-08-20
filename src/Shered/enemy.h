@@ -42,3 +42,4 @@ void Enemy_Draw(const Enemy *enemy, float groundY);
 void Enemy_UnloadAppearance(Enemy *enemy);
 
 #endif
+// 役割: 横スクロール敵一体の状態と操作 API を宣言する。

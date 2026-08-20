@@ -68,3 +68,4 @@ bool RpgStage3Event_Save(const char *filePath, const RpgStage3Event *event)
     }
     return fclose(file) == 0;
 }
+// 役割: ステージ3へ入った時に一度だけ起動する会話イベントを管理する。

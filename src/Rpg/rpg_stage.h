@@ -32,6 +32,10 @@ bool RpgStage_Save(const char *filePath, const RpgStage *stage);
 int RpgStage_GetMapCount(const RpgStage *stage);
 bool RpgStage_IsMapActive(const RpgStage *stage, int mapIndex);
 int RpgStage_GetMapAtGrid(const RpgStage *stage, int gridX, int gridY);
+// 二次元ステージID (x, y) に最も近い、現在有効なステージスロットを返す。
+int RpgStage_FindNearestActiveMapAtGrid(const RpgStage *stage, int gridX, int gridY);
+// 無効になったスロットを参照している場合も、二次元IDを基準に最寄りへ補正する。
+int RpgStage_FindNearestActiveMap(const RpgStage *stage, int mapIndex);
 int RpgStage_GetAdjacentMap(const RpgStage *stage, int mapIndex, RpgAreaDirection direction);
 int RpgStage_GetOrCreateAdjacentMap(RpgStage *stage, int mapIndex, RpgAreaDirection direction);
 bool RpgStage_RemoveMap(RpgStage *stage, int mapIndex);

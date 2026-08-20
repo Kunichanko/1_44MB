@@ -10,6 +10,7 @@ typedef struct RpgZipper {
     RpgInspect inspect;
     float launchSpeed;
     float returnSpeed;
+    float followSpeed;
     bool launchPreviewEnabled;
 } RpgZipper;
 

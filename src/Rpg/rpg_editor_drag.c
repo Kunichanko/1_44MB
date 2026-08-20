@@ -3,6 +3,7 @@
 #include "rpg_editor_drag.h"
 
 #include <stddef.h>
+#include <math.h>
 
 #include "raymath.h"
 
@@ -36,4 +37,11 @@ void RpgEditorDrag_End(RpgEditorDrag *drag)
     if (drag == NULL) return;
     drag->active = false;
     drag->pending = false;
+}
+
+Vector2 RpgEditorDrag_SnapToGrid(Vector2 position, float tileSize)
+{
+    if (tileSize <= 0.0f) return position;
+    return (Vector2){ floorf(position.x / tileSize) * tileSize,
+                      floorf(position.y / tileSize) * tileSize };
 }

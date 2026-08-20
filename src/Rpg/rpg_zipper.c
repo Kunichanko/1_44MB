@@ -5,15 +5,34 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "raymath.h"
+
 RpgZipper RpgZipper_Default(void)
 {
     RpgZipper zipper = { 0 };
-    zipper.character = RpgCharacter_Create((Vector2){ RPG_STAGE_WORLD_WIDTH - RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE / 2.0f, 400.0f }, ORANGE, BROWN);
+    // 初期配置はステージID (2, 0)、すなわち3番目のステージの中央下辺に固定する。
+    zipper.character = RpgCharacter_Create((Vector2){ 2.0f * RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE +
+                                                       RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE * 0.5f,
+                                                       8.0f * RPG_STAGE_TILE_SIZE }, ORANGE, BROWN);
     zipper.inspect = RpgInspect_Default("Zipper", "Nothing unusual here.");
     zipper.launchSpeed = 720.0f;
     zipper.returnSpeed = 180.0f;
+    zipper.followSpeed = 180.0f;
     zipper.launchPreviewEnabled = false;
     return zipper;
+}
+
+// 旧設定は5項目、新設定は6項目。整数読込が小数部を別項目として扱わないよう、先に項目数を数える。
+static int CountConfigValues(const char *line)
+{
+    int count = 0;
+    bool inValue = false;
+    for (const char *cursor = line; *cursor != '\0'; cursor++) {
+        bool isSeparator = *cursor == ' ' || *cursor == '\t' || *cursor == '\r' || *cursor == '\n';
+        if (!isSeparator && !inValue) count++;
+        inValue = !isSeparator;
+    }
+    return count;
 }
 
 bool RpgZipper_Load(const char *filePath, RpgZipper *zipper)
@@ -40,10 +59,24 @@ bool RpgZipper_Load(const char *filePath, RpgZipper *zipper)
     }
     char line[128];
     int previewEnabled = 0;
-    int readCount = fgets(line, sizeof(line), file) != NULL ?
-                    sscanf(line, "%f %f %f %d %f", &zipper->character.position.x,
-                           &zipper->character.scale, &zipper->launchSpeed, &previewEnabled,
-                           &zipper->returnSpeed) : 0;
+    int readCount = 0;
+    if (fgets(line, sizeof(line), file) != NULL) {
+        int valueCount = CountConfigValues(line);
+        if (valueCount == 7) {
+            readCount = sscanf(line, "%f %f %f %f %d %f %f", &zipper->character.position.x,
+                               &zipper->character.position.y, &zipper->character.scale,
+                               &zipper->launchSpeed, &previewEnabled, &zipper->returnSpeed,
+                               &zipper->followSpeed);
+        } else if (valueCount == 6) {
+            readCount = sscanf(line, "%f %f %f %f %d %f", &zipper->character.position.x,
+                               &zipper->character.position.y, &zipper->character.scale,
+                               &zipper->launchSpeed, &previewEnabled, &zipper->returnSpeed);
+        } else if (valueCount == 5) {
+            readCount = sscanf(line, "%f %f %f %d %f", &zipper->character.position.x,
+                               &zipper->character.scale, &zipper->launchSpeed, &previewEnabled,
+                               &zipper->returnSpeed);
+        }
+    }
     bool loaded = readCount >= 2;
     if (readCount >= 4) zipper->launchPreviewEnabled = previewEnabled != 0;
     fclose(file);
@@ -54,9 +87,10 @@ bool RpgZipper_Save(const char *filePath, const RpgZipper *zipper)
 {
     FILE *file = fopen(filePath, "w");
     if (file == NULL) return false;
-    bool saved = fprintf(file, "%.2f %.2f %.2f %d %.2f\n", zipper->character.position.x,
-                         zipper->character.scale, zipper->launchSpeed,
-                         zipper->launchPreviewEnabled ? 1 : 0, zipper->returnSpeed) > 0;
+    bool saved = fprintf(file, "%.2f %.2f %.2f %.2f %d %.2f %.2f\n", zipper->character.position.x,
+                         zipper->character.position.y, zipper->character.scale, zipper->launchSpeed,
+                         zipper->launchPreviewEnabled ? 1 : 0, zipper->returnSpeed,
+                         zipper->followSpeed) > 0;
     return fclose(file) == 0 && saved;
 }
 
@@ -64,9 +98,11 @@ Rectangle RpgZipper_GetSpriteBounds(const RpgCharacter *character, float groundY
 {
     // Zipperの座標は主人公と同じ足元基準。射出中はY座標も反映する。
     (void)groundY;
-    return (Rectangle){ character->position.x - 24.0f * character->scale,
-                        character->position.y - 20.0f - 60.0f * character->scale,
-                        48.0f * character->scale, 60.0f * character->scale };
+    // 元画像の1フレームは32×40pxなので、48pxマスへ高さ基準で収めて縦横比を保つ。
+    float height = RPG_STAGE_TILE_SIZE * Clamp(character->scale, 0.5f, 1.0f);
+    float width = height * (32.0f / 40.0f);
+    return (Rectangle){ character->position.x - width * 0.5f,
+                        character->position.y - height, width, height };
 }
 
 void RpgZipper_DrawPointerFeedback(Rectangle bounds, bool isHovered, bool isSelected)

@@ -9,6 +9,7 @@
 typedef struct RpgObjectFolder { RpgGridCell cell; } RpgObjectFolder;
 
 bool RpgObjectFolder_CopyFileToZipperInbox(const char *sourcePath);
+bool RpgObjectFolder_OpenZipperDirectory(void);
 void RpgObjectFolder_PrepareZipperAnimationCommand(void);
 bool RpgObjectFolder_ConsumeZipperAnimationRequest(void);
 

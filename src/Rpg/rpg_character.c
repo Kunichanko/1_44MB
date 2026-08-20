@@ -14,10 +14,10 @@ RpgCharacter RpgCharacter_Create(Vector2 position, Color shirtColor, Color hairC
 
 Rectangle RpgCharacter_GetCollisionBounds(const RpgCharacter *character)
 {
-    float scale = character->scale;
-    return (Rectangle){ character->position.x - 10.0f * scale,
-                        character->position.y - 70.0f * scale,
-                        20.0f * scale, 70.0f * scale };
+    (void)character;
+    return (Rectangle){ character->position.x - RPG_STAGE_TILE_SIZE * 0.5f,
+                        character->position.y - RPG_STAGE_TILE_SIZE,
+                        RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE };
 }
 
 static bool RpgCharacter_MoveAxis(RpgCharacter *character, const RpgStage *stage,
@@ -105,21 +105,22 @@ bool RpgCharacter_IsNear(const RpgCharacter *first, const RpgCharacter *second, 
 
 Rectangle RpgCharacter_GetFootBounds(const RpgCharacter *character)
 {
-    return (Rectangle){ character->position.x - 12.0f, character->position.y - 18.0f,
-                        24.0f, 18.0f };
+    return RpgCharacter_GetCollisionBounds(character);
 }
 
 void RpgCharacter_Draw(const RpgCharacter *character, const char *name)
 {
     Vector2 position = character->position;
-    float scale = character->scale;
-    DrawEllipse((int)position.x, (int)position.y + (int)(4 * scale), (int)(19 * scale), (int)(5 * scale), Fade(BLACK, 0.18f));
-    DrawRectangle((int)(position.x - 12 * scale), (int)(position.y - 46 * scale), (int)(24 * scale), (int)(26 * scale), character->shirtColor);
-    DrawRectangle((int)(position.x - 11 * scale), (int)(position.y - 20 * scale), (int)(9 * scale), (int)(20 * scale), DARKBLUE);
-    DrawRectangle((int)(position.x + 2 * scale), (int)(position.y - 20 * scale), (int)(9 * scale), (int)(20 * scale), DARKBLUE);
-    DrawCircle((int)position.x, (int)(position.y - 58 * scale), 13.0f * scale, (Color){ 255, 220, 185, 255 });
-    DrawCircleSector((Vector2){ position.x, position.y - 58.0f * scale }, 14.0f * scale, 190.0f, 350.0f, 16,
+    float scale = Clamp(character->scale, 0.5f, 1.0f);
+    float size = RPG_STAGE_TILE_SIZE * scale;
+    float top = position.y - size;
+    DrawEllipse((int)position.x, (int)position.y + 2, (int)(size * 0.38f), (int)(size * 0.10f), Fade(BLACK, 0.18f));
+    DrawRectangle((int)(position.x - size * 0.27f), (int)(top + size * 0.42f), (int)(size * 0.54f), (int)(size * 0.31f), character->shirtColor);
+    DrawRectangle((int)(position.x - size * 0.24f), (int)(top + size * 0.73f), (int)(size * 0.20f), (int)(size * 0.27f), DARKBLUE);
+    DrawRectangle((int)(position.x + size * 0.04f), (int)(top + size * 0.73f), (int)(size * 0.20f), (int)(size * 0.27f), DARKBLUE);
+    DrawCircle((int)position.x, (int)(top + size * 0.25f), size * 0.22f, (Color){ 255, 220, 185, 255 });
+    DrawCircleSector((Vector2){ position.x, top + size * 0.25f }, size * 0.24f, 190.0f, 350.0f, 16,
                      character->hairColor);
-    DrawText(name, (int)position.x - MeasureText(name, 16) / 2, (int)position.y - 90, 16, DARKGRAY);
+    DrawText(name, (int)position.x - MeasureText(name, 16) / 2, (int)top - 16, 16, DARKGRAY);
 }
 // 役割: RPG キャラクターの移動、接地判定、描画を管理する。

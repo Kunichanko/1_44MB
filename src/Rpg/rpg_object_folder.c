@@ -9,6 +9,7 @@
 #define NOGDI
 #define NOUSER
 #include <windows.h>
+#include <shellapi.h>
 
 // NOUSER を維持したまま Explorer 更新通知だけを利用するための最小宣言。
 void WINAPI SHChangeNotify(LONG eventId, UINT flags, const void *item1, const void *item2);
@@ -33,6 +34,17 @@ static bool ToAbsoluteWide(const char *path, wchar_t *wide, int count)
     if (!ToWide(path, input, 1200)) return false;
     length = GetFullPathNameW(input, (DWORD)count, wide, NULL);
     return length > 0 && length < (DWORD)count;
+}
+
+bool RpgObjectFolder_OpenZipperDirectory(void)
+{
+    char directory[1200];
+    wchar_t wideDirectory[1200];
+    if (snprintf(directory, sizeof(directory), "%s../assets/Settings/Zipper",
+                 GetApplicationDirectory()) <= 0 ||
+        !ToAbsoluteWide(directory, wideDirectory, 1200)) return false;
+    CreateDirectoryW(wideDirectory, NULL);
+    return (INT_PTR)ShellExecuteW(NULL, L"open", wideDirectory, NULL, NULL, 1) > 32;
 }
 
 // Explorer を Inbox のまま開いていても、移動・生成・削除をその場で反映させる。

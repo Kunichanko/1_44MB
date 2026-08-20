@@ -65,6 +65,8 @@ add_executable(rpg_version
     src/Rpg/rpg_signal_block.c
     src/Rpg/rpg_stage3_event.c
     src/Rpg/rpg_stage.c
+    src/Rpg/rpg_runtime_update.c
+    src/Rpg/rpg_runtime.c
     src/Rpg/rpg_wire.c
     src/Rpg/rpg_zipper.c
     src/Shered/game_font.c
@@ -82,6 +84,9 @@ set_target_properties(rpg_version PROPERTIES
 add_executable(rpg_editor
     src/Rpg/editor_main.c
     src/Rpg/rpg_editor_drag.c
+    src/Rpg/rpg_editor_play.c
+    src/Rpg/rpg_runtime.c
+    src/Rpg/rpg_runtime_update.c
     src/Editor/file_dialog.c
     src/Rpg/rpg_attachment.c
     src/Rpg/rpg_button_event.c

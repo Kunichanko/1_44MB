@@ -87,6 +87,34 @@ int RpgStage_GetMapAtGrid(const RpgStage *stage, int gridX, int gridY)
     return -1;
 }
 
+int RpgStage_FindNearestActiveMapAtGrid(const RpgStage *stage, int gridX, int gridY)
+{
+    if (stage == NULL) return -1;
+    int nearestMap = -1;
+    int nearestDistance = 0;
+    for (int index = 0; index < RPG_STAGE_MAP_COUNT; index++) {
+        if (!stage->mapActive[index]) continue;
+        int distance = abs(stage->mapGridX[index] - gridX) + abs(stage->mapGridY[index] - gridY);
+        if (nearestMap < 0 || distance < nearestDistance) {
+            nearestMap = index;
+            nearestDistance = distance;
+        }
+    }
+    return nearestMap;
+}
+
+int RpgStage_FindNearestActiveMap(const RpgStage *stage, int mapIndex)
+{
+    if (RpgStage_IsMapActive(stage, mapIndex)) return mapIndex;
+    int gridX = 0;
+    int gridY = 0;
+    if (stage != NULL && mapIndex >= 0 && mapIndex < RPG_STAGE_MAP_COUNT) {
+        gridX = stage->mapGridX[mapIndex];
+        gridY = stage->mapGridY[mapIndex];
+    }
+    return RpgStage_FindNearestActiveMapAtGrid(stage, gridX, gridY);
+}
+
 int RpgStage_GetAdjacentMap(const RpgStage *stage, int mapIndex, RpgAreaDirection direction)
 {
     if (!RpgStage_IsMapActive(stage, mapIndex)) return -1;
@@ -99,6 +127,8 @@ int RpgStage_GetAdjacentMap(const RpgStage *stage, int mapIndex, RpgAreaDirectio
 
 int RpgStage_GetOrCreateAdjacentMap(RpgStage *stage, int mapIndex, RpgAreaDirection direction)
 {
+    mapIndex = RpgStage_FindNearestActiveMap(stage, mapIndex);
+    if (mapIndex < 0) return -1;
     int adjacent = RpgStage_GetAdjacentMap(stage, mapIndex, direction);
     if (adjacent >= 0) return adjacent;
     if (!RpgStage_IsMapActive(stage, mapIndex)) return -1;
@@ -122,8 +152,7 @@ bool RpgStage_RemoveMap(RpgStage *stage, int mapIndex)
     if (!RpgStage_IsMapActive(stage, mapIndex) || RpgStage_GetMapCount(stage) <= 1) return false;
     ClearMapSlot(stage, mapIndex);
     stage->mapActive[mapIndex] = false;
-    stage->mapGridX[mapIndex] = 0;
-    stage->mapGridY[mapIndex] = 0;
+    // 再作成前の二次元IDを残し、Revertなどで無効なスロットを参照した際の最寄り判定に使う。
     return true;
 }
 

@@ -1,4 +1,4 @@
-// 依存する自プロジェクト内ファイル: rpg_runtime.h, game_font.h, rpg_block_inventory.h, rpg_object_folder.h, rpg_runtime_update.h
+// 依存する自プロジェクト内ファイル: rpg_runtime.h, game_font.h, rpg_block_inventory.h, rpg_object_folder.h, rpg_runtime_update.h, rpg_explorer_shell.h
 // 役割: 本編とエディター内プレイで共通のRPGフレーム更新と描画を実装する。
 #include "rpg_runtime.h"
 #include "raymath.h"
@@ -15,10 +15,13 @@
 #include "game_font.h"
 #include "rpg_block_inventory.h"
 #include "rpg_object_folder.h"
+#include "rpg_explorer_shell.h"
 #include "rpg_runtime_update.h"
 #include "rpg_scene.h"
 enum { RPG_SCREEN_WIDTH = 960, RPG_SCREEN_HEIGHT = 540 };
 static const float zipperImportAnimationDuration = 0.60f;
+static Texture2D folderReturnIcon = { 0 };
+static bool hasLoadedFolderReturnIcon = false;
 
 static const char *npcTalkPrompt = u8"[E] \u8a71\u3057\u304b\u3051\u308b";
 static const char *zipperInspectPrompt = u8"[I] \u8abf\u3079\u308b";
@@ -111,21 +114,259 @@ static void StartZipperImportAnimation(float *animationElapsed)
     if (animationElapsed != NULL) *animationElapsed = 0.0f;
 }
 
-/* cmdのゲーム機能。アニメーションの成否・再生時間に依存せず、受信時にただちに実行する。 */
-static void RunZipperCommandFunction(RpgRuntimeContext *context)
+static Texture2D GetFolderReturnIcon(void)
 {
+    if (!hasLoadedFolderReturnIcon) {
+        folderReturnIcon = RpgExplorerShell_LoadFolderIconTexture();
+        hasLoadedFolderReturnIcon = true;
+    }
+    return folderReturnIcon;
+}
+
+static Vector2 GetHeldObjectReturnDestination(const RpgRuntimeContext *context)
+{
+    const RpgZipperHeldObject *held = &(*context->zipper).heldObject;
+    if (held->kind == RPG_ZIPPER_HELD_OBJECT_DATA_SHOT && held->dataShotIndex >= 0 &&
+        held->dataShotIndex < RPG_DATA_SHOT_MAX_COUNT)
+        return (*context->dataShots).entries[held->dataShotIndex].position;
+    if (held->kind == RPG_ZIPPER_HELD_OBJECT_ATTACHMENT && held->attachmentIndex >= 0 &&
+        held->attachmentIndex < (*context->attachments).count)
+        return RpgAttachments_GetPosition(&(*context->attachments).entries[held->attachmentIndex], 0);
+    if (held->kind == RPG_ZIPPER_HELD_OBJECT_BLOCK)
+        return (Vector2){ (held->blockCell.column + 0.5f) * RPG_STAGE_TILE_SIZE,
+                          (held->blockCell.row + 0.5f) * RPG_STAGE_TILE_SIZE };
+    return (*context->zipper).character.position;
+}
+
+static void StartZipperFolderReturnVisual(RpgRuntimeContext *context)
+{
+    RpgZipper *zipper = context->zipper;
+    zipper->isFolderReturnAnimating = true;
+    zipper->folderReturnElapsed = 0.0f;
+    zipper->folderReturnDuration = context->layout != NULL ?
+        Clamp((*context->layout).zipperFolderReturnDuration, 0.10f, 5.0f) : 0.45f;
+    zipper->folderReturnStart = zipper->character.position;
+    zipper->folderReturnDestination = GetHeldObjectReturnDestination(context);
+}
+
+/* 1マス占有アタッチメントのフォルダがInboxへ移動した間は、対応マスを赤い壁として扱う。 */
+static void SetHeldAttachmentCellError(RpgStage *stage, RpgAttachment *attachment, bool isMissing)
+{
+    RpgGridCell occupiedCell;
+    if (stage == NULL || attachment == NULL || !RpgAttachments_GetOccupiedCell(attachment, &occupiedCell)) return;
+    if (isMissing) stage->blocks[occupiedCell.row][occupiedCell.column] = RPG_BLOCK_BUILD_MISSING;
+    else if (stage->blocks[occupiedCell.row][occupiedCell.column] == RPG_BLOCK_BUILD_MISSING)
+        stage->blocks[occupiedCell.row][occupiedCell.column] = 0;
+}
+
+/* 返却開始時は Inbox から StageN へ移すだけにする。演出中はフォルダを build に戻さない。 */
+static bool BeginZipperHeldObjectReturn(RpgRuntimeContext *context)
+{
+    RpgZipperHeldObject *held = &(*context->zipper).heldObject;
+    bool returned = false;
+    if (held->kind == RPG_ZIPPER_HELD_OBJECT_NONE) return true;
+    if (held->kind == RPG_ZIPPER_HELD_OBJECT_DATA_SHOT && held->dataShotIndex >= 0 &&
+        held->dataShotIndex < RPG_DATA_SHOT_MAX_COUNT)
+        returned = RpgObjectFolder_BeginReturnDataShotFromZipper(&(*context->dataShots).entries[held->dataShotIndex]);
+    else if (held->kind == RPG_ZIPPER_HELD_OBJECT_ATTACHMENT && held->attachmentIndex >= 0 &&
+             held->attachmentIndex < (*context->attachments).count) {
+        RpgAttachment *attachment = &(*context->attachments).entries[held->attachmentIndex];
+        returned = RpgObjectFolder_BeginReturnAttachmentFromZipper(attachment);
+    }
+    else if (held->kind == RPG_ZIPPER_HELD_OBJECT_BLOCK && held->blockCell.row >= 0 && held->blockCell.column >= 0) {
+        RpgObjectFolder folder = { .cell = held->blockCell };
+        returned = RpgObjectFolder_BeginReturnBlockFromZipper(&folder, held->blockType);
+    }
+    return returned;
+}
+
+/* 演出完了時にだけ StageN の待機フォルダを build へ確定し、対応するゲーム状態を復帰する。 */
+static bool CompleteZipperHeldObjectReturn(RpgRuntimeContext *context)
+{
+    RpgZipper *zipper = context->zipper;
+    RpgZipperHeldObject *held = &zipper->returningObject;
+    bool returned = false;
+    if (held->kind == RPG_ZIPPER_HELD_OBJECT_NONE) return true;
+    if (held->kind == RPG_ZIPPER_HELD_OBJECT_DATA_SHOT && held->dataShotIndex >= 0 &&
+        held->dataShotIndex < RPG_DATA_SHOT_MAX_COUNT) {
+        returned = RpgObjectFolder_ReturnDataShotFromZipper(&(*context->dataShots).entries[held->dataShotIndex]);
+        if (returned) {
+            RpgDataShot *shot = &(*context->dataShots).entries[held->dataShotIndex];
+            (void)RpgObjectFolder_RestoreDataShotFromMetadata(shot);
+            shot->isZipperHeld = false;
+        }
+    }
+    else if (held->kind == RPG_ZIPPER_HELD_OBJECT_ATTACHMENT && held->attachmentIndex >= 0 &&
+             held->attachmentIndex < (*context->attachments).count) {
+        RpgAttachment *attachment = &(*context->attachments).entries[held->attachmentIndex];
+        returned = RpgObjectFolder_ReturnAttachmentFromZipper(attachment);
+        if (returned) {
+            attachment->isZipperHeld = false;
+            SetHeldAttachmentCellError(context->stage, attachment, false);
+        }
+    } else if (held->kind == RPG_ZIPPER_HELD_OBJECT_BLOCK && held->blockCell.row >= 0 && held->blockCell.column >= 0) {
+        RpgObjectFolder folder = { .cell = held->blockCell };
+        returned = RpgObjectFolder_ReturnBlockFromZipper(&folder, held->blockType);
+    }
+    if (returned)
+        *held = (RpgZipperHeldObject){ .kind = RPG_ZIPPER_HELD_OBJECT_NONE,
+                                       .blockCell = { -1, -1 }, .attachmentIndex = -1, .dataShotIndex = -1 };
+    if (returned) zipper->isFolderReturnCommitPending = false;
+    return returned;
+}
+
+static bool CaptureCurrentZipperObject(RpgRuntimeContext *context)
+{
+    RpgZipperHeldObject held = { .kind = RPG_ZIPPER_HELD_OBJECT_NONE,
+                                 .blockCell = { -1, -1 }, .attachmentIndex = -1, .dataShotIndex = -1 };
+    bool captured = false;
     if ((*context->attachedDataShotIndex) >= 0 && (*context->attachedDataShotIndex) < RPG_DATA_SHOT_MAX_COUNT &&
         (*context->dataShots).entries[(*context->attachedDataShotIndex)].active) {
-        (void)RpgObjectFolder_MoveDataShotToZipper(&(*context->dataShots).entries[(*context->attachedDataShotIndex)]);
+        captured = RpgObjectFolder_MoveDataShotToZipper(&(*context->dataShots).entries[(*context->attachedDataShotIndex)]);
+        if (captured) (*context->dataShots).entries[(*context->attachedDataShotIndex)].isZipperHeld = true;
+        held.kind = RPG_ZIPPER_HELD_OBJECT_DATA_SHOT;
+        held.dataShotIndex = (*context->attachedDataShotIndex);
     } else if ((*context->isZipperAttachedToBlock) && (*context->zipperAttachedBlockCell).row >= 0 &&
                (*context->zipperAttachedBlockCell).column >= 0) {
-        if ((*context->attachedAttachmentIndex) >= 0 && (*context->attachedAttachmentIndex) < (*context->attachments).count)
-            (void)RpgObjectFolder_MoveAttachmentToZipper(&(*context->attachments).entries[(*context->attachedAttachmentIndex)]);
-        else {
+        if ((*context->attachedAttachmentIndex) >= 0 && (*context->attachedAttachmentIndex) < (*context->attachments).count) {
+            RpgAttachment *attachment = &(*context->attachments).entries[(*context->attachedAttachmentIndex)];
+            captured = RpgObjectFolder_MoveAttachmentToZipper(attachment);
+            if (captured) {
+                attachment->isZipperHeld = true;
+                SetHeldAttachmentCellError(context->stage, attachment, true);
+            }
+            held.kind = RPG_ZIPPER_HELD_OBJECT_ATTACHMENT;
+            held.attachmentIndex = (*context->attachedAttachmentIndex);
+        } else {
             RpgObjectFolder blockFolder = { .cell = (*context->zipperAttachedBlockCell) };
-            (void)RpgObjectFolder_MoveBlockToZipper(&blockFolder,
-                (*context->stage).blocks[(*context->zipperAttachedBlockCell).row][(*context->zipperAttachedBlockCell).column]);
+            held.kind = RPG_ZIPPER_HELD_OBJECT_BLOCK;
+            held.blockCell = (*context->zipperAttachedBlockCell);
+            held.blockType = (*context->stage).blocks[held.blockCell.row][held.blockCell.column];
+            captured = RpgObjectFolder_MoveBlockToZipper(&blockFolder, held.blockType);
         }
+    }
+    if (!captured) return false;
+    (*context->zipper).heldObject = held;
+    (*context->zipperFollowsPlayer) = true;
+    (*context->isZipperLaunched) = false;
+    (*context->attachedDataShotIndex) = -1;
+    (*context->attachedAttachmentIndex) = -1;
+    (*context->isZipperAttachedToBlock) = false;
+    (*context->zipperAttachedBlockCell) = (RpgGridCell){ -1, -1 };
+    return true;
+}
+
+/* cmdのゲーム機能。返却フォルダがない時、または返却演出が完了した時に次の対象を取得する。 */
+static void CaptureZipperCommandTarget(RpgRuntimeContext *context)
+{
+    if (CaptureCurrentZipperObject(context)) return;
+    /* 取得対象がなくても、cmd完了後のZipperは必ず帰還状態に統一する。 */
+    (*context->zipperFollowsPlayer) = true;
+    (*context->isZipperLaunched) = false;
+    (*context->attachedDataShotIndex) = -1;
+    (*context->attachedAttachmentIndex) = -1;
+    (*context->isZipperAttachedToBlock) = false;
+    (*context->zipperAttachedBlockCell) = (RpgGridCell){ -1, -1 };
+}
+
+static void RunZipperCommandFunction(RpgRuntimeContext *context)
+{
+    RpgZipper *zipper = context->zipper;
+    if (zipper->heldObject.kind != RPG_ZIPPER_HELD_OBJECT_NONE) {
+        StartZipperFolderReturnVisual(context);
+        if (BeginZipperHeldObjectReturn(context)) {
+            /* 返却開始が完了すれば、演出中でも次の対象取得と追従復帰は待たせない。 */
+            zipper->returningObject = zipper->heldObject;
+            zipper->heldObject = (RpgZipperHeldObject){ .kind = RPG_ZIPPER_HELD_OBJECT_NONE,
+                                                        .blockCell = { -1, -1 },
+                                                        .attachmentIndex = -1, .dataShotIndex = -1 };
+            zipper->isFolderReturnCommitPending = true;
+            CaptureZipperCommandTarget(context);
+        } else {
+            zipper->isFolderReturnAnimating = false;
+            zipper->folderReturnElapsed = 0.0f;
+        }
+        return;
+    }
+    CaptureZipperCommandTarget(context);
+}
+
+/* cmd起動時は演出だけを始め、ファイル操作はアニメーション終了まで待機する。 */
+static void StartZipperCommand(RpgRuntimeContext *context)
+{
+    RpgZipper *zipper = context->zipper;
+    StartZipperImportAnimation(context->zipperAnimationElapsed);
+    (void)RpgObjectFolder_CompleteZipperCommandRequest();
+    /* cmd入力と同時に旧フォルダを待機場所へ移し、演出後に次の取り込みを確定する。 */
+    if (zipper->heldObject.kind != RPG_ZIPPER_HELD_OBJECT_NONE) {
+        StartZipperFolderReturnVisual(context);
+        if (BeginZipperHeldObjectReturn(context)) {
+            zipper->returningObject = zipper->heldObject;
+            zipper->heldObject = (RpgZipperHeldObject){ .kind = RPG_ZIPPER_HELD_OBJECT_NONE,
+                                                        .blockCell = { -1, -1 },
+                                                        .attachmentIndex = -1, .dataShotIndex = -1 };
+            zipper->isFolderReturnCommitPending = true;
+        } else {
+            zipper->isFolderReturnAnimating = false;
+            zipper->folderReturnElapsed = 0.0f;
+        }
+    }
+    zipper->isFolderReturnPending = true;
+}
+
+void RpgRuntime_ProcessZipperCommand(RpgRuntimeContext *context)
+{
+    if (context == NULL || context->zipperAnimationElapsed == NULL ||
+        !RpgObjectFolder_BeginZipperCommandRequest()) return;
+    /* 実行中のcmdは一つだけにして、状態に関係なく同じ完了手順へ送る。 */
+    if ((*context->zipper).isFolderReturnPending || (*context->zipper).isFolderReturnAnimating ||
+        (*context->zipper).isFolderReturnCommitPending) {
+        (void)RpgObjectFolder_CompleteZipperCommandRequest();
+        return;
+    }
+    StartZipperCommand(context);
+}
+
+void RpgRuntime_UpdateZipperFolderReturn(RpgRuntimeContext *context, float deltaTime)
+{
+    RpgZipper *zipper;
+    if (context == NULL || context->zipper == NULL || context->zipperAnimationElapsed == NULL) return;
+    zipper = context->zipper;
+    /* 取り込みアニメーション完了後、返却対象を StageN へ待機させて返却演出を始める。 */
+    /* 返却フォルダの実移動・演出は独立しているため、取り込み演出が終われば待たずに帰還・次の取得へ進む。 */
+    if (zipper->isFolderReturnPending && *context->zipperAnimationElapsed < 0.0f) {
+        zipper->isFolderReturnPending = false;
+        RunZipperCommandFunction(context);
+    }
+    if (!zipper->isFolderReturnAnimating) return;
+    zipper->folderReturnElapsed += deltaTime;
+    if (zipper->folderReturnElapsed >= zipper->folderReturnDuration) {
+        zipper->isFolderReturnAnimating = false;
+        zipper->folderReturnElapsed = 0.0f;
+        if (zipper->isFolderReturnCommitPending)
+            (void)CompleteZipperHeldObjectReturn(context);
+    }
+}
+
+void RpgRuntime_DrawZipperFolderReturn(const RpgZipper *zipper)
+{
+    Texture2D icon;
+    float progress, eased, size;
+    Vector2 position;
+    Rectangle destination;
+    if (zipper == NULL || !zipper->isFolderReturnAnimating) return;
+    progress = Clamp(zipper->folderReturnElapsed / Clamp(zipper->folderReturnDuration, 0.10f, 5.0f), 0.0f, 1.0f);
+    eased = progress * progress * (3.0f - 2.0f * progress);
+    position = Vector2Lerp(zipper->folderReturnStart, zipper->folderReturnDestination, eased);
+    size = 24.0f - 7.0f * progress;
+    destination = (Rectangle){ position.x - size * 0.5f, position.y - size * 0.5f, size, size };
+    icon = GetFolderReturnIcon();
+    if (icon.id != 0)
+        DrawTexturePro(icon, (Rectangle){ 0, 0, (float)icon.width, (float)icon.height }, destination,
+                       (Vector2){ 0, 0 }, 0.0f, Fade(WHITE, 1.0f - progress * 0.20f));
+    else {
+        DrawRectangleRounded(destination, 0.16f, 4, Fade(GOLD, 1.0f - progress * 0.20f));
+        DrawRectangleLinesEx(destination, 1.0f, ORANGE);
     }
 }
 
@@ -247,6 +488,7 @@ static bool DoesZipperHitAttachment(const RpgAttachments *attachments, Rectangle
                                     RpgGridCell *attachmentCell, int *attachmentIndex)
 {
     for (int index = 0; index < attachments->count; index++) {
+        if (attachments->entries[index].isZipperHeld) continue;
         Vector2 position = RpgAttachments_GetPosition(&attachments->entries[index], 0);
         Rectangle attachmentBounds = { position.x - 22.0f, position.y - 22.0f, 44.0f, 44.0f };
         if (CheckCollisionRecs(bounds, attachmentBounds)) {
@@ -417,6 +659,7 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
     // ファイルを紐づけた設置物だけを、実際の描画位置に合わせて強調する。
     for (int index = 0; index < attachments->count; index++) {
         const RpgAttachment *attachment = &attachments->entries[index];
+        if (attachment->isZipperHeld) continue;
         if (!RpgObjectFolder_AttachmentHasLinkedFiles(attachment)) continue;
         Vector2 position = RpgAttachments_GetPosition(attachment, 0);
         DrawCircleV(position, 27.0f, Fade(GOLD, 0.30f));
@@ -449,6 +692,7 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
     RpgAttachments_Draw(attachments);
     RpgDataShots_Draw(dataShots);
     DrawZipper(zipperTexture, &zipper->character, zipperAnimationElapsed);
+    RpgRuntime_DrawZipperFolderReturn(zipper);
     if (isMoveSpriteVisible) DrawMoveSprite(zipperTexture, player, npc, zipper, moveSpriteTarget, moveSpriteX);
     RpgCharacter_Draw(npc, "NPC");
     RpgCharacter_Draw(player, "Hero");
@@ -611,29 +855,12 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
                 (*context->zipperAttachedBlockCell) = (RpgGridCell){ -1, -1 };
                 zipperPointerSelected = false;
             } else if (!(*context->isZipperLaunched)) {
-                RpgGridCell returnedBlockCell = (*context->zipperAttachedBlockCell);
-                int returnedAttachmentIndex = (*context->attachedAttachmentIndex);
-                int returnedDataShotIndex = (*context->attachedDataShotIndex);
-                // 帰還操作を受け付けた時点を画面に示し、Explorerの更新待ちと処理開始を区別できるようにする。
-                snprintf(itemMessage, (size_t)context->itemMessageSize, "帰還開始：Inboxのobjectフォルダを削除");
-                GameFont_AddText(itemMessage);
-                (*context->itemMessageTimer) = 2.5f;
-                // ブロックへ停止した射出後は、同じキーで追従状態へ復帰できる。
+                /* 帰還は接触状態だけを解除する。Inboxの所持フォルダは次のcmdまで保持する。 */
                 (*context->zipperFollowsPlayer) = true;
                 (*context->attachedDataShotIndex) = -1;
                 (*context->attachedAttachmentIndex) = -1;
                 (*context->isZipperAttachedToBlock) = false;
-                if (returnedDataShotIndex >= 0 && returnedDataShotIndex < RPG_DATA_SHOT_MAX_COUNT &&
-                    (*context->dataShots).entries[returnedDataShotIndex].active) {
-                    RpgObjectFolder_ReturnDataShotFromZipper(&(*context->dataShots).entries[returnedDataShotIndex]);
-                } else if (returnedAttachmentIndex >= 0 && returnedAttachmentIndex < (*context->attachments).count) {
-                    RpgObjectFolder_ReturnAttachmentFromZipper(&(*context->attachments).entries[returnedAttachmentIndex]);
-                } else if (returnedBlockCell.row >= 0 && returnedBlockCell.column >= 0) {
-                    RpgObjectFolder blockFolder = { .cell = returnedBlockCell };
-                    RpgObjectFolder_ReturnBlockFromZipper(&blockFolder,
-                        (*context->stage).blocks[returnedBlockCell.row][returnedBlockCell.column]);
-                }
-                // 帰還後はZipper内に見せていた対象フォルダのコピーだけを片付ける。
+                (*context->zipperAttachedBlockCell) = (RpgGridCell){ -1, -1 };
                 zipperPointerSelected = false;
             }
         }
@@ -670,16 +897,12 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
                                  &(*context->attachedAttachmentIndex));
         else if ((*context->zipperFollowsPlayer) && (*context->inspectTarget) < 0 && (*context->dialogueIndex) < 0 && (*context->stage3IntroIndex) < 0 && !(*context->isReferenceTextOpen))
             UpdateZipperFollow(&(*context->zipper), &(*context->player), GetFrameTime());
-        if (RpgObjectFolder_BeginZipperCommandRequest()) {
-            /* cmd受信は必ず表示を開始して要求を消費する。機能処理の結果には依存させない。 */
-            StartZipperImportAnimation(context->zipperAnimationElapsed);
-            (void)RpgObjectFolder_CompleteZipperCommandRequest();
-            RunZipperCommandFunction(context);
-        }
+        RpgRuntime_ProcessZipperCommand(context);
         if ((*context->zipperAnimationElapsed) >= 0.0f) {
             (*context->zipperAnimationElapsed) += GetFrameTime();
             if ((*context->zipperAnimationElapsed) >= zipperImportAnimationDuration) (*context->zipperAnimationElapsed) = -1.0f;
         }
+        RpgRuntime_UpdateZipperFolderReturn(context, GetFrameTime());
         bool canTalk = RpgCharacter_IsNear(&(*context->player), &(*context->npc), 72.0f);
         RpgReferenceTarget nearbyReferenceTarget = { .kind = RPG_REFERENCE_TARGET_NONE,
                                                        .row = -1, .column = -1, .dropIndex = -1 };

@@ -29,5 +29,10 @@ typedef struct RpgRuntimeContext {
 } RpgRuntimeContext;
 
 void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context);
+// Inbox のcmd要求を共通に処理する。保持中のフォルダをbuildへ返してから、現在の接触対象を取得する。
+void RpgRuntime_ProcessZipperCommand(RpgRuntimeContext *context);
+// 取り込み完了後のフォルダ返却演出を進行・描画する。
+void RpgRuntime_UpdateZipperFolderReturn(RpgRuntimeContext *context, float deltaTime);
+void RpgRuntime_DrawZipperFolderReturn(const RpgZipper *zipper);
 
 #endif

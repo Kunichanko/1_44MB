@@ -22,6 +22,8 @@ typedef struct RpgExplorerShellCache {
 void RpgExplorerShell_ResolveEntries(RpgExplorerShellCache *cache, RpgExplorerFilesystem *filesystem);
 Texture2D RpgExplorerShell_GetTexture(const RpgExplorerShellCache *cache, int slot);
 Texture2D RpgExplorerShell_GetFolderTexture(const RpgExplorerShellCache *cache);
+// Windows Shellの実フォルダアイコンをraylib Textureとして取得する。呼び出し側でキャッシュして使う。
+Texture2D RpgExplorerShell_LoadFolderIconTexture(void);
 void RpgExplorerShell_Unload(RpgExplorerShellCache *cache);
 
 #endif

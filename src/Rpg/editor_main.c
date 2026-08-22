@@ -1,4 +1,4 @@
-// 依存する自プロジェクト内ファイル: ../Editor/file_dialog.h, rpg_attachment.h, rpg_block_inventory.h, rpg_character.h, rpg_data_shot.h, rpg_dialogue.h, rpg_item.h, rpg_layout.h, rpg_map_event.h, rpg_receiver.h, rpg_stage.h, rpg_wire.h, game_font.h
+// 依存する自プロジェクト内ファイル: ../Editor/file_dialog.h, rpg_attachment.h, rpg_block_inventory.h, rpg_character.h, rpg_data_shot.h, rpg_dialogue.h, rpg_item.h, rpg_layout.h, rpg_map_event.h, rpg_receiver.h, rpg_stage.h, rpg_stage_build.h, rpg_wire.h, game_font.h
 // ステージ番号別の編集データ管理: rpg_stage_storage.h
 // 依存関係を更新: rpg_stage3_event.h を追加した。
 // 依存関係を更新: PC上のテキストファイル選択を再利用するため ../Editor/file_dialog.h を追加した。
@@ -51,6 +51,7 @@ enum { EDITOR_WM_CLOSE = 0x0010, EDITOR_GWLP_WNDPROC = -4 };
 #include "rpg_stage3_event.h"
 #include "rpg_signal_block.h"
 #include "rpg_stage.h"
+#include "rpg_stage_build.h"
 #include "rpg_stage_storage.h"
 #include "rpg_wire.h"
 #include "rpg_zipper.h"
@@ -184,7 +185,7 @@ static Rectangle movePanelBounds = { 654.0f, 56.0f, 282.0f, 466.0f };
 static const Rectangle exitConfirmationBounds = { 250.0f, 120.0f, 460.0f, 300.0f };
 static const Rectangle revertSavedBounds = { 408.0f, 42.0f, 160.0f, 28.0f };
 static const Rectangle globalSettingsButtonBounds = { 12.0f, 10.0f, 96.0f, 26.0f };
-static const Rectangle globalSettingsPanelBounds = { 700.0f, 80.0f, 220.0f, 420.0f };
+static const Rectangle globalSettingsPanelBounds = { 700.0f, 80.0f, 220.0f, 450.0f };
 static const Rectangle areaInspectorButtonBounds = { 112.0f, 10.0f, 82.0f, 26.0f };
 static const Rectangle areaInspectorPanelBounds = { 700.0f, 80.0f, 220.0f, 224.0f };
 static const Rectangle editorPlayToggleBounds = { 198.0f, 10.0f, 72.0f, 26.0f };
@@ -1586,6 +1587,7 @@ static bool HasAnyUnsavedChanges(const EditorSaveSnapshot *snapshot, const RpgCh
                                  const RpgItems *items, const RpgItems *savedItems)
 {
     return snapshot->layout.electricCellDelay != layout->electricCellDelay ||
+            snapshot->layout.zipperFolderReturnDuration != layout->zipperFolderReturnDuration ||
             HasUnsavedChanges(snapshot, player, npc, stage, dialogue, stage3Event) ||
             AreItemsDifferent(items, savedItems) || AreWiresDifferent(&wires, &savedWires) ||
             AreReceiversDifferent(&receivers, &savedReceivers);
@@ -1601,6 +1603,7 @@ static RPG_UNUSED void RecordEditorHistory(void *history, const EditorSaveSnapsh
                                 bool isInspectDialogueEditing)
 {
     if (beforeEdit->layout.electricCellDelay != layout->electricCellDelay ||
+        beforeEdit->layout.zipperFolderReturnDuration != layout->zipperFolderReturnDuration ||
         HasUnsavedChanges(beforeEdit, player, npc, stage, dialogue, stage3Event) ||
         IsInspectorUiDifferent(beforeEdit, mapIndex, selected, isDialogueEditorOpen,
                                isExamineFunctionListOpen, isFunctionTypeListOpen,
@@ -2525,6 +2528,8 @@ static void DrawGlobalSettingsPanel(const RpgLayout *layout, const EditorSaveSna
     DrawInspectorFrame(globalSettingsPanelBounds, "Global Settings", DARKBLUE,
                        GetInspectorCloseButton(RPG_EDITOR_GLOBAL_SETTINGS_INSPECTOR));
     Color delayColor = layout->electricCellDelay != savedSnapshot->layout.electricCellDelay ? MAROON : DARKGRAY;
+    Color returnDurationColor = layout->zipperFolderReturnDuration !=
+        savedSnapshot->layout.zipperFolderReturnDuration ? MAROON : DARKGRAY;
     int stageIndex = RpgStageCatalog_FindIndex(&stageCatalogData, currentStageNumber);
     DrawRectangle(716, 112, 28, 26, GRAY);
     DrawRectangle(876, 112, 28, 26, GRAY);
@@ -2554,16 +2559,22 @@ static void DrawGlobalSettingsPanel(const RpgLayout *layout, const EditorSaveSna
     DrawText("+", 788, 318, 20, RAYWHITE);
     DrawText("Save all: S", 824, 320, 14, delayColor);
     DrawText("Delay before next wire cell", 716, 350, 14, DARKGRAY);
-    DrawText("Build cell storage", 716, 376, 16, DARKBLUE);
-    Rectangle compactBounds = { 716.0f, 398.0f, 88.0f, 28.0f };
-    Rectangle foldersBounds = { 812.0f, 398.0f, 92.0f, 28.0f };
+    DrawText(TextFormat("Folder return: %.2fs", layout->zipperFolderReturnDuration), 716, 370, 16, returnDurationColor);
+    DrawRectangle(716, 382, 44, 26, MAROON);
+    DrawText("-", 733, 386, 20, RAYWHITE);
+    DrawRectangle(772, 382, 44, 26, DARKGREEN);
+    DrawText("+", 788, 386, 20, RAYWHITE);
+    DrawText("Folder waits in Stage during return", 716, 418, 13, DARKGRAY);
+    DrawText("Build cell storage", 716, 440, 16, DARKBLUE);
+    Rectangle compactBounds = { 716.0f, 462.0f, 88.0f, 28.0f };
+    Rectangle foldersBounds = { 812.0f, 462.0f, 92.0f, 28.0f };
     DrawRectangleRec(compactBounds, storageMode == RPG_BUILD_CELL_STORAGE_COMPACT ? DARKBLUE : GRAY);
     DrawRectangleRec(foldersBounds, storageMode == RPG_BUILD_CELL_STORAGE_FOLDERS ? DARKBLUE : GRAY);
     DrawRectangleLinesEx(compactBounds, 1.0f, RAYWHITE);
     DrawRectangleLinesEx(foldersBounds, 1.0f, RAYWHITE);
-    DrawText("Compact", 724, 404, 14, RAYWHITE);
-    DrawText("All folders", 816, 404, 14, RAYWHITE);
-    DrawText("Cleared on every build", 716, 434, 13, DARKGRAY);
+    DrawText("Compact", 724, 468, 14, RAYWHITE);
+    DrawText("All folders", 816, 468, 14, RAYWHITE);
+    DrawText("Cleared on every build", 716, 498, 13, DARKGRAY);
 }
 
 // 現在のエリアだけを対象にした管理パネル。削除操作はここに閉じ込める。
@@ -3238,6 +3249,8 @@ int main(void)
                 .scene=&editorScene
             };
             runtime.showStopButton = true;
+            /* エディター内Playも本編と同じbuild監視を通し、作成済みマスのフォルダ変更を反映する。 */
+            RpgStageBuild_Update(&stage);
             RpgRuntime_UpdateAndDraw(&runtime);
             // ランタイム側で設定オーバーレイを描いたフレームは、エディターの操作を続けない。
             if (RpgScene_IsGameSettings(&editorScene)) continue;
@@ -3259,6 +3272,8 @@ int main(void)
         if (isEditorCloseRequested && isEditorPlaying) {
             RpgEditorPlay_Stop(&playSnapshot, &mapIndex, &player, &npc, &stage, &items, &mapEvents,
                                &wires, &receivers, &attachments, &signalBlocks, &zipperData);
+            RpgStageBuild_Close();
+            RpgObjectFolders_EndStageBuild();
             ResetEditorPreviews(&stage, &signalBlocks, &attachmentPreviewShots, &previewEvent,
                                 &isMovePreviewPlaying, &isZipperLaunchPreviewVisible,
                                 &isZipperLaunchPreviewReturning);
@@ -3328,13 +3343,15 @@ int main(void)
                 ResetEditorPreviews(&stage, &signalBlocks, &attachmentPreviewShots, &previewEvent,
                                     &isMovePreviewPlaying, &isZipperLaunchPreviewVisible,
                                     &isZipperLaunchPreviewReturning);
-                // 本編開始時と同じく、一時オブジェクトとInboxを掃除してから必要なフォルダを作る。
-                RpgObjectFolders_ClearSessionStorage();
-                RpgObjectFolders_PrepareAttachmentFolders(&attachments);
-                RpgObjectFolder_PrepareZipperAnimationCommand();
                 RpgEditorPlay_Begin(&playSnapshot, mapIndex, &player, &npc, &stage, &items, &mapEvents,
                                     &wires, &receivers, &attachments, &signalBlocks, &zipperData);
                 PrepareEditorPlayCharacter(&player, &stage);
+                /* 選択中ステージだけを本編と同じ build 形式へ作り、直後からPlayで使う。 */
+                if (!RpgStageBuild_CreateEditorPreview(currentStageNumber, &stage, &attachments, player.position)) {
+                    (void)RpgEditorPlay_Stop(&playSnapshot, &mapIndex, &player, &npc, &stage, &items,
+                                              &mapEvents, &wires, &receivers, &attachments, &signalBlocks, &zipperData);
+                    message = "Play build failed";
+                } else {
                 editorPlayShots = RpgDataShots_Default();
                 editorPlayButtonEvent = RpgButtonEvent_Default();
                 wasEditorPlayButtonPressed = false;
@@ -3346,6 +3363,7 @@ int main(void)
                 editorPlayNpcInspectCompleted = false;
                 editorPlayZipperInspectCompleted = false;
                 editorPlayZipperFollowsPlayer = false;
+                RpgZipper_ClearHeldObject(&zipperData);
                 lastEditorPlayZipperClickTime = -1.0;
                 isEditorPlaying = true;
                 blockMode = false;
@@ -3358,9 +3376,12 @@ int main(void)
                 isGlobalSettingsOpen = false;
                 isAreaInspectorOpen = false;
                 message = "Play started";
+                }
             } else {
                 RpgEditorPlay_Stop(&playSnapshot, &mapIndex, &player, &npc, &stage, &items, &mapEvents,
                                    &wires, &receivers, &attachments, &signalBlocks, &zipperData);
+                RpgStageBuild_Close();
+                RpgObjectFolders_EndStageBuild();
                 RpgObjectFolders_ClearSessionStorage();
                 RpgObjectFolders_PrepareAttachmentFolders(&attachments);
                 RpgObjectFolder_PrepareZipperAnimationCommand();
@@ -3551,16 +3572,20 @@ int main(void)
                 layout.electricCellDelay = Clamp(layout.electricCellDelay - 0.01f, 0.01f, 2.0f);
             else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 772, 314, 44, 26 }))
                 layout.electricCellDelay = Clamp(layout.electricCellDelay + 0.01f, 0.01f, 2.0f);
+            else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 382, 44, 26 }))
+                layout.zipperFolderReturnDuration = Clamp(layout.zipperFolderReturnDuration - 0.05f, 0.10f, 5.0f);
+            else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 772, 382, 44, 26 }))
+                layout.zipperFolderReturnDuration = Clamp(layout.zipperFolderReturnDuration + 0.05f, 0.10f, 5.0f);
             else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 258, 88, 28 })) {
                 explorerMode = RPG_EXPLORER_MODE_VIRTUAL;
                 message = RpgExplorerLauncher_SaveMode(explorerMode) ? "Explorer: Virtual" : "Explorer setting failed";
             } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 812, 258, 92, 28 })) {
                 explorerMode = RPG_EXPLORER_MODE_WINDOWS;
                 message = RpgExplorerLauncher_SaveMode(explorerMode) ? "Explorer: Windows" : "Explorer setting failed";
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 398, 88, 28 })) {
+            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 462, 88, 28 })) {
                 message = RpgBuildCellStorage_SaveMode(RPG_BUILD_CELL_STORAGE_COMPACT) ?
                           "Build: compact cells" : "Build setting failed";
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 812, 398, 92, 28 })) {
+            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 812, 462, 92, 28 })) {
                 message = RpgBuildCellStorage_SaveMode(RPG_BUILD_CELL_STORAGE_FOLDERS) ?
                           "Build: all cell folders" : "Build setting failed";
             }

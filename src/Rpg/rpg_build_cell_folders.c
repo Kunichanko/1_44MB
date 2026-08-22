@@ -22,11 +22,11 @@ static bool WriteCell(const RpgStage *stage, RpgGridCell cell, const RpgBuildCel
     return true;
 }
 
-bool RpgBuildCellFolders_Create(const RpgStage *stage, int startMapIndex,
-                                const RpgBuildCellStorageBackend *backend)
+static bool CreateInitialMap(const RpgStage *stage, int startMapIndex,
+                             const RpgBuildCellStorageBackend *backend, bool scheduleRemainingMaps)
 {
     if (stage == NULL || startMapIndex < 0 || startMapIndex >= RPG_STAGE_MAP_COUNT) return false;
-    pendingStage = stage;
+    pendingStage = scheduleRemainingMaps ? stage : NULL;
     startingMap = startMapIndex;
     pendingCursor = 0;
     memset(generatedCells, 0, sizeof(generatedCells));
@@ -35,6 +35,18 @@ bool RpgBuildCellFolders_Create(const RpgStage *stage, int startMapIndex,
             return false;
     }
     return true;
+}
+
+bool RpgBuildCellFolders_Create(const RpgStage *stage, int startMapIndex,
+                                const RpgBuildCellStorageBackend *backend)
+{
+    return CreateInitialMap(stage, startMapIndex, backend, true);
+}
+
+bool RpgBuildCellFolders_CreatePreview(const RpgStage *stage, int startMapIndex,
+                                       const RpgBuildCellStorageBackend *backend)
+{
+    return CreateInitialMap(stage, startMapIndex, backend, false);
 }
 
 void RpgBuildCellFolders_Update(const RpgBuildCellStorageBackend *backend)
@@ -57,7 +69,7 @@ void RpgBuildCellFolders_Update(const RpgBuildCellStorageBackend *backend)
 bool RpgBuildCellFolders_EnsureCell(RpgGridCell cell, int blockType,
                                     const RpgBuildCellStorageBackend *backend)
 {
-    if (pendingStage == NULL || cell.row < 0 || cell.row >= RPG_STAGE_ROWS ||
+    if (cell.row < 0 || cell.row >= RPG_STAGE_ROWS ||
         cell.column < 0 || cell.column >= RPG_STAGE_WORLD_COLUMNS || backend == NULL ||
         backend->writeCellFolder == NULL) return false;
     if (generatedCells[cell.row][cell.column]) return true;

@@ -126,9 +126,9 @@ static void ApplyCellChange(RpgStage *stage, DWORD action, const wchar_t *relati
             watcher.missingCells[row][column] = true;
             stage->blocks[row][column] = RPG_BLOCK_BUILD_MISSING;
         }
-    } else if (!watcher.compactCells[row][column] &&
-               (action == FILE_ACTION_ADDED || action == FILE_ACTION_RENAMED_NEW_NAME)) {
-        if (watcher.missingCells[row][column]) {
+    } else if (action == FILE_ACTION_ADDED || action == FILE_ACTION_RENAMED_NEW_NAME) {
+        /* Compactマスも、返却された実フォルダを検知した時点で元のマスとして復帰する。 */
+        if (watcher.missingCells[row][column] && RpgObjectFolders_IsBuildCellAvailable(cell)) {
             watcher.missingCells[row][column] = false;
             stage->blocks[row][column] = watcher.originalBlocks[row][column];
         }
@@ -157,23 +157,35 @@ static void ProcessChanges(RpgStage *stage, DWORD byteCount)
 }
 #endif
 
-bool RpgStageBuild_Create(int stageNumber, RpgStage *stage, const RpgAttachments *attachments,
-                          Vector2 playerStartPosition)
+static bool CreateStageBuild(int stageNumber, RpgStage *stage, const RpgAttachments *attachments,
+                             Vector2 playerStartPosition, bool isSimpleBuild)
 {
 #ifdef _WIN32
     char buildPath[1200];
     RpgStageBuild_Close();
     if (!RpgObjectFolders_BeginStageBuild(stageNumber, stage, attachments, playerStartPosition,
-                                          buildPath, sizeof(buildPath))) return false;
+                                          isSimpleBuild, buildPath, sizeof(buildPath))) return false;
     memcpy(watcher.originalBlocks, stage->blocks, sizeof(watcher.originalBlocks));
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++)
         watcher.compactCells[row][column] = RpgBuildCellStorage_UsesMetadataForBlock(stage->blocks[row][column]);
     memset(watcher.missingCells, 0, sizeof(watcher.missingCells));
     return StartWatcher(buildPath);
 #else
-    (void)stageNumber; (void)stage; (void)attachments; (void)playerStartPosition;
+    (void)stageNumber; (void)stage; (void)attachments; (void)playerStartPosition; (void)isSimpleBuild;
     return false;
 #endif
+}
+
+bool RpgStageBuild_Create(int stageNumber, RpgStage *stage, const RpgAttachments *attachments,
+                          Vector2 playerStartPosition)
+{
+    return CreateStageBuild(stageNumber, stage, attachments, playerStartPosition, false);
+}
+
+bool RpgStageBuild_CreateEditorPreview(int stageNumber, RpgStage *stage, const RpgAttachments *attachments,
+                                       Vector2 playerStartPosition)
+{
+    return CreateStageBuild(stageNumber, stage, attachments, playerStartPosition, true);
 }
 
 void RpgStageBuild_Update(RpgStage *stage)

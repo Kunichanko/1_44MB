@@ -60,6 +60,13 @@ bool RpgBuildCellStorage_Create(const RpgStage *stage, int startMapIndex,
            RpgBuildCellFolders_Create(stage, startMapIndex, backend) : RpgBuildCellCompact_Create(stage, backend);
 }
 
+bool RpgBuildCellStorage_CreatePreview(const RpgStage *stage, int startMapIndex,
+                                       const RpgBuildCellStorageBackend *backend)
+{
+    return currentMode == RPG_BUILD_CELL_STORAGE_FOLDERS ?
+           RpgBuildCellFolders_CreatePreview(stage, startMapIndex, backend) : RpgBuildCellCompact_Create(stage, backend);
+}
+
 void RpgBuildCellStorage_Update(const RpgBuildCellStorageBackend *backend)
 {
     if (currentMode == RPG_BUILD_CELL_STORAGE_FOLDERS) RpgBuildCellFolders_Update(backend);

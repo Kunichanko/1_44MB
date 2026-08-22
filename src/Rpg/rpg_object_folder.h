@@ -19,11 +19,16 @@ bool RpgObjectFolder_CompleteZipperCommandRequest(void);
 
 // Zipper 操作は複製ではなく、対象フォルダそのものを Inbox へ移動して行う。
 bool RpgObjectFolder_MoveAttachmentToZipper(const RpgAttachment *attachment);
-bool RpgObjectFolder_MoveDataShotToZipper(const RpgDataShot *shot);
+bool RpgObjectFolder_MoveDataShotToZipper(RpgDataShot *shot);
 bool RpgObjectFolder_MoveBlockToZipper(const RpgObjectFolder *folder, int blockType);
+/* 返却演出中は build の親（StageN）へ一時移動し、演出完了時に Return で build へ確定する。 */
+bool RpgObjectFolder_BeginReturnAttachmentFromZipper(const RpgAttachment *attachment);
+bool RpgObjectFolder_BeginReturnDataShotFromZipper(const RpgDataShot *shot);
+bool RpgObjectFolder_BeginReturnBlockFromZipper(const RpgObjectFolder *folder, int blockType);
 bool RpgObjectFolder_ReturnAttachmentFromZipper(const RpgAttachment *attachment);
 bool RpgObjectFolder_ReturnDataShotFromZipper(const RpgDataShot *shot);
 bool RpgObjectFolder_ReturnBlockFromZipper(const RpgObjectFolder *folder, int blockType);
+bool RpgObjectFolder_RestoreDataShotFromMetadata(RpgDataShot *shot);
 
 // フォルダ寿命はオブジェクト寿命と一致する。メタデータだけの通常ブロックには生成しない。
 void RpgObjectFolders_PrepareAttachmentFolders(const RpgAttachments *attachments);
@@ -39,6 +44,7 @@ void RpgObjectFolder_RemoveAttachmentFolder(const RpgAttachment *attachment);
 /* 指定ステージの build を生成し、その中をオブジェクトフォルダの保存先として選択する。 */
 bool RpgObjectFolders_BeginStageBuild(int stageNumber, const RpgStage *stage,
                                       const RpgAttachments *attachments, Vector2 playerStartPosition,
+                                      bool isSimpleBuild,
                                       char *buildPath, size_t buildPathSize);
 bool RpgObjectFolders_IsStageBuildActive(void);
 void RpgObjectFolders_UpdateBuildCellGeneration(void);

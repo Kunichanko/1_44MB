@@ -9,6 +9,9 @@
 /* 「ビルドする」操作で全マスと設置物のフォルダを生成し、監視を開始する。 */
 bool RpgStageBuild_Create(int stageNumber, RpgStage *stage, const RpgAttachments *attachments,
                           Vector2 playerStartPosition);
+/* エディター内プレイ用。保存方式にかかわらず開始エリアのみを準備する。 */
+bool RpgStageBuild_CreateEditorPreview(int stageNumber, RpgStage *stage, const RpgAttachments *attachments,
+                                       Vector2 playerStartPosition);
 /* 非同期通知を処理し、削除されたセルを赤い実行時壁へ反映する。 */
 void RpgStageBuild_Update(RpgStage *stage);
 void RpgStageBuild_Close(void);

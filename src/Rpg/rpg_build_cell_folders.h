@@ -7,6 +7,9 @@
 
 bool RpgBuildCellFolders_Create(const RpgStage *stage, int startMapIndex,
                                 const RpgBuildCellStorageBackend *backend);
+/* エディター内プレイは開始エリアだけを作成し、残りの全マス生成を予約しない。 */
+bool RpgBuildCellFolders_CreatePreview(const RpgStage *stage, int startMapIndex,
+                                       const RpgBuildCellStorageBackend *backend);
 void RpgBuildCellFolders_Update(const RpgBuildCellStorageBackend *backend);
 bool RpgBuildCellFolders_EnsureCell(RpgGridCell cell, int blockType,
                                     const RpgBuildCellStorageBackend *backend);

@@ -30,6 +30,8 @@ const char *RpgBuildCellStorage_GetModeName(RpgBuildCellStorageMode mode);
 
 bool RpgBuildCellStorage_Create(const RpgStage *stage, int startMapIndex,
                                 const RpgBuildCellStorageBackend *backend);
+bool RpgBuildCellStorage_CreatePreview(const RpgStage *stage, int startMapIndex,
+                                       const RpgBuildCellStorageBackend *backend);
 void RpgBuildCellStorage_Update(const RpgBuildCellStorageBackend *backend);
 bool RpgBuildCellStorage_EnsureCell(RpgGridCell cell, int blockType,
                                     const RpgBuildCellStorageBackend *backend);

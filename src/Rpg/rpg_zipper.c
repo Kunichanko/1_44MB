@@ -19,7 +19,22 @@ RpgZipper RpgZipper_Default(void)
     zipper.returnSpeed = 180.0f;
     zipper.followSpeed = 180.0f;
     zipper.launchPreviewEnabled = false;
+    RpgZipper_ClearHeldObject(&zipper);
     return zipper;
+}
+
+void RpgZipper_ClearHeldObject(RpgZipper *zipper)
+{
+    if (zipper == NULL) return;
+    zipper->heldObject = (RpgZipperHeldObject){ .kind = RPG_ZIPPER_HELD_OBJECT_NONE,
+                                                 .blockCell = { -1, -1 },
+                                                 .attachmentIndex = -1, .dataShotIndex = -1 };
+    zipper->returningObject = zipper->heldObject;
+    zipper->isFolderReturnPending = false;
+    zipper->isFolderReturnAnimating = false;
+    zipper->isFolderReturnCommitPending = false;
+    zipper->folderReturnElapsed = 0.0f;
+    zipper->folderReturnDuration = 0.45f;
 }
 
 // 旧設定は5項目、新設定は6項目。整数読込が小数部を別項目として扱わないよう、先に項目数を数える。

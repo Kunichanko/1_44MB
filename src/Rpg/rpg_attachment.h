@@ -28,6 +28,8 @@ typedef struct RpgAttachment {
     unsigned long long previewTotalBytes;
     RpgGridPath dataPath;
     bool flagRaised;
+    /* Zipperが実フォルダを保持している間は、配置物を描画・機能とも停止する。 */
+    bool isZipperHeld;
 } RpgAttachment;
 typedef struct RpgAttachments {
     int count;
@@ -45,6 +47,7 @@ bool RpgAttachments_IsButtonPressed(const RpgAttachments *attachments, Vector2 p
 int RpgAttachments_FindTouchedSaveFlag(const RpgAttachments *attachments, Vector2 playerPosition);
 bool RpgAttachments_SetRaisedSaveFlag(RpgAttachments *attachments, int flagId);
 bool RpgAttachments_IsCellOccupied(const RpgAttachments *attachments, RpgGridCell cell);
+bool RpgAttachments_GetOccupiedCell(const RpgAttachment *attachment, RpgGridCell *cell);
 int RpgAttachments_FindAtPosition(const RpgAttachments *attachments, Vector2 position, float distance);
 bool RpgAttachments_FindSnap(const RpgAttachments *attachments, const RpgStage *stage, int type,
                              Vector2 position, int ignoredAttachmentIndex, RpgAttachment *attachment);

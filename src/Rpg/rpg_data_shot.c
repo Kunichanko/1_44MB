@@ -104,7 +104,8 @@ static void RpgDataShots_Spawn(RpgDataShots *shots, const RpgAttachments *attach
         const RpgAttachment *attachment = &attachments->entries[attachmentIndex];
         shots->entries[index] = (RpgDataShot){ .active = true, .isPreview = isPreview,
             .folderSerial = shots->nextFolderSerial++, .attachmentIndex = attachmentIndex,
-            .position = RpgDataShots_GetCellCenter(attachment->dataPath.cells[0]) };
+            .position = RpgDataShots_GetCellCenter(attachment->dataPath.cells[0]),
+            .metadataCell = { -1, -1 } };
         RpgDataShot_SetFileProperties(&shots->entries[index], attachment,
             isPreview ? attachment->previewFileCount : 0,
             isPreview ? attachment->previewTotalBytes : 0);
@@ -116,6 +117,7 @@ static void RpgDataShots_Spawn(RpgDataShots *shots, const RpgAttachments *attach
 void RpgDataShots_Trigger(RpgDataShots *shots, const RpgAttachments *attachments, int attachmentIndex)
 {
     if (attachmentIndex >= 0 && attachmentIndex < attachments->count &&
+        !attachments->entries[attachmentIndex].isZipperHeld &&
         attachments->entries[attachmentIndex].type == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER)
         RpgDataShots_Spawn(shots, attachments, attachmentIndex, false);
 }
@@ -146,7 +148,7 @@ void RpgDataShots_TriggerPreview(RpgDataShots *shots, const RpgAttachments *atta
     if (shots == NULL || attachments == NULL) return;
     // 共通プレビュー通知では全装置、個別通知では指定装置だけを見た目専用で反応させる。
     for (int index = 0; index < attachments->count; index++)
-        if ((target == -1 || target == index) &&
+        if (!attachments->entries[index].isZipperHeld && (target == -1 || target == index) &&
             attachments->entries[index].type == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER)
             RpgDataShots_Spawn(shots, attachments, index, true);
 }
@@ -159,7 +161,7 @@ void RpgDataShots_Update(RpgDataShots *shots, const RpgAttachments *attachments,
     (void)previewsOnly;
     for (int index = 0; index < RPG_DATA_SHOT_MAX_COUNT; index++) {
         RpgDataShot *shot = &shots->entries[index];
-        if (!shot->active || shot->attachmentIndex >= attachments->count) continue;
+        if (!shot->active || shot->isZipperHeld || shot->attachmentIndex >= attachments->count) continue;
         if (shot->isElectric) {
             // 導線の進行は受容体ではなく、電気化したデータ弾自身が担当する。
             if (!RpgDataShots_UpdateElectric(shot, wires, electricCellDelay, deltaTime)) shot->active = false;
@@ -226,7 +228,7 @@ void RpgDataShots_Draw(const RpgDataShots *shots)
 {
     for (int index = 0; index < RPG_DATA_SHOT_MAX_COUNT; index++) {
         const RpgDataShot *shot = &shots->entries[index];
-        if (!shot->active) continue;
+        if (!shot->active || shot->isZipperHeld) continue;
         if (shot->isElectric) {
             DrawCircleV(shot->position, 12.0f, Fade(YELLOW, 0.20f));
             DrawCircleV(shot->position, 5.0f, GOLD);
@@ -250,7 +252,7 @@ void RpgDataShots_DrawMap(const RpgDataShots *shots, int mapIndex)
     float mapEndX = mapStartX + RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE;
     for (int index = 0; index < RPG_DATA_SHOT_MAX_COUNT; index++) {
         const RpgDataShot *shot = &shots->entries[index];
-        if (!shot->active || shot->position.x < mapStartX || shot->position.x >= mapEndX) continue;
+        if (!shot->active || shot->isZipperHeld || shot->position.x < mapStartX || shot->position.x >= mapEndX) continue;
         Vector2 localPosition = { shot->position.x - mapStartX, shot->position.y };
         if (shot->isElectric) {
             DrawCircleV(localPosition, 12.0f, Fade(YELLOW, 0.20f));

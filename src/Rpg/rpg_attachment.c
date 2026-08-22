@@ -26,14 +26,23 @@ static bool RpgAttachments_HasOuterEmptyCell(const RpgStage *stage, RpgGridCell 
     return RpgAttachments_IsCellInStage(outerCell) && stage->blocks[outerCell.row][outerCell.column] == 0;
 }
 
+bool RpgAttachments_GetOccupiedCell(const RpgAttachment *attachment, RpgGridCell *cell)
+{
+    RpgGridCell occupiedCell;
+    if (attachment == NULL || cell == NULL || !RpgBlockInventory_IsCellAttachment(attachment->type)) return false;
+    occupiedCell = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
+    if (!RpgAttachments_IsCellInStage(occupiedCell)) return false;
+    *cell = occupiedCell;
+    return true;
+}
+
 bool RpgAttachments_IsCellOccupied(const RpgAttachments *attachments, RpgGridCell cell)
 {
     if (attachments == NULL) return false;
     for (int index = 0; index < attachments->count; index++) {
         const RpgAttachment *attachment = &attachments->entries[index];
         RpgGridCell occupiedCell;
-        if (!RpgBlockInventory_IsCellAttachment(attachment->type)) continue;
-        occupiedCell = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
+        if (!RpgAttachments_GetOccupiedCell(attachment, &occupiedCell)) continue;
         if (occupiedCell.row == cell.row && occupiedCell.column == cell.column) return true;
     }
     return false;
@@ -251,7 +260,7 @@ bool RpgAttachments_IsButtonPressed(const RpgAttachments *attachments, Vector2 p
 {
     for (int index = 0; index < attachments->count; index++) {
         const RpgAttachment *attachment = &attachments->entries[index];
-        if (attachment->type != RPG_BLOCK_ATTACHMENT_DATA_BUTTON) continue;
+        if (attachment->isZipperHeld || attachment->type != RPG_BLOCK_ATTACHMENT_DATA_BUTTON) continue;
         Vector2 position = RpgAttachments_GetPosition(attachment, 0);
         if (fabsf(playerPosition.x - position.x) <= 22.0f && fabsf(playerPosition.y - position.y) <= 24.0f)
             return true;
@@ -264,7 +273,7 @@ int RpgAttachments_FindTouchedSaveFlag(const RpgAttachments *attachments, Vector
     if (attachments == NULL) return -1;
     for (int index = 0; index < attachments->count; index++) {
         const RpgAttachment *attachment = &attachments->entries[index];
-        if (attachment->type != RPG_BLOCK_ATTACHMENT_SAVE_FLAG) continue;
+        if (attachment->isZipperHeld || attachment->type != RPG_BLOCK_ATTACHMENT_SAVE_FLAG) continue;
         if (Vector2Distance(playerPosition, RpgAttachments_GetPosition(attachment, 0)) <= 28.0f) return index;
     }
     return -1;
@@ -427,6 +436,7 @@ static void RpgAttachments_DrawWithOffset(const RpgAttachments *attachments, int
     for (int index = 0; index < attachments->count; index++) {
         if (index == excludedIndex) continue;
         const RpgAttachment *attachment = &attachments->entries[index];
+        if (attachment->isZipperHeld) continue;
         RpgGridCell outerCell = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
         if (outerCell.column < firstColumn || outerCell.column >= lastColumn) continue;
         Vector2 position = RpgAttachments_GetPosition(attachment, firstColumn);
@@ -459,7 +469,8 @@ void RpgAttachments_DrawDataPaths(const RpgAttachments *attachments, int mapInde
     int firstColumn = mapIndex * RPG_STAGE_COLUMNS;
     int lastColumn = firstColumn + RPG_STAGE_COLUMNS;
     for (int index = 0; index < attachments->count; index++) {
-        if (attachments->entries[index].type != RPG_BLOCK_ATTACHMENT_RADIO_EMITTER) continue;
+        if (attachments->entries[index].isZipperHeld ||
+            attachments->entries[index].type != RPG_BLOCK_ATTACHMENT_RADIO_EMITTER) continue;
         const RpgGridPath *path = &attachments->entries[index].dataPath;
         for (int cellIndex = 0; cellIndex < path->cellCount - 1; cellIndex++) {
             RpgGridCell first = path->cells[cellIndex];

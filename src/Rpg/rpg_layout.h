@@ -12,6 +12,8 @@ typedef struct RpgLayout {
     float npcScale;
     bool stage3IntroEnabled;
     float electricCellDelay;
+    /* Zipper が返却フォルダを元位置へ運ぶ演出の秒数。ステージ設定として保存する。 */
+    float zipperFolderReturnDuration;
 } RpgLayout;
 
 RpgLayout RpgLayout_Default(void);

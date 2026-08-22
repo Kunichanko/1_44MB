@@ -15,12 +15,15 @@ enum { RPG_DATA_SHOT_MAX_COUNT = 96, RPG_DATA_SHOT_BASELINE_FILE_MAX = 128,
 typedef struct RpgDataShot {
     bool active;
     bool isPreview;
+    /* Zipperに取り込まれている間は描画・更新を止め、返却時にメタデータから復元する。 */
+    bool isZipperHeld;
     // 同時に存在する弾を電波発生装置とは別の実フォルダで識別する連番。
     int folderSerial;
     int attachmentIndex;
     int pathCellIndex;
     Vector2 position;
     Vector2 impactPosition;
+    RpgGridCell metadataCell;
     // 実フォルダを走査して得たファイル数・合計容量。見た目と速度はこの値から更新する。
     int fileCount;
     unsigned long long totalBytes;

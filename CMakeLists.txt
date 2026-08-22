@@ -45,13 +45,18 @@ set_target_properties(side_scroller_editor PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
 )
 
-add_executable(rpg_version
+add_executable(rpg_version WIN32
     src/Rpg/main.c
     src/Rpg/rpg_attachment.c
     src/Rpg/rpg_button_event.c
     src/Rpg/rpg_block_inventory.c
+    src/Rpg/rpg_build_cell_storage.c
+    src/Rpg/rpg_build_cell_compact.c
+    src/Rpg/rpg_build_cell_folders.c
+    src/Rpg/rpg_game_save.c
     src/Rpg/rpg_character.c
     src/Rpg/rpg_data_shot.c
+    src/Rpg/rpg_explorer_launcher.c
     src/Rpg/rpg_dialogue.c
     src/Rpg/rpg_grid_path.c
     src/Rpg/rpg_layout.c
@@ -65,8 +70,11 @@ add_executable(rpg_version
     src/Rpg/rpg_signal_block.c
     src/Rpg/rpg_stage3_event.c
     src/Rpg/rpg_stage.c
+    src/Rpg/rpg_stage_build.c
+    src/Rpg/rpg_stage_storage.c
     src/Rpg/rpg_runtime_update.c
     src/Rpg/rpg_runtime.c
+    src/Rpg/rpg_scene.c
     src/Rpg/rpg_wire.c
     src/Rpg/rpg_zipper.c
     src/Shered/game_font.c
@@ -81,18 +89,23 @@ set_target_properties(rpg_version PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
 )
 
-add_executable(rpg_editor
+add_executable(rpg_editor WIN32
     src/Rpg/editor_main.c
     src/Rpg/rpg_editor_drag.c
     src/Rpg/rpg_editor_play.c
     src/Rpg/rpg_runtime.c
+    src/Rpg/rpg_scene.c
     src/Rpg/rpg_runtime_update.c
     src/Editor/file_dialog.c
     src/Rpg/rpg_attachment.c
     src/Rpg/rpg_button_event.c
     src/Rpg/rpg_block_inventory.c
+    src/Rpg/rpg_build_cell_storage.c
+    src/Rpg/rpg_build_cell_compact.c
+    src/Rpg/rpg_build_cell_folders.c
     src/Rpg/rpg_character.c
     src/Rpg/rpg_data_shot.c
+    src/Rpg/rpg_explorer_launcher.c
     src/Rpg/rpg_dialogue.c
     src/Rpg/rpg_editor_text.c
     src/Rpg/rpg_grid_path.c
@@ -107,6 +120,7 @@ add_executable(rpg_editor
     src/Rpg/rpg_signal_block.c
     src/Rpg/rpg_stage3_event.c
     src/Rpg/rpg_stage.c
+    src/Rpg/rpg_stage_storage.c
     src/Rpg/rpg_wire.c
     src/Rpg/rpg_zipper.c
     src/Shered/game_font.c
@@ -114,8 +128,24 @@ add_executable(rpg_editor
 
 target_compile_options(rpg_editor PRIVATE -Wall -Wextra -Wpedantic)
 target_link_options(rpg_editor PRIVATE "-Wl,--stack,8388608")
-target_link_libraries(rpg_editor PRIVATE raylib imm32 comdlg32)
+target_link_libraries(rpg_editor PRIVATE raylib imm32 comdlg32 shell32)
 target_include_directories(rpg_editor PRIVATE src/Rpg src/Shered src/Editor)
 set_target_properties(rpg_editor PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
+)
+
+# Zipper 専用の自作 Explorer UI。実 Explorer のビューは埋め込まず、Shell はアイコン取得だけに使う。
+add_executable(rpg_explorer
+    src/Rpg/rpg_explorer_main.c
+    src/Rpg/rpg_explorer_filesystem.c
+    src/Rpg/rpg_explorer_shell.c
+    src/Rpg/rpg_explorer_theme.c
+    src/Rpg/rpg_explorer_ui.c
+)
+
+target_compile_options(rpg_explorer PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(rpg_explorer PRIVATE raylib shell32 gdi32)
+target_include_directories(rpg_explorer PRIVATE src/Rpg src/Shered)
+set_target_properties(rpg_explorer PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build"
 )

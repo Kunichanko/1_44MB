@@ -34,9 +34,12 @@ enum {
     RPG_BLOCK_SIGNAL_SHRINK_PART_UP = 35,
     RPG_BLOCK_ATTACHMENT_RADIO_EMITTER = 200,
     RPG_BLOCK_ATTACHMENT_DATA_BUTTON = 201,
+    RPG_BLOCK_ATTACHMENT_SAVE_FLAG = 202,
     RPG_BLOCK_PROPERTY_ITEM = 100,
     RPG_BLOCK_PROPERTY_WIRE = 101,
-    RPG_BLOCK_PROPERTY_RECEIVER = 102
+    RPG_BLOCK_PROPERTY_RECEIVER = 102,
+    /* ビルド出力から対応フォルダが失われたマスを表す、実行時専用の壁。 */
+    RPG_BLOCK_BUILD_MISSING = 300
 };
 typedef struct RpgBlockInventory { const char *name; int blockTypes[RPG_BLOCK_INVENTORY_MAX_SLOTS]; int count; bool isProperty; bool isAttachment; } RpgBlockInventory;
 typedef struct RpgEffectShapeCell { int offsetX; int offsetY; int blockType; } RpgEffectShapeCell;
@@ -54,6 +57,8 @@ bool RpgBlockInventory_IsDoorBlock(int blockType);
 bool RpgBlockInventory_IsDoorOpen(int blockType);
 bool RpgBlockInventory_IsSignalShrinkBlock(int blockType);
 bool RpgBlockInventory_IsAttachment(int blockType);
+bool RpgBlockInventory_IsCellAttachment(int blockType);
+bool RpgBlockInventory_IsOrdinaryBlock(int blockType);
 int RpgBlockInventory_GetEffectRootType(int blockType);
 const RpgEffectShape *RpgBlockInventory_GetEffectShape(int blockType);
 const RpgEffectShape *RpgBlockInventory_GetDoorShape(bool isOpen);

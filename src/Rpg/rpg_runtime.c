@@ -16,7 +16,9 @@
 #include "rpg_block_inventory.h"
 #include "rpg_object_folder.h"
 #include "rpg_runtime_update.h"
+#include "rpg_scene.h"
 enum { RPG_SCREEN_WIDTH = 960, RPG_SCREEN_HEIGHT = 540 };
+static const float zipperImportAnimationDuration = 0.60f;
 
 static const char *npcTalkPrompt = u8"[E] \u8a71\u3057\u304b\u3051\u308b";
 static const char *zipperInspectPrompt = u8"[I] \u8abf\u3079\u308b";
@@ -103,11 +105,35 @@ static void DrawReferenceTextPanel(const char *fileName, const char *text)
     GameFont_Draw("E: 閉じる", 674.0f, 267.0f, 16.0f, RAYWHITE);
 }
 
+/* Zipperへの取り込み成功は、cmd経由・FILE.pngドラッグ経由を問わず同じアニメーションで示す。 */
+static void StartZipperImportAnimation(float *animationElapsed)
+{
+    if (animationElapsed != NULL) *animationElapsed = 0.0f;
+}
+
+/* cmdのゲーム機能。アニメーションの成否・再生時間に依存せず、受信時にただちに実行する。 */
+static void RunZipperCommandFunction(RpgRuntimeContext *context)
+{
+    if ((*context->attachedDataShotIndex) >= 0 && (*context->attachedDataShotIndex) < RPG_DATA_SHOT_MAX_COUNT &&
+        (*context->dataShots).entries[(*context->attachedDataShotIndex)].active) {
+        (void)RpgObjectFolder_MoveDataShotToZipper(&(*context->dataShots).entries[(*context->attachedDataShotIndex)]);
+    } else if ((*context->isZipperAttachedToBlock) && (*context->zipperAttachedBlockCell).row >= 0 &&
+               (*context->zipperAttachedBlockCell).column >= 0) {
+        if ((*context->attachedAttachmentIndex) >= 0 && (*context->attachedAttachmentIndex) < (*context->attachments).count)
+            (void)RpgObjectFolder_MoveAttachmentToZipper(&(*context->attachments).entries[(*context->attachedAttachmentIndex)]);
+        else {
+            RpgObjectFolder blockFolder = { .cell = (*context->zipperAttachedBlockCell) };
+            (void)RpgObjectFolder_MoveBlockToZipper(&blockFolder,
+                (*context->stage).blocks[(*context->zipperAttachedBlockCell).row][(*context->zipperAttachedBlockCell).column]);
+        }
+    }
+}
+
 static void DrawZipper(Texture2D zipperTexture, const RpgCharacter *zipper, float animationElapsed)
 {
     int frameCount = zipperTexture.width / 32;
     int frameIndex = animationElapsed >= 0.0f && frameCount > 1 ?
-        (int)Clamp(animationElapsed / 0.60f * frameCount, 0.0f, (float)(frameCount - 1)) : 0;
+        (int)Clamp(animationElapsed / zipperImportAnimationDuration * frameCount, 0.0f, (float)(frameCount - 1)) : 0;
     Rectangle source = { frameIndex * 32.0f, 0.0f, 32.0f, 40.0f };
     Rectangle destination = RpgZipper_GetSpriteBounds(zipper, 380.0f);
     DrawRectangleRounded((Rectangle){ destination.x - 3.0f, destination.y - 3.0f,
@@ -368,7 +394,7 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
                           bool isReferencePointerFeedbackSuppressed,
                           bool isReferenceDragActive, RpgReferenceTarget draggedReferenceTarget,
                           Vector2 referenceDragPosition,
-                          float zipperAnimationElapsed, bool showStopButton)
+                          float zipperAnimationElapsed, bool showStopButton, RpgSceneState *scene)
 {
     (void)npcInspectCompleted;
     BeginDrawing();
@@ -499,6 +525,8 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
         DrawRectangleLines(198, 10, 92, 26, RAYWHITE);
         DrawText("Stop [F2]", 205, 16, 15, RAYWHITE);
     }
+    if (RpgScene_IsGameSettings(scene)) RpgScene_DrawGameSettingsOverlay(scene);
+    else if (scene != NULL) RpgScene_DrawGameSettingsButton();
     EndDrawing();
 }
 
@@ -506,6 +534,17 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
 void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
 {
     if (context == NULL) return;
+    // 設定シーンでは本編の入力・物理・描画更新を実行せず、シーンUIだけを処理する。
+    if (context->scene != NULL && RpgScene_IsGameSettings(context->scene)) {
+        RpgScene_UpdateGameSettings(context->scene);
+        // 戻る先が本編でもタイトルでも、このフレームで遷移先を必ず描画する。
+        RpgScene_UpdateAndDraw(context->scene);
+        return;
+    }
+    if (context->scene != NULL && RpgScene_TryOpenGameSettings(context->scene)) {
+        RpgScene_UpdateAndDraw(context->scene);
+        return;
+    }
     (void)RegisterReferenceFileNames;
 #define zipperPointerSelected (*context->zipperPointerSelected)
 #define itemMessage (context->itemMessage)
@@ -631,25 +670,15 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
                                  &(*context->attachedAttachmentIndex));
         else if ((*context->zipperFollowsPlayer) && (*context->inspectTarget) < 0 && (*context->dialogueIndex) < 0 && (*context->stage3IntroIndex) < 0 && !(*context->isReferenceTextOpen))
             UpdateZipperFollow(&(*context->zipper), &(*context->player), GetFrameTime());
-        if (RpgObjectFolder_ConsumeZipperAnimationRequest()) {
-            (*context->zipperAnimationElapsed) = 0.0f;
-            if ((*context->attachedDataShotIndex) >= 0 && (*context->attachedDataShotIndex) < RPG_DATA_SHOT_MAX_COUNT &&
-                (*context->dataShots).entries[(*context->attachedDataShotIndex)].active) {
-                RpgObjectFolder_MoveDataShotToZipper(&(*context->dataShots).entries[(*context->attachedDataShotIndex)]);
-            } else if ((*context->isZipperAttachedToBlock) && (*context->zipperAttachedBlockCell).row >= 0 &&
-                (*context->zipperAttachedBlockCell).column >= 0) {
-                if ((*context->attachedAttachmentIndex) >= 0 && (*context->attachedAttachmentIndex) < (*context->attachments).count)
-                    RpgObjectFolder_MoveAttachmentToZipper(&(*context->attachments).entries[(*context->attachedAttachmentIndex)]);
-                else {
-                    RpgObjectFolder blockFolder = { .cell = (*context->zipperAttachedBlockCell) };
-                    RpgObjectFolder_MoveBlockToZipper(&blockFolder,
-                        (*context->stage).blocks[(*context->zipperAttachedBlockCell).row][(*context->zipperAttachedBlockCell).column]);
-                }
-            }
+        if (RpgObjectFolder_BeginZipperCommandRequest()) {
+            /* cmd受信は必ず表示を開始して要求を消費する。機能処理の結果には依存させない。 */
+            StartZipperImportAnimation(context->zipperAnimationElapsed);
+            (void)RpgObjectFolder_CompleteZipperCommandRequest();
+            RunZipperCommandFunction(context);
         }
         if ((*context->zipperAnimationElapsed) >= 0.0f) {
             (*context->zipperAnimationElapsed) += GetFrameTime();
-            if ((*context->zipperAnimationElapsed) >= 0.60f) (*context->zipperAnimationElapsed) = -1.0f;
+            if ((*context->zipperAnimationElapsed) >= zipperImportAnimationDuration) (*context->zipperAnimationElapsed) = -1.0f;
         }
         bool canTalk = RpgCharacter_IsNear(&(*context->player), &(*context->npc), 72.0f);
         RpgReferenceTarget nearbyReferenceTarget = { .kind = RPG_REFERENCE_TARGET_NONE,
@@ -826,6 +855,8 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
                         const char *path = RpgReferenceObjects_GetTargetPath(&(*context->stage), &(*context->referenceDrops),
                                                                                (*context->draggedReferenceTarget));
                         if (RpgObjectFolder_CopyFileToZipperInbox(path)) {
+                            /* FILE.pngの取り込みもcmdと同じ成功通知としてZipperをアニメーションさせる。 */
+                            StartZipperImportAnimation(context->zipperAnimationElapsed);
                             GameFont_AddText(GetReferenceFileName(path));
                             RpgReferenceObjects_RemoveTarget(&(*context->stage), &(*context->referenceDrops), (*context->draggedReferenceTarget));
                         }
@@ -872,7 +903,7 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
                      hoveredReferencePointerTarget, (*context->selectedReferencePointerTarget),
                      (*context->isReferencePointerFeedbackSuppressed), (*context->isReferenceDragActive),
                      (*context->draggedReferenceTarget), (*context->referenceDragPosition),
-                     (*context->zipperAnimationElapsed), context->showStopButton);
+                     (*context->zipperAnimationElapsed), context->showStopButton, context->scene);
     }
 
 #undef fileTexture

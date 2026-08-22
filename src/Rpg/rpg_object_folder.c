@@ -1,8 +1,18 @@
 // 依存する自プロジェクト内ファイル: rpg_object_folder.h
 #include "rpg_object_folder.h"
+#include "rpg_build_cell_storage.h"
+#include "rpg_explorer_launcher.h"
+
+// 依存関係: build の通常マス生成は rpg_build_cell_storage の選択方式へ委譲する。
 
 #include <stdio.h>
 #include <string.h>
+
+#if defined(__GNUC__)
+#define RPG_OBJECT_FOLDER_UNUSED __attribute__((unused))
+#else
+#define RPG_OBJECT_FOLDER_UNUSED
+#endif
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -11,14 +21,32 @@
 #include <windows.h>
 #include <shellapi.h>
 
-// NOUSER を維持したまま Explorer 更新通知だけを利用するための最小宣言。
-void WINAPI SHChangeNotify(LONG eventId, UINT flags, const void *item1, const void *item2);
-enum { RPG_SHCNE_MKDIR = 0x00000008L, RPG_SHCNE_RMDIR = 0x00000010L,
-       RPG_SHCNE_UPDATEDIR = 0x00001000L, RPG_SHCNE_RENAMEFOLDER = 0x00020000L,
-       RPG_SHCNF_PATHW = 0x0005U };
+/* shlobj.h は無効化済みのWin32 UI型を要求するため、変更通知APIだけを局所宣言する。 */
+#define RPG_SHCNE_CREATE       ((LONG)0x00000002)
+#define RPG_SHCNE_DELETE       ((LONG)0x00000004)
+#define RPG_SHCNE_MKDIR        ((LONG)0x00000008)
+#define RPG_SHCNE_RMDIR        ((LONG)0x00000010)
+#define RPG_SHCNE_UPDATEDIR    ((LONG)0x00001000)
+#define RPG_SHCNE_UPDATEITEM   ((LONG)0x00002000)
+#define RPG_SHCNE_RENAMEFOLDER ((LONG)0x00020000)
+#define RPG_SHCNF_PATHW        0x0005U
+#define RPG_SHCNF_FLUSHNOWAIT  0x3000U
+extern void WINAPI SHChangeNotify(LONG eventId, UINT flags, LPCVOID firstItem, LPCVOID secondItem);
 
 static int dataShotFolderSerials[RPG_DATA_SHOT_MAX_COUNT] = { 0 };
 static int nextFileDropId = 1;
+/* 同じ要求ファイルが削除待ちで残っても、同じアニメーションを毎フレーム再生しない。 */
+/* cmd が書き込む一意の内容で要求を識別する。更新時刻だけに依存しないため、短時間の連続実行も取りこぼさない。 */
+static char dispatchedZipperRequestToken[256] = { 0 };
+static char pendingZipperRequestToken[256] = { 0 };
+static bool hasDispatchedZipperRequest = false;
+static bool hasPendingZipperRequest = false;
+/* 本編の「ビルドする」で選択した StageN/build。エディターは空のまま従来の一時領域を使う。 */
+static char activeBuildPath[1200] = { 0 };
+/* 全マス生成中は数千件の Shell 通知をまとめ、ビルド処理が Explorer 更新で詰まらないようにする。 */
+static bool isBulkBuildOperation = false;
+/* 描画中はファイルシステムへ触れず、build の変更通知を受けたマスだけ更新する。 */
+static bool buildCellLinkedFiles[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS] = { { false } };
 // データ弾ごとに配下を含む変更通知を持ち、毎フレームの再帰走査を避ける。
 static HANDLE dataShotFolderWatchers[RPG_DATA_SHOT_MAX_COUNT] = { NULL };
 static char dataShotFolderWatchPaths[RPG_DATA_SHOT_MAX_COUNT][1200] = { { 0 } };
@@ -26,7 +54,7 @@ static char dataShotFolderWatchPaths[RPG_DATA_SHOT_MAX_COUNT][1200] = { { 0 } };
 static bool ToWide(const char *path, wchar_t *wide, int count)
 { return path != NULL && MultiByteToWideChar(CP_UTF8, 0, path, -1, wide, count) > 0; }
 
-// GetApplicationDirectory() を起点にした ".." を解決し、Explorer が表示中の実パスへ通知する。
+/* Shell通知では、実Explorerが監視している絶対パスへ正規化して渡す。 */
 static bool ToAbsoluteWide(const char *path, wchar_t *wide, int count)
 {
     wchar_t input[1200];
@@ -36,44 +64,53 @@ static bool ToAbsoluteWide(const char *path, wchar_t *wide, int count)
     return length > 0 && length < (DWORD)count;
 }
 
+/* 実Explorerが開いているフォルダの内容を、再入場なしで更新させるためのShell通知。 */
+static void NotifyShellChange(LONG eventId, const char *firstPath, const char *secondPath)
+{
+    wchar_t wideFirst[1200], wideSecond[1200];
+    if (isBulkBuildOperation) return;
+    if (!ToAbsoluteWide(firstPath, wideFirst, 1200)) return;
+    if (secondPath != NULL && !ToAbsoluteWide(secondPath, wideSecond, 1200)) return;
+    /* Explorerの更新は通知して委譲する。同期完了待ちはゲームフレームを止めるため行わない。 */
+    SHChangeNotify(eventId, RPG_SHCNF_PATHW | RPG_SHCNF_FLUSHNOWAIT,
+                   wideFirst, secondPath == NULL ? NULL : wideSecond);
+}
+
+static void NotifyShellPathHierarchyChanged(const char *path);
+
+static void NotifyShellParentChanged(const char *path)
+{
+    const char *separator;
+    char parent[1200];
+    size_t length;
+    if (path == NULL || (separator = strrchr(path, '\\')) == NULL) return;
+    length = (size_t)(separator - path);
+    if (length == 0 || length >= sizeof(parent)) return;
+    memcpy(parent, path, length);
+    parent[length] = '\0';
+    NotifyShellPathHierarchyChanged(parent);
+}
+
+/* Explorerは表示中の階層ごとに別の一覧を保持する。ファイル操作の完了時は、
+   操作対象からZipperルートまでの各一覧を同じ共通経路で同期更新する。 */
+static void NotifyShellPathHierarchyChanged(const char *path)
+{
+    char current[1200];
+    if (path == NULL || snprintf(current, sizeof(current), "%s", path) <= 0) return;
+    for (;;) {
+        const char *separator;
+        NotifyShellChange(RPG_SHCNE_UPDATEDIR, current, NULL);
+        separator = strrchr(current, '\\');
+        if (separator == NULL || separator == current) break;
+        current[separator - current] = '\0';
+    }
+}
+
+// GetApplicationDirectory() を起点にした ".." を解決し、Explorer が表示中の実パスへ通知する。
 bool RpgObjectFolder_OpenZipperDirectory(void)
 {
-    char directory[1200];
-    wchar_t wideDirectory[1200];
-    if (snprintf(directory, sizeof(directory), "%s../assets/Settings/Zipper",
-                 GetApplicationDirectory()) <= 0 ||
-        !ToAbsoluteWide(directory, wideDirectory, 1200)) return false;
-    CreateDirectoryW(wideDirectory, NULL);
-    return (INT_PTR)ShellExecuteW(NULL, L"open", wideDirectory, NULL, NULL, 1) > 32;
-}
-
-// Explorer を Inbox のまま開いていても、移動・生成・削除をその場で反映させる。
-static void NotifyExplorerDirectory(const char *directory)
-{
-    wchar_t wideDirectory[1200];
-    if (ToAbsoluteWide(directory, wideDirectory, 1200))
-        SHChangeNotify(RPG_SHCNE_UPDATEDIR, RPG_SHCNF_PATHW, wideDirectory, NULL);
-}
-
-static void NotifyExplorerParentDirectory(const char *path)
-{
-    char parent[1200];
-    char *separator;
-    if (path == NULL || snprintf(parent, sizeof(parent), "%s", path) <= 0) return;
-    separator = strrchr(parent, '\\');
-    if (separator == NULL) separator = strrchr(parent, '/');
-    if (separator == NULL) return;
-    *separator = '\0';
-    NotifyExplorerDirectory(parent);
-}
-
-static void NotifyExplorerFolderMoved(const char *source, const char *destination)
-{
-    wchar_t wideSource[1200], wideDestination[1200];
-    if (ToAbsoluteWide(source, wideSource, 1200) && ToAbsoluteWide(destination, wideDestination, 1200))
-        SHChangeNotify(RPG_SHCNE_RENAMEFOLDER, RPG_SHCNF_PATHW, wideSource, wideDestination);
-    NotifyExplorerParentDirectory(source);
-    NotifyExplorerParentDirectory(destination);
+    /* 起動先の選択は独立モジュールへ委譲し、ゲーム本編側は従来どおりこの入口だけを呼ぶ。 */
+    return RpgExplorerLauncher_OpenZipperDirectory();
 }
 
 static bool CreateFolderUtf8(const char *path)
@@ -81,9 +118,8 @@ static bool CreateFolderUtf8(const char *path)
     wchar_t wide[1200];
     if (!ToWide(path, wide, 1200)) return false;
     if (CreateDirectoryW(wide, NULL) != 0) {
-        if (ToAbsoluteWide(path, wide, 1200))
-            SHChangeNotify(RPG_SHCNE_MKDIR, RPG_SHCNF_PATHW, wide, NULL);
-        NotifyExplorerParentDirectory(path);
+        NotifyShellChange(RPG_SHCNE_MKDIR, path, NULL);
+        NotifyShellParentChanged(path);
         return true;
     }
     return GetLastError() == ERROR_ALREADY_EXISTS;
@@ -101,10 +137,33 @@ static bool FolderExistsUtf8(const char *path)
 // データ弾フォルダの変更を軽量に検出し、変更時だけ内容を再集計する。
 static bool GetStagePath(const char *suffix, char *path, size_t size)
 { return snprintf(path, size, "%s../assets/Settings/Stage/%s", GetApplicationDirectory(), suffix) > 0; }
-static bool GetObjectsPath(char *path, size_t size) { return GetStagePath("Objects", path, size); }
-static bool GetDropsPath(char *path, size_t size) { return GetStagePath("Drops", path, size); }
+static bool GetObjectsPath(char *path, size_t size)
+{
+    if (activeBuildPath[0] != '\0') return snprintf(path, size, "%s\\objects", activeBuildPath) > 0;
+    return GetStagePath("Objects", path, size);
+}
+static bool GetCellsPath(char *path, size_t size)
+{
+    if (activeBuildPath[0] != '\0') return snprintf(path, size, "%s\\cells", activeBuildPath) > 0;
+    return GetObjectsPath(path, size);
+}
+static bool RPG_OBJECT_FOLDER_UNUSED GetCompactCellMetadataPath(char *path, size_t size)
+{
+    return activeBuildPath[0] != '\0' && snprintf(path, size, "%s\\cells_metadata.txt", activeBuildPath) > 0;
+}
+static bool GetDropsPath(char *path, size_t size)
+{
+    if (activeBuildPath[0] != '\0') return snprintf(path, size, "%s\\drops", activeBuildPath) > 0;
+    return GetStagePath("Drops", path, size);
+}
 static bool GetInboxPath(char *path, size_t size)
 { return snprintf(path, size, "%s../assets/Settings/Zipper/Inbox", GetApplicationDirectory()) > 0; }
+
+static bool RpgObjectFolders_UsesCompactCellMetadata(int blockType)
+{
+    /* 地形の基本色と空気だけを一つの一覧へ圧縮し、穴・効果・参照物などは個別フォルダに残す。 */
+    return RpgBuildCellStorage_UsesMetadataForBlock(blockType);
+}
 
 static bool AttachmentName(const RpgAttachment *attachment, char *name, size_t size)
 {
@@ -125,7 +184,9 @@ static bool BlockName(const RpgObjectFolder *folder, int blockType, char *name, 
     if (folder == NULL || folder->cell.row < 0 || folder->cell.row >= RPG_STAGE_ROWS ||
         folder->cell.column < 0 || folder->cell.column >= RPG_STAGE_WORLD_COLUMNS) return false;
     identity = folder->cell.row * RPG_STAGE_WORLD_COLUMNS + folder->cell.column + 1;
-    return snprintf(name, size, "block_%03d_%06d_r%02d_c%03d", blockType, identity,
+    (void)blockType;
+    /* 種類を名前へ埋め込まず、マスごとに同じフォルダ名を保つ。種類は object_info.txt に記録する。 */
+    return snprintf(name, size, "cell_block_%06d_r%02d_c%03d", identity,
                     folder->cell.row, folder->cell.column) > 0;
 }
 
@@ -190,8 +251,10 @@ static bool HasDataShotFolderChanged(int index, const char *folder)
 
 static bool BlockPath(const RpgObjectFolder *folder, int blockType, bool inInbox, char *path, size_t size)
 {
-    char name[256];
-    return BlockName(folder, blockType, name, sizeof(name)) && ObjectPath(name, inInbox, path, size);
+    char name[256], parent[1200];
+    if (!BlockName(folder, blockType, name, sizeof(name)) ||
+        !(inInbox ? GetInboxPath(parent, sizeof(parent)) : GetCellsPath(parent, sizeof(parent)))) return false;
+    return snprintf(path, size, "%s\\%s", parent, name) > 0;
 }
 
 static void RemoveTree(const char *directory)
@@ -214,20 +277,59 @@ static void RemoveTree(const char *directory)
         FindClose(handle);
     }
     if (ToWide(directory, wideChild, 1200) && RemoveDirectoryW(wideChild) != 0) {
-        if (ToAbsoluteWide(directory, wideChild, 1200))
-            SHChangeNotify(RPG_SHCNE_RMDIR, RPG_SHCNF_PATHW, wideChild, NULL);
-        NotifyExplorerParentDirectory(directory);
+        NotifyShellChange(RPG_SHCNE_RMDIR, directory, NULL);
+        NotifyShellParentChanged(directory);
     }
+}
+
+/* 実Explorerが開いているZipper/Inboxの実体を消すと、Shellビューが古いフォルダを保持して
+   以後の移動通知を受け取れなくなる。セッション掃除ではルートを保持して内容だけを消す。 */
+static void ClearFolderContents(const char *directory)
+{
+    char search[1200];
+    wchar_t wideSearch[1200], wideChild[1200];
+    WIN32_FIND_DATAW data;
+    HANDLE handle;
+    if (directory == NULL) return;
+    if (!FolderExistsUtf8(directory)) {
+        (void)CreateFolderUtf8(directory);
+        return;
+    }
+    if (snprintf(search, sizeof(search), "%s\\*", directory) <= 0 || !ToWide(search, wideSearch, 1200)) return;
+    handle = FindFirstFileW(wideSearch, &data);
+    if (handle == INVALID_HANDLE_VALUE) return;
+    do {
+        char name[1024], child[1200];
+        if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0 ||
+            WideCharToMultiByte(CP_UTF8, 0, data.cFileName, -1, name, sizeof(name), NULL, NULL) <= 0 ||
+            snprintf(child, sizeof(child), "%s\\%s", directory, name) <= 0) continue;
+        if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            RemoveTree(child);
+        } else if (ToWide(child, wideChild, 1200) && DeleteFileW(wideChild) != 0) {
+            NotifyShellChange(RPG_SHCNE_DELETE, child, NULL);
+        }
+    } while (FindNextFileW(handle, &data) != 0);
+    FindClose(handle);
+    NotifyShellChange(RPG_SHCNE_UPDATEDIR, directory, NULL);
 }
 
 static bool MoveDirectory(const char *source, const char *destination)
 {
     wchar_t wideSource[1200], wideDestination[1200];
+    bool moved;
     if (!FolderExistsUtf8(source) || !ToWide(source, wideSource, 1200) || !ToWide(destination, wideDestination, 1200)) return false;
     RemoveTree(destination);
-    if (MoveFileExW(wideSource, wideDestination, MOVEFILE_WRITE_THROUGH) == 0) return false;
-    NotifyExplorerFolderMoved(source, destination);
-    return true;
+    moved = MoveFileExW(wideSource, wideDestination, MOVEFILE_WRITE_THROUGH) != 0;
+    if (moved) {
+        /* Rename通知だけでは表示中の移動先一覧が更新されないExplorerがあるため、
+           移動先を新規フォルダとしても通知し、親・対象ディレクトリを同期更新する。 */
+        NotifyShellChange(RPG_SHCNE_RENAMEFOLDER, source, destination);
+        NotifyShellChange(RPG_SHCNE_DELETE, source, NULL);
+        NotifyShellChange(RPG_SHCNE_MKDIR, destination, NULL);
+        NotifyShellPathHierarchyChanged(source);
+        NotifyShellPathHierarchyChanged(destination);
+    }
+    return moved;
 }
 
 // 所有元のフォルダ内容を弾の parent へ固定時点のスナップショットとして複製する。
@@ -294,7 +396,99 @@ static bool WriteInfo(const char *folder, const char *kind, int type, int identi
     file = _wfopen(wideInfoPath, L"wb");
     if (file == NULL) return false;
     fprintf(file, "kind=%s\ntype=%d\nid=%d\nworld_x=%.1f\nworld_y=%.1f\n", kind, type, identity, position.x, position.y);
-    return fclose(file) == 0;
+    if (fclose(file) != 0) return false;
+    NotifyShellChange(RPG_SHCNE_UPDATEITEM, infoPath, NULL);
+    NotifyShellParentChanged(infoPath);
+    return true;
+}
+
+/* 保存方式はパスを知らず、ここから渡す最小のファイル操作だけを利用する。 */
+static bool WriteBuildCellFolder(void *context, RpgGridCell cell, int blockType)
+{
+    RpgObjectFolder folder = { .cell = cell };
+    char cellPath[1200];
+    Vector2 position = { (cell.column + 0.5f) * RPG_STAGE_TILE_SIZE,
+                         (cell.row + 0.5f) * RPG_STAGE_TILE_SIZE };
+    (void)context;
+    return BlockPath(&folder, blockType, false, cellPath, sizeof(cellPath)) &&
+           WriteInfo(cellPath, "cell_block", blockType,
+                     cell.row * RPG_STAGE_WORLD_COLUMNS + cell.column + 1, position);
+}
+
+static bool GetBuildCellFilePath(void *context, const char *fileName, char *path, size_t pathSize)
+{
+    (void)context;
+    return activeBuildPath[0] != '\0' && fileName != NULL &&
+           snprintf(path, pathSize, "%s\\%s", activeBuildPath, fileName) > 0;
+}
+
+static void NotifyBuildCellFileChanged(void *context, const char *path)
+{
+    (void)context;
+    NotifyShellChange(RPG_SHCNE_UPDATEITEM, path, NULL);
+    NotifyShellParentChanged(path);
+}
+
+static RpgBuildCellStorageBackend GetBuildCellStorageBackend(void)
+{
+    return (RpgBuildCellStorageBackend){ .context = NULL, .writeCellFolder = WriteBuildCellFolder,
+                                         .getBuildFilePath = GetBuildCellFilePath,
+                                         .notifyBuildFileChanged = NotifyBuildCellFileChanged };
+}
+
+static bool OpenWideFile(const char *path, const wchar_t *mode, FILE **file)
+{
+    wchar_t widePath[1200];
+    if (file == NULL || !ToWide(path, widePath, 1200)) return false;
+    *file = _wfopen(widePath, mode);
+    return *file != NULL;
+}
+
+static bool RPG_OBJECT_FOLDER_UNUSED WriteCompactCellMetadata(const RpgStage *stage)
+{
+    char metadataPath[1200];
+    FILE *file;
+    if (stage == NULL || !GetCompactCellMetadataPath(metadataPath, sizeof(metadataPath)) ||
+        !OpenWideFile(metadataPath, L"wb", &file)) return false;
+    for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
+        int blockType = stage->blocks[row][column];
+        if (RpgObjectFolders_UsesCompactCellMetadata(blockType))
+            fprintf(file, "%d %d %d\n", row, column, blockType);
+    }
+    if (fclose(file) != 0) return false;
+    NotifyShellChange(RPG_SHCNE_UPDATEITEM, metadataPath, NULL);
+    NotifyShellParentChanged(metadataPath);
+    return true;
+}
+
+bool RpgObjectFolders_ReadCompactCellAvailability(bool available[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS])
+{
+    RpgBuildCellStorageBackend backend = GetBuildCellStorageBackend();
+    return RpgBuildCellStorage_ReadAvailability(available, &backend);
+}
+
+static bool ExtractCompactCellMetadata(const RpgObjectFolder *folder, int *blockType)
+{
+    RpgBuildCellStorageBackend backend = GetBuildCellStorageBackend();
+    return folder != NULL && RpgBuildCellStorage_Extract(folder->cell, blockType, &backend);
+}
+
+static bool ReadInfoBlockType(const char *folder, int *blockType)
+{
+    char infoPath[1200], line[96];
+    FILE *file;
+    if (folder == NULL || blockType == NULL || snprintf(infoPath, sizeof(infoPath), "%s\\object_info.txt", folder) <= 0 ||
+        !OpenWideFile(infoPath, L"rb", &file)) return false;
+    while (fgets(line, sizeof(line), file) != NULL)
+        if (sscanf(line, "type=%d", blockType) == 1) { fclose(file); return true; }
+    fclose(file);
+    return false;
+}
+
+static bool RestoreCompactCellMetadata(const RpgObjectFolder *folder, int blockType)
+{
+    RpgBuildCellStorageBackend backend = GetBuildCellStorageBackend();
+    return folder != NULL && RpgBuildCellStorage_Restore(folder->cell, blockType, &backend);
 }
 
 static unsigned long long HashPath(const char *path)
@@ -370,8 +564,11 @@ static bool EnsureDataShot(const RpgDataShot *shot, const RpgAttachments *attach
         snprintf(parent, sizeof(parent), "%s\\parent", source) <= 0) return false;
     // 発射時点の装置フォルダ全体を parent に入れ、弾自身の object_info.txt は root に残す。
     const char *parentSource = FolderExistsUtf8(attachmentSource) ? attachmentSource : attachmentInbox;
-    return CreateFolderUtf8(objects) && WriteInfo(source, "data_shot", 0, shot->folderSerial, shot->position) &&
-           CopyTree(parentSource, parent);
+    bool created = CreateFolderUtf8(objects) &&
+                   WriteInfo(source, "data_shot", 0, shot->folderSerial, shot->position) &&
+                   CopyTree(parentSource, parent);
+    if (created) NotifyShellPathHierarchyChanged(source);
+    return created;
 }
 
 static void UpdateDataShotProperties(int shotIndex, RpgDataShot *shot, const RpgAttachments *attachments)
@@ -438,6 +635,18 @@ static bool MaterializeBlockInInbox(const RpgObjectFolder *folder, int blockType
         !GetInboxPath(inboxParent, sizeof(inboxParent)) || !CreateFolderUtf8(inboxParent)) return false;
     if (FolderExistsUtf8(inbox)) return true;
     if (FolderExistsUtf8(source)) return MoveDirectory(source, inbox);
+    /* build で外部削除されたマスは赤壁として扱うため、取得操作でフォルダを再生成しない。 */
+    if (activeBuildPath[0] != '\0') {
+        int storedBlockType;
+        RpgBuildCellStorageBackend storageBackend = GetBuildCellStorageBackend();
+        if (RpgBuildCellStorage_EnsureCell(folder->cell, blockType, &storageBackend) &&
+            FolderExistsUtf8(source)) return MoveDirectory(source, inbox);
+        if (!ExtractCompactCellMetadata(folder, &storedBlockType)) return false;
+        position = (Vector2){ (folder->cell.column + 0.5f) * RPG_STAGE_TILE_SIZE,
+                              (folder->cell.row + 0.5f) * RPG_STAGE_TILE_SIZE };
+        return WriteInfo(inbox, "cell_block", storedBlockType,
+                         folder->cell.row * RPG_STAGE_WORLD_COLUMNS + folder->cell.column + 1, position);
+    }
     // 通常ブロックは普段は仮想的にだけ存在し、アニメーション時にメタ情報付きで実体化する。
     position = (Vector2){ (folder->cell.column + 0.5f) * RPG_STAGE_TILE_SIZE,
                           (folder->cell.row + 0.5f) * RPG_STAGE_TILE_SIZE };
@@ -485,7 +694,10 @@ bool RpgObjectFolder_CopyFileToZipperInbox(const char *sourcePath)
     fileName = fileName == NULL ? sourcePath : fileName + 1;
     if (snprintf(destination, sizeof(destination), "%s\\%s", inbox, fileName) <= 0 ||
         !ToWide(sourcePath, wideSource, 1200) || !ToWide(destination, wideDestination, 1200)) return false;
-    return CopyFileW(wideSource, wideDestination, FALSE) != 0;
+    if (CopyFileW(wideSource, wideDestination, FALSE) == 0) return false;
+    NotifyShellChange(RPG_SHCNE_CREATE, destination, NULL);
+    NotifyShellPathHierarchyChanged(destination);
+    return true;
 #else
     (void)sourcePath; return false;
 #endif
@@ -494,21 +706,83 @@ bool RpgObjectFolder_CopyFileToZipperInbox(const char *sourcePath)
 void RpgObjectFolder_PrepareZipperAnimationCommand(void)
 {
 #ifdef _WIN32
-    char inbox[1200], command[1200]; wchar_t wideCommand[1200]; FILE *file;
+    char inbox[1200], command[1200], script[1200]; wchar_t wideCommand[1200], wideScript[1200]; FILE *file;
     if (!GetInboxPath(inbox, sizeof(inbox)) || !CreateFolderUtf8(inbox) ||
-        snprintf(command, sizeof(command), "%s\\zipper_animate.cmd", inbox) <= 0 || !ToWide(command, wideCommand, 1200)) return;
+        snprintf(command, sizeof(command), "%s\\assyuku.cmd", inbox) <= 0 ||
+        snprintf(script, sizeof(script), "%s\\assyuku.vbs", inbox) <= 0 ||
+        !ToWide(command, wideCommand, 1200) || !ToWide(script, wideScript, 1200)) return;
     file = _wfopen(wideCommand, L"wb");
-    if (file != NULL) { fputs("@echo off\r\necho animate> \"%~dp0zipper_animate.request\"\r\n", file); fclose(file); }
+    if (file != NULL) {
+        /* cmdは既存操作との互換用。ダブルクリック時のコンソール表示を避けるには.vbsを使う。 */
+        fputs("@echo off\r\ndel /f /q \"%~dp0assyuku.request\" >nul 2>nul\r\n"
+               "> \"%~dp0assyuku.request\" echo animate %DATE%_%TIME%_%RANDOM%_%RANDOM%\r\n", file);
+        if (fclose(file) == 0) {
+            NotifyShellChange(RPG_SHCNE_CREATE, command, NULL);
+            NotifyShellPathHierarchyChanged(command);
+        }
+    }
+    file = _wfopen(wideScript, L"wb");
+    if (file != NULL) {
+        /* WScriptで実行されるため、同じ要求をコンソールなしで発行できる。 */
+        fputs("Randomize\r\n"
+              "Set fso = CreateObject(\"Scripting.FileSystemObject\")\r\n"
+              "request = fso.BuildPath(fso.GetParentFolderName(WScript.ScriptFullName), \"assyuku.request\")\r\n"
+              "If fso.FileExists(request) Then fso.DeleteFile request, True\r\n"
+              "Set output = fso.CreateTextFile(request, True)\r\n"
+              "output.WriteLine \"animate \" & Timer & \"_\" & Rnd & \"_\" & Rnd\r\n"
+              "output.Close\r\n", file);
+        if (fclose(file) == 0) {
+            NotifyShellChange(RPG_SHCNE_CREATE, script, NULL);
+            NotifyShellPathHierarchyChanged(script);
+        }
+    }
 #endif
 }
 
-bool RpgObjectFolder_ConsumeZipperAnimationRequest(void)
+bool RpgObjectFolder_BeginZipperCommandRequest(void)
+{
+#ifdef _WIN32
+    char inbox[1200], request[1200], token[256] = { 0 }; wchar_t wideRequest[1200]; FILE *file;
+    if (!GetInboxPath(inbox, sizeof(inbox)) || snprintf(request, sizeof(request), "%s\\assyuku.request", inbox) <= 0 ||
+        !ToWide(request, wideRequest, 1200)) {
+        hasDispatchedZipperRequest = false;
+        hasPendingZipperRequest = false;
+        return false;
+    }
+    /* 完了後に削除が遅れても、同一の書込み要求は再実行しない。 */
+    file = _wfopen(wideRequest, L"rb");
+    if (file == NULL) {
+        hasPendingZipperRequest = false;
+        return false;
+    }
+    (void)fgets(token, (int)sizeof(token), file);
+    fclose(file);
+    token[strcspn(token, "\r\n")] = '\0';
+    if (token[0] == '\0' || (hasDispatchedZipperRequest && strcmp(token, dispatchedZipperRequestToken) == 0)) return false;
+    snprintf(pendingZipperRequestToken, sizeof(pendingZipperRequestToken), "%s", token);
+    hasPendingZipperRequest = true;
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool RpgObjectFolder_CompleteZipperCommandRequest(void)
 {
 #ifdef _WIN32
     char inbox[1200], request[1200]; wchar_t wideRequest[1200];
-    if (!GetInboxPath(inbox, sizeof(inbox)) || snprintf(request, sizeof(request), "%s\\zipper_animate.request", inbox) <= 0 ||
-        !ToWide(request, wideRequest, 1200) || GetFileAttributesW(wideRequest) == INVALID_FILE_ATTRIBUTES) return false;
-    DeleteFileW(wideRequest); return true;
+    if (!hasPendingZipperRequest) return false;
+    /* 取り込み成功を完了条件にする。削除失敗は次回cmd実行時に置換するため、
+       Shellの一時ロックでアニメーションまで失われない。 */
+    snprintf(dispatchedZipperRequestToken, sizeof(dispatchedZipperRequestToken), "%s", pendingZipperRequestToken);
+    hasDispatchedZipperRequest = true;
+    hasPendingZipperRequest = false;
+    if (!GetInboxPath(inbox, sizeof(inbox)) || snprintf(request, sizeof(request), "%s\\assyuku.request", inbox) <= 0 ||
+        !ToWide(request, wideRequest, 1200)) return true;
+    if (DeleteFileW(wideRequest) != 0) {
+        /* 一時要求はExplorerへ見せる対象でないため、重い同期通知は送らない。 */
+    }
+    return true;
 #else
     return false;
 #endif
@@ -541,7 +815,7 @@ bool RpgObjectFolder_MoveDataShotToZipper(const RpgDataShot *shot)
 bool RpgObjectFolder_MoveBlockToZipper(const RpgObjectFolder *folder, int blockType)
 {
 #ifdef _WIN32
-    return blockType != 0 && MaterializeBlockInInbox(folder, blockType);
+    return (blockType != 0 || activeBuildPath[0] != '\0') && MaterializeBlockInInbox(folder, blockType);
 #else
     (void)folder; (void)blockType; return false;
 #endif
@@ -572,12 +846,20 @@ bool RpgObjectFolder_ReturnDataShotFromZipper(const RpgDataShot *shot)
 bool RpgObjectFolder_ReturnBlockFromZipper(const RpgObjectFolder *folder, int blockType)
 {
 #ifdef _WIN32
-    char source[1200], inbox[1200], objects[1200];
+    char source[1200], inbox[1200], cells[1200];
     if (!BlockPath(folder, blockType, false, source, sizeof(source)) ||
         !BlockPath(folder, blockType, true, inbox, sizeof(inbox)) || !FolderExistsUtf8(inbox)) return false;
+    if (activeBuildPath[0] != '\0') {
+        int storedBlockType;
+        /* 圧縮マスはメタ行へ戻して一時フォルダを消す。編集ファイルを持つ場合は個別フォルダへ昇格させる。 */
+        if (ReadInfoBlockType(inbox, &storedBlockType) && RpgObjectFolders_UsesCompactCellMetadata(storedBlockType) &&
+            !HasExternalFiles(inbox))
+            return RestoreCompactCellMetadata(folder, storedBlockType) && (RemoveTree(inbox), true);
+        return GetCellsPath(cells, sizeof(cells)) && CreateFolderUtf8(cells) && MoveDirectory(inbox, source);
+    }
     // 編集がなければ仮想ブロックへ戻し、外部ファイルが追加されたときだけ実フォルダを残す。
     if (!HasExternalFiles(inbox)) { RemoveTree(inbox); return true; }
-    return GetObjectsPath(objects, sizeof(objects)) && CreateFolderUtf8(objects) && MoveDirectory(inbox, source);
+    return GetCellsPath(cells, sizeof(cells)) && CreateFolderUtf8(cells) && MoveDirectory(inbox, source);
 #else
     (void)folder; (void)blockType; return false;
 #endif
@@ -643,7 +925,12 @@ bool RpgObjectFolder_BlockHasLinkedFiles(const RpgObjectFolder *folder, int bloc
 {
 #ifdef _WIN32
     char source[1200], inbox[1200];
-    return blockType != 0 && ((BlockPath(folder, blockType, false, source, sizeof(source)) && HasExternalFiles(source)) ||
+    /* 圧縮済みの空気・通常ブロックには個別フォルダがないため、描画ごとのファイル照会を行わない。 */
+    if (activeBuildPath[0] != '\0' && RpgObjectFolders_UsesCompactCellMetadata(blockType)) return false;
+    if (activeBuildPath[0] != '\0' && folder != NULL && folder->cell.row >= 0 && folder->cell.row < RPG_STAGE_ROWS &&
+        folder->cell.column >= 0 && folder->cell.column < RPG_STAGE_WORLD_COLUMNS)
+        return buildCellLinkedFiles[folder->cell.row][folder->cell.column];
+    return (blockType != 0 || activeBuildPath[0] != '\0') && ((BlockPath(folder, blockType, false, source, sizeof(source)) && HasExternalFiles(source)) ||
                               (BlockPath(folder, blockType, true, inbox, sizeof(inbox)) && HasExternalFiles(inbox)));
 #else
     (void)folder; (void)blockType; return false;
@@ -674,15 +961,123 @@ void RpgObjectFolder_RemoveAttachmentFolder(const RpgAttachment *attachment)
 #endif
 }
 
+bool RpgObjectFolders_BeginStageBuild(int stageNumber, const RpgStage *stage,
+                                      const RpgAttachments *attachments, Vector2 playerStartPosition,
+                                      char *buildPath, size_t buildPathSize)
+{
+#ifdef _WIN32
+    char cells[1200], objects[1200], inbox[1200];
+    if (stageNumber <= 0 || stage == NULL || buildPath == NULL || buildPathSize == 0) return false;
+    int written = snprintf(buildPath, buildPathSize, "%s../assets/Settings/Stage/Stage%d/build",
+                           GetApplicationDirectory(), stageNumber);
+    if (written <= 0 || (size_t)written >= buildPathSize) return false;
+
+    RpgObjectFolders_EndStageBuild();
+    isBulkBuildOperation = true;
+    RpgObjectFolders_ClearSessionStorage();
+    RemoveTree(buildPath);
+    /* 前回の成果物が一つでも残った状態で初期化を続けると世代が混ざるため、完全削除できない場合は失敗にする。 */
+    if (FolderExistsUtf8(buildPath)) { isBulkBuildOperation = false; return false; }
+    snprintf(activeBuildPath, sizeof(activeBuildPath), "%s", buildPath);
+    if (!CreateFolderUtf8(activeBuildPath) || !GetCellsPath(cells, sizeof(cells)) ||
+        !GetObjectsPath(objects, sizeof(objects)) || !GetInboxPath(inbox, sizeof(inbox)) ||
+        !CreateFolderUtf8(cells) || !CreateFolderUtf8(objects) || !CreateFolderUtf8(inbox)) {
+        activeBuildPath[0] = '\0';
+        isBulkBuildOperation = false;
+        return false;
+    }
+    int playerStartMap = (int)(playerStartPosition.x / (RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE));
+    if (playerStartMap < 0) playerStartMap = 0;
+    if (playerStartMap >= RPG_STAGE_MAP_COUNT) playerStartMap = RPG_STAGE_MAP_COUNT - 1;
+    RpgBuildCellStorageBackend storageBackend = GetBuildCellStorageBackend();
+    if (!RpgBuildCellStorage_Create(stage, playerStartMap, &storageBackend)) {
+        RpgObjectFolders_EndStageBuild();
+        isBulkBuildOperation = false;
+        return false;
+    }
+    RpgObjectFolders_PrepareAttachmentFolders(attachments);
+    RpgObjectFolder_PrepareZipperAnimationCommand();
+    isBulkBuildOperation = false;
+    /* 生成後は build ルートと親だけを一度更新通知する。 */
+    NotifyShellChange(RPG_SHCNE_UPDATEDIR, activeBuildPath, NULL);
+    NotifyShellParentChanged(activeBuildPath);
+    return true;
+#else
+    (void)stageNumber; (void)stage; (void)attachments; (void)buildPath; (void)buildPathSize;
+    return false;
+#endif
+}
+
+bool RpgObjectFolders_IsStageBuildActive(void) { return activeBuildPath[0] != '\0'; }
+
+void RpgObjectFolders_UpdateBuildCellGeneration(void)
+{
+#ifdef _WIN32
+    if (activeBuildPath[0] == '\0') return;
+    RpgBuildCellStorageBackend storageBackend = GetBuildCellStorageBackend();
+    isBulkBuildOperation = true;
+    RpgBuildCellStorage_Update(&storageBackend);
+    isBulkBuildOperation = false;
+    NotifyShellChange(RPG_SHCNE_UPDATEDIR, activeBuildPath, NULL);
+#endif
+}
+
+bool RpgObjectFolders_IsBuildCellAvailable(RpgGridCell cell)
+{
+#ifdef _WIN32
+    RpgObjectFolder folder = { .cell = cell };
+    char source[1200], inbox[1200];
+    bool compactAvailable[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS];
+    if (cell.row < 0 || cell.row >= RPG_STAGE_ROWS || cell.column < 0 || cell.column >= RPG_STAGE_WORLD_COLUMNS) return false;
+    if (RpgObjectFolders_ReadCompactCellAvailability(compactAvailable) && compactAvailable[cell.row][cell.column]) return true;
+    return (BlockPath(&folder, 0, false, source, sizeof(source)) && FolderExistsUtf8(source)) ||
+           (BlockPath(&folder, 0, true, inbox, sizeof(inbox)) && FolderExistsUtf8(inbox));
+#else
+    (void)cell;
+    return false;
+#endif
+}
+
+void RpgObjectFolders_RefreshBuildCellLinkedFiles(RpgGridCell cell)
+{
+#ifdef _WIN32
+    RpgObjectFolder folder = { .cell = cell };
+    char source[1200], inbox[1200];
+    if (activeBuildPath[0] == '\0' || cell.row < 0 || cell.row >= RPG_STAGE_ROWS ||
+        cell.column < 0 || cell.column >= RPG_STAGE_WORLD_COLUMNS) return;
+    buildCellLinkedFiles[cell.row][cell.column] =
+        (BlockPath(&folder, 0, false, source, sizeof(source)) && HasExternalFiles(source)) ||
+        (BlockPath(&folder, 0, true, inbox, sizeof(inbox)) && HasExternalFiles(inbox));
+#else
+    (void)cell;
+#endif
+}
+
+void RpgObjectFolders_ClearBuildCellLinkedFiles(void)
+{
+    memset(buildCellLinkedFiles, 0, sizeof(buildCellLinkedFiles));
+}
+
+void RpgObjectFolders_EndStageBuild(void)
+{
+    activeBuildPath[0] = '\0';
+    RpgObjectFolders_ClearBuildCellLinkedFiles();
+}
+
 void RpgObjectFolders_ClearSessionStorage(void)
 {
 #ifdef _WIN32
     char objects[1200], drops[1200], inbox[1200];
     memset(dataShotFolderSerials, 0, sizeof(dataShotFolderSerials)); nextFileDropId = 1;
+    hasDispatchedZipperRequest = false;
+    hasPendingZipperRequest = false;
+    dispatchedZipperRequestToken[0] = '\0';
+    pendingZipperRequestToken[0] = '\0';
     for (int index = 0; index < RPG_DATA_SHOT_MAX_COUNT; index++) CloseDataShotFolderWatcher(index);
-    if (GetObjectsPath(objects, sizeof(objects))) RemoveTree(objects);
-    if (GetDropsPath(drops, sizeof(drops))) RemoveTree(drops);
-    if (GetInboxPath(inbox, sizeof(inbox))) RemoveTree(inbox);
+    if (activeBuildPath[0] == '\0' && GetObjectsPath(objects, sizeof(objects))) RemoveTree(objects);
+    if (activeBuildPath[0] == '\0' && GetDropsPath(drops, sizeof(drops))) RemoveTree(drops);
+    /* Inboxは実Explorerの表示ルートなので、削除・再作成せず同じディレクトリ内を掃除する。 */
+    if (GetInboxPath(inbox, sizeof(inbox))) ClearFolderContents(inbox);
 #endif
 }
 // 役割: オブジェクト所有フォルダ、Zipper への移動、外部ファイルの引き継ぎを管理する。

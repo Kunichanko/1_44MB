@@ -570,6 +570,7 @@ Color RpgStage_GetBlockColor(int blockType)
                                     { 94, 60, 40, 255 }, { 94, 60, 40, 255 }, { 94, 60, 40, 255 },
                                     { 126, 90, 58, 180 }, { 126, 90, 58, 180 }, { 126, 90, 58, 180 } };
     // 開いたドアの上端は残る壁として、閉じたドアと同じ不透明な色で描画する。
+    if (blockType == RPG_BLOCK_BUILD_MISSING) return (Color){ 210, 45, 45, 255 };
     if (blockType == RPG_BLOCK_DOOR_OPEN_TOP) blockType = RPG_BLOCK_DOOR_CLOSED_TOP;
     return blockType >= 1 && blockType <= RPG_BLOCK_DOOR_OPEN_BOTTOM ? colors[blockType] :
            blockType == RPG_BLOCK_EFFECT_BUTTON ? (Color){ 72, 84, 104, 255 } : colors[1];

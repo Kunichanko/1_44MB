@@ -27,6 +27,7 @@ typedef struct RpgAttachment {
     int previewFileCount;
     unsigned long long previewTotalBytes;
     RpgGridPath dataPath;
+    bool flagRaised;
 } RpgAttachment;
 typedef struct RpgAttachments {
     int count;
@@ -41,14 +42,19 @@ bool RpgAttachments_Add(RpgAttachments *attachments, const RpgStage *stage, int 
 bool RpgAttachments_Remove(RpgAttachments *attachments, RpgAttachment attachment);
 void RpgAttachments_MigrateLegacyButtons(RpgAttachments *attachments, RpgStage *stage);
 bool RpgAttachments_IsButtonPressed(const RpgAttachments *attachments, Vector2 playerPosition);
+int RpgAttachments_FindTouchedSaveFlag(const RpgAttachments *attachments, Vector2 playerPosition);
+bool RpgAttachments_SetRaisedSaveFlag(RpgAttachments *attachments, int flagId);
+bool RpgAttachments_IsCellOccupied(const RpgAttachments *attachments, RpgGridCell cell);
 int RpgAttachments_FindAtPosition(const RpgAttachments *attachments, Vector2 position, float distance);
-bool RpgAttachments_FindSnap(const RpgStage *stage, int type, Vector2 position,
-                             RpgAttachment *attachment);
+bool RpgAttachments_FindSnap(const RpgAttachments *attachments, const RpgStage *stage, int type,
+                             Vector2 position, int ignoredAttachmentIndex, RpgAttachment *attachment);
 bool RpgAttachments_MoveDataPathEndpoint(RpgAttachments *attachments, const RpgStage *stage,
                                           int attachmentIndex, int row, int column);
 bool RpgAttachments_FindDataPathEndpoint(const RpgAttachments *attachments, int row, int column,
                                          int *attachmentIndex);
 Vector2 RpgAttachments_GetPosition(const RpgAttachment *attachment, int firstColumn);
+// 保存旗の土台ブロック上へ、キャラクターの足元基準で復帰させる座標を返す。
+Vector2 RpgAttachments_GetSaveFlagRespawnPosition(const RpgAttachment *attachment);
 void RpgAttachments_DrawDataPaths(const RpgAttachments *attachments, int mapIndex);
 void RpgAttachments_RemoveBroken(RpgAttachments *attachments, const RpgStage *stage);
 void RpgAttachments_Draw(const RpgAttachments *attachments);

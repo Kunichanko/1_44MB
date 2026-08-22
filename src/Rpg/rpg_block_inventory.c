@@ -9,9 +9,11 @@ static const RpgBlockInventory inventories[] = {
     { "Effect", { RPG_BLOCK_EFFECT_BOUNCE, RPG_BLOCK_EFFECT_SLOW, RPG_BLOCK_EFFECT_WIDE_BOUNCE,
                     RPG_BLOCK_EFFECT_CORNER_BOUNCE, RPG_BLOCK_DOOR_CLOSED_TOP,
                     RPG_BLOCK_SIGNAL_SHRINK_ROOT_HORIZONTAL }, 6, false, false },
-    { "Item Property", { RPG_BLOCK_PROPERTY_ITEM, RPG_BLOCK_PROPERTY_WIRE,
-                           RPG_BLOCK_PROPERTY_RECEIVER }, 3, true, false },
-    { "Attachment", { RPG_BLOCK_ATTACHMENT_RADIO_EMITTER, RPG_BLOCK_ATTACHMENT_DATA_BUTTON }, 2, false, true },
+    { "Item Property", { RPG_BLOCK_PROPERTY_ITEM, RPG_BLOCK_PROPERTY_WIRE }, 2, true, false },
+    { "Attachment Edge", { RPG_BLOCK_ATTACHMENT_DATA_BUTTON,
+                             RPG_BLOCK_PROPERTY_RECEIVER }, 2, false, true },
+    { "Attachment Object", { RPG_BLOCK_ATTACHMENT_RADIO_EMITTER,
+                               RPG_BLOCK_ATTACHMENT_SAVE_FLAG }, 2, false, true },
     { "Reference Object", { RPG_BLOCK_REFERENCE_FILE }, 1, false, false }
 };
 
@@ -113,7 +115,19 @@ bool RpgBlockInventory_IsSignalShrinkBlock(int blockType)
 bool RpgBlockInventory_IsAttachment(int blockType)
 {
     return blockType == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER ||
-           blockType == RPG_BLOCK_ATTACHMENT_DATA_BUTTON;
+           blockType == RPG_BLOCK_ATTACHMENT_DATA_BUTTON || blockType == RPG_BLOCK_ATTACHMENT_SAVE_FLAG;
+}
+
+bool RpgBlockInventory_IsCellAttachment(int blockType)
+{
+    return blockType == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER ||
+           blockType == RPG_BLOCK_ATTACHMENT_SAVE_FLAG;
+}
+
+bool RpgBlockInventory_IsOrdinaryBlock(int blockType)
+{
+    return (blockType >= 1 && blockType <= 10) ||
+           blockType == RPG_BLOCK_HOLE_VERTICAL || blockType == RPG_BLOCK_HOLE_HORIZONTAL;
 }
 
 int RpgBlockInventory_GetEffectRootType(int blockType)

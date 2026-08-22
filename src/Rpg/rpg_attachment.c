@@ -26,6 +26,19 @@ static bool RpgAttachments_HasOuterEmptyCell(const RpgStage *stage, RpgGridCell 
     return RpgAttachments_IsCellInStage(outerCell) && stage->blocks[outerCell.row][outerCell.column] == 0;
 }
 
+bool RpgAttachments_IsCellOccupied(const RpgAttachments *attachments, RpgGridCell cell)
+{
+    if (attachments == NULL) return false;
+    for (int index = 0; index < attachments->count; index++) {
+        const RpgAttachment *attachment = &attachments->entries[index];
+        RpgGridCell occupiedCell;
+        if (!RpgBlockInventory_IsCellAttachment(attachment->type)) continue;
+        occupiedCell = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
+        if (occupiedCell.row == cell.row && occupiedCell.column == cell.column) return true;
+    }
+    return false;
+}
+
 RpgAttachments RpgAttachments_Default(void) { return (RpgAttachments){ 0 }; }
 
 // 保存済みの添付物と重複しないフォルダ識別子を返す。
@@ -168,6 +181,8 @@ bool RpgAttachments_Add(RpgAttachments *attachments, const RpgStage *stage, int 
         !RpgAttachments_IsCellInStage(cell) || stage->blocks[cell.row][cell.column] == 0 ||
         !RpgAttachments_HasOuterEmptyCell(stage, cell, side) ||
         side < RPG_GRID_SIDE_TOP || side > RPG_GRID_SIDE_LEFT) return false;
+    if (RpgBlockInventory_IsCellAttachment(type) && RpgAttachments_IsCellOccupied(attachments, outerCell))
+        return false;
     for (int index = 0; index < attachments->count; index++)
         if (RpgAttachments_AreSame(&attachments->entries[index], &attachment)) return false;
     attachments->entries[attachments->count++] = attachment;
@@ -244,6 +259,30 @@ bool RpgAttachments_IsButtonPressed(const RpgAttachments *attachments, Vector2 p
     return false;
 }
 
+int RpgAttachments_FindTouchedSaveFlag(const RpgAttachments *attachments, Vector2 playerPosition)
+{
+    if (attachments == NULL) return -1;
+    for (int index = 0; index < attachments->count; index++) {
+        const RpgAttachment *attachment = &attachments->entries[index];
+        if (attachment->type != RPG_BLOCK_ATTACHMENT_SAVE_FLAG) continue;
+        if (Vector2Distance(playerPosition, RpgAttachments_GetPosition(attachment, 0)) <= 28.0f) return index;
+    }
+    return -1;
+}
+
+bool RpgAttachments_SetRaisedSaveFlag(RpgAttachments *attachments, int flagId)
+{
+    bool found = false;
+    if (attachments == NULL || flagId <= 0) return false;
+    for (int index = 0; index < attachments->count; index++) {
+        RpgAttachment *attachment = &attachments->entries[index];
+        if (attachment->type != RPG_BLOCK_ATTACHMENT_SAVE_FLAG) continue;
+        attachment->flagRaised = attachment->folderId == flagId;
+        if (attachment->flagRaised) found = true;
+    }
+    return found;
+}
+
 Vector2 RpgAttachments_GetPosition(const RpgAttachment *attachment, int firstColumn)
 {
     RpgGridCell outerCell = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
@@ -258,6 +297,14 @@ Vector2 RpgAttachments_GetPosition(const RpgAttachment *attachment, int firstCol
     return (Vector2){ x, y };
 }
 
+Vector2 RpgAttachments_GetSaveFlagRespawnPosition(const RpgAttachment *attachment)
+{
+    if (attachment == NULL) return (Vector2){ 0.0f, 0.0f };
+    /* キャラクター座標は足元基準なので、旗を支えるブロックの上辺へ置く。 */
+    return (Vector2){ (attachment->cell.column + 0.5f) * RPG_STAGE_TILE_SIZE,
+                      attachment->cell.row * RPG_STAGE_TILE_SIZE };
+}
+
 int RpgAttachments_FindAtPosition(const RpgAttachments *attachments, Vector2 position, float distance)
 {
     for (int index = attachments->count - 1; index >= 0; index--) {
@@ -267,8 +314,8 @@ int RpgAttachments_FindAtPosition(const RpgAttachments *attachments, Vector2 pos
     return -1;
 }
 
-bool RpgAttachments_FindSnap(const RpgStage *stage, int type, Vector2 position,
-                             RpgAttachment *attachment)
+bool RpgAttachments_FindSnap(const RpgAttachments *attachments, const RpgStage *stage, int type,
+                             Vector2 position, int ignoredAttachmentIndex, RpgAttachment *attachment)
 {
     float nearestDistance = RPG_STAGE_TILE_SIZE;
     bool found = false;
@@ -278,6 +325,20 @@ bool RpgAttachments_FindSnap(const RpgStage *stage, int type, Vector2 position,
             RpgAttachment candidate = { .type = type, .cell = { row, column },
                                         .side = (RpgGridSide)side };
             if (!RpgAttachments_HasOuterEmptyCell(stage, candidate.cell, candidate.side)) continue;
+            RpgGridCell outerCell = RpgGridPath_GetSideNeighbor(candidate.cell, candidate.side);
+            if (RpgBlockInventory_IsCellAttachment(type)) {
+                bool occupied = false;
+                for (int attachmentIndex = 0; attachments != NULL && attachmentIndex < attachments->count; attachmentIndex++) {
+                    const RpgAttachment *existing = &attachments->entries[attachmentIndex];
+                    RpgGridCell occupiedCell;
+                    if (attachmentIndex == ignoredAttachmentIndex ||
+                        !RpgBlockInventory_IsCellAttachment(existing->type)) continue;
+                    occupiedCell = RpgGridPath_GetSideNeighbor(existing->cell, existing->side);
+                    if (occupiedCell.row == outerCell.row && occupiedCell.column == outerCell.column)
+                        occupied = true;
+                }
+                if (occupied) continue;
+            }
             float distance = Vector2Distance(position, RpgAttachments_GetPosition(&candidate, 0));
             if (distance > nearestDistance) continue;
             nearestDistance = distance;
@@ -305,6 +366,12 @@ void RpgAttachments_RemoveBroken(RpgAttachments *attachments, const RpgStage *st
 
 static void RpgAttachments_DrawIcon(int type, Vector2 position, RpgGridSide side, float alpha)
 {
+    if (type == RPG_BLOCK_ATTACHMENT_SAVE_FLAG) {
+        DrawLineEx((Vector2){ position.x, position.y + 18.0f }, (Vector2){ position.x, position.y - 18.0f },
+                   3.0f, Fade(DARKBROWN, alpha));
+        DrawCircleV((Vector2){ position.x, position.y - 19.0f }, 3.0f, Fade(GOLD, alpha));
+        return;
+    }
     if (type == RPG_BLOCK_ATTACHMENT_DATA_BUTTON) {
         bool vertical = side == RPG_GRID_SIDE_TOP || side == RPG_GRID_SIDE_BOTTOM;
         Rectangle base = vertical ? (Rectangle){ position.x - 17.0f, position.y - 5.0f, 34.0f, 10.0f } :
@@ -334,10 +401,23 @@ static void RpgAttachments_DrawIcon(int type, Vector2 position, RpgGridSide side
     DrawCircleV(coil, 9.0f, Fade(DARKBLUE, alpha));
     DrawCircleLines((int)coil.x, (int)coil.y, 9.0f, Fade(SKYBLUE, alpha));
     DrawCircleLines((int)coil.x, (int)coil.y, 5.0f, Fade(RAYWHITE, alpha));
-    DrawLineEx(coil, sphere, 2.0f, Fade(SKYBLUE, alpha));
+    DrawLineEx(coil, sphere, 3.0f, Fade(SKYBLUE, alpha));
     DrawCircleV(sphere, 8.0f, Fade((Color){ 98, 221, 255, 255 }, alpha));
     DrawCircleLines((int)sphere.x, (int)sphere.y, 8.0f, Fade(RAYWHITE, alpha));
     DrawCircleLines((int)sphere.x, (int)sphere.y, 12.0f, Fade(SKYBLUE, alpha * 0.65f));
+}
+
+static void RpgAttachments_DrawSaveFlag(const RpgAttachment *attachment, Vector2 position, float alpha)
+{
+    RpgAttachments_DrawIcon(attachment->type, position, attachment->side, alpha);
+    if (attachment->type == RPG_BLOCK_ATTACHMENT_SAVE_FLAG && attachment->flagRaised) {
+        DrawTriangle((Vector2){ position.x + 2.0f, position.y - 17.0f },
+                     (Vector2){ position.x + 23.0f, position.y - 10.0f },
+                     (Vector2){ position.x + 2.0f, position.y - 3.0f }, Fade(RED, alpha));
+        DrawTriangleLines((Vector2){ position.x + 2.0f, position.y - 17.0f },
+                          (Vector2){ position.x + 23.0f, position.y - 10.0f },
+                          (Vector2){ position.x + 2.0f, position.y - 3.0f }, Fade(RAYWHITE, alpha));
+    }
 }
 
 static void RpgAttachments_DrawWithOffset(const RpgAttachments *attachments, int firstColumn,
@@ -350,7 +430,7 @@ static void RpgAttachments_DrawWithOffset(const RpgAttachments *attachments, int
         RpgGridCell outerCell = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
         if (outerCell.column < firstColumn || outerCell.column >= lastColumn) continue;
         Vector2 position = RpgAttachments_GetPosition(attachment, firstColumn);
-        RpgAttachments_DrawIcon(attachment->type, position, attachment->side, 0.94f);
+        RpgAttachments_DrawSaveFlag(attachment, position, 0.94f);
     }
 }
 

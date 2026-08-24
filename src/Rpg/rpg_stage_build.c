@@ -5,9 +5,11 @@
 #include "rpg_block_inventory.h"
 #include "rpg_build_cell_storage.h"
 #include "rpg_object_folder.h"
+#include "rpg_stage_storage.h"
 
 // 依存関係: 通常マスがメタデータ方式かどうかは保存方式モジュールから取得する。
 
+#include <stdio.h>
 #include <string.h>
 #include <wchar.h>
 
@@ -27,6 +29,9 @@ typedef struct RpgStageBuildWatcher {
     int originalBlocks[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS];
     bool compactCells[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS];
     bool missingCells[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS];
+    /* ReadDirectoryChangesWで受けたFolder→Zipper要求。描画とは分離して一度だけ消費する。 */
+    bool hasReferenceFolderZipperRequest;
+    RpgGridCell referenceFolderZipperCell;
     bool isWatching;
 } RpgStageBuildWatcher;
 
@@ -135,6 +140,38 @@ static void ApplyCellChange(RpgStage *stage, DWORD action, const wchar_t *relati
     }
 }
 
+/* build直下のFolder名とステージ上のFolderパスを照合し、CMD要求の発行元マスを記録する。 */
+static void QueueReferenceFolderZipperRequest(const RpgStage *stage, DWORD action,
+                                              const wchar_t *relativePath)
+{
+    char relativeUtf8[1024];
+    char *separator;
+    const char *folderLeaf;
+    if (stage == NULL || relativePath == NULL || action == FILE_ACTION_REMOVED ||
+        WideCharToMultiByte(CP_UTF8, 0, relativePath, -1, relativeUtf8,
+                            (int)sizeof(relativeUtf8), NULL, NULL) <= 0) return;
+    separator = strrchr(relativeUtf8, '\\');
+    if (separator == NULL || _stricmp(separator + 1, "zipper.request") != 0) return;
+    *separator = '\0';
+    /* 監視通知は folders\\名前\\... の相対パスなので、配置済み Folder の葉名だけと比較する。 */
+    folderLeaf = strrchr(relativeUtf8, '\\');
+    folderLeaf = folderLeaf == NULL ? relativeUtf8 : folderLeaf + 1;
+    for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0;
+         column < RPG_STAGE_WORLD_COLUMNS; column++) {
+        const char *folderPath;
+        const char *folderName;
+        if (!RpgBlockInventory_IsReferenceFolder(stage->blocks[row][column])) continue;
+        folderPath = RpgStage_GetReferencePathAtCell(stage, row, column);
+        folderName = strrchr(folderPath, '\\');
+        if (folderName == NULL) folderName = strrchr(folderPath, '/');
+        folderName = folderName == NULL ? folderPath : folderName + 1;
+        if (_stricmp(folderName, folderLeaf) != 0) continue;
+        watcher.referenceFolderZipperCell = (RpgGridCell){ row, column };
+        watcher.hasReferenceFolderZipperRequest = true;
+        return;
+    }
+}
+
 static void ProcessChanges(RpgStage *stage, DWORD byteCount)
 {
     FILE_NOTIFY_INFORMATION *entry = (FILE_NOTIFY_INFORMATION *)(void *)watcher.buffer;
@@ -149,6 +186,7 @@ static void ProcessChanges(RpgStage *stage, DWORD byteCount)
         int row, column;
         if (ParseCellPath(relativePath, &row, &column))
             RpgObjectFolders_RefreshBuildCellLinkedFiles((RpgGridCell){ row, column });
+        QueueReferenceFolderZipperRequest(stage, entry->Action, relativePath);
         ApplyCellChange(stage, entry->Action, relativePath);
         if (entry->NextEntryOffset == 0) break;
         offset += entry->NextEntryOffset;
@@ -163,13 +201,19 @@ static bool CreateStageBuild(int stageNumber, RpgStage *stage, const RpgAttachme
 #ifdef _WIN32
     char buildPath[1200];
     RpgStageBuild_Close();
+    /* 参照Fileの復元失敗は、そのFileだけの問題として扱い、Play全体は止めない。 */
+    (void)RpgStageStorage_RepairReferenceFileCopies(stageNumber, stage);
     if (!RpgObjectFolders_BeginStageBuild(stageNumber, stage, attachments, playerStartPosition,
                                           isSimpleBuild, buildPath, sizeof(buildPath))) return false;
     memcpy(watcher.originalBlocks, stage->blocks, sizeof(watcher.originalBlocks));
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++)
         watcher.compactCells[row][column] = RpgBuildCellStorage_UsesMetadataForBlock(stage->blocks[row][column]);
     memset(watcher.missingCells, 0, sizeof(watcher.missingCells));
-    return StartWatcher(buildPath);
+    /* 変更監視は外部編集の反映用。開始に失敗しても、生成済みステージのプレイは継続できる。 */
+    (void)StartWatcher(buildPath);
+    /* 本編は static を展開後に削除し、実行時は build/Stage/StageN/game だけを使う。 */
+    if (!isSimpleBuild) RpgStageStorage_ClearPackagedStaticStage(stageNumber);
+    return true;
 #else
     (void)stageNumber; (void)stage; (void)attachments; (void)playerStartPosition; (void)isSimpleBuild;
     return false;
@@ -199,6 +243,36 @@ void RpgStageBuild_Update(RpgStage *stage)
     QueueDirectoryRead();
 #else
     (void)stage;
+#endif
+}
+
+bool RpgStageBuild_ConsumeReferenceFolderZipperRequest(const RpgStage *stage, int playerMapIndex,
+                                                        RpgGridCell *folderCell)
+{
+#ifdef _WIN32
+    RpgGridCell requestedCell;
+    char requestPath[1200];
+    wchar_t wideRequestPath[1200];
+    bool isPlayerArea;
+    if (!watcher.hasReferenceFolderZipperRequest || stage == NULL) return false;
+    requestedCell = watcher.referenceFolderZipperCell;
+    watcher.hasReferenceFolderZipperRequest = false;
+    if (requestedCell.row < 0 || requestedCell.row >= RPG_STAGE_ROWS || requestedCell.column < 0 ||
+        requestedCell.column >= RPG_STAGE_WORLD_COLUMNS ||
+        !RpgBlockInventory_IsReferenceFolder(stage->blocks[requestedCell.row][requestedCell.column])) return false;
+    /* 実行済み要求は必ず消し、プレイヤーのいるエリア以外では副作用を起こさない。 */
+    if (snprintf(requestPath, sizeof(requestPath), "%s\\zipper.request",
+                 RpgStage_GetReferencePathAtCell(stage, requestedCell.row, requestedCell.column)) > 0 &&
+        ToWide(requestPath, wideRequestPath, (int)(sizeof(wideRequestPath) / sizeof(wideRequestPath[0]))))
+        (void)DeleteFileW(wideRequestPath);
+    isPlayerArea = playerMapIndex >= 0 && playerMapIndex < RPG_STAGE_MAP_COUNT &&
+                   requestedCell.column / RPG_STAGE_COLUMNS == playerMapIndex;
+    if (!isPlayerArea) return false;
+    if (folderCell != NULL) *folderCell = requestedCell;
+    return true;
+#else
+    (void)stage; (void)playerMapIndex; (void)folderCell;
+    return false;
 #endif
 }
 

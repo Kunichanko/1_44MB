@@ -47,6 +47,7 @@ set_target_properties(side_scroller_editor PROPERTIES
 
 add_executable(rpg_version WIN32
     src/Rpg/main.c
+    src/Rpg/rpg_viewport.c
     src/Rpg/rpg_attachment.c
     src/Rpg/rpg_button_event.c
     src/Rpg/rpg_block_inventory.c
@@ -57,6 +58,8 @@ add_executable(rpg_version WIN32
     src/Rpg/rpg_character.c
     src/Rpg/rpg_data_shot.c
     src/Rpg/rpg_explorer_launcher.c
+    src/Rpg/rpg_explorer_filesystem.c
+    src/Rpg/rpg_explorer_shell.c
     src/Rpg/rpg_dialogue.c
     src/Rpg/rpg_grid_path.c
     src/Rpg/rpg_layout.c
@@ -69,7 +72,10 @@ add_executable(rpg_version WIN32
     src/Rpg/rpg_receiver.c
     src/Rpg/rpg_signal_block.c
     src/Rpg/rpg_stage3_event.c
+    src/Rpg/rpg_file_io.c
+    src/Rpg/rpg_image_object.c
     src/Rpg/rpg_stage.c
+    src/Rpg/rpg_stage_background.c
     src/Rpg/rpg_stage_build.c
     src/Rpg/rpg_stage_storage.c
     src/Rpg/rpg_runtime_update.c
@@ -91,6 +97,7 @@ set_target_properties(rpg_version PROPERTIES
 
 add_executable(rpg_editor WIN32
     src/Rpg/editor_main.c
+    src/Rpg/rpg_viewport.c
     src/Rpg/rpg_editor_drag.c
     src/Rpg/rpg_editor_play.c
     src/Rpg/rpg_runtime.c
@@ -106,6 +113,8 @@ add_executable(rpg_editor WIN32
     src/Rpg/rpg_character.c
     src/Rpg/rpg_data_shot.c
     src/Rpg/rpg_explorer_launcher.c
+    src/Rpg/rpg_explorer_filesystem.c
+    src/Rpg/rpg_explorer_shell.c
     src/Rpg/rpg_dialogue.c
     src/Rpg/rpg_editor_text.c
     src/Rpg/rpg_grid_path.c
@@ -119,7 +128,11 @@ add_executable(rpg_editor WIN32
     src/Rpg/rpg_receiver.c
     src/Rpg/rpg_signal_block.c
     src/Rpg/rpg_stage3_event.c
+    src/Rpg/rpg_file_io.c
+    src/Rpg/rpg_image_object.c
     src/Rpg/rpg_stage.c
+    src/Rpg/rpg_stage_background.c
+    src/Rpg/rpg_stage_build.c
     src/Rpg/rpg_stage_storage.c
     src/Rpg/rpg_wire.c
     src/Rpg/rpg_zipper.c

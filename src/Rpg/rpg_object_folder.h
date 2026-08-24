@@ -11,7 +11,12 @@
 typedef struct RpgObjectFolder { RpgGridCell cell; } RpgObjectFolder;
 
 bool RpgObjectFolder_CopyFileToZipperInbox(const char *sourcePath);
+/* 追従Fileをゲーム内Folderへ格納する。ファイル操作は描画処理から独立させる。 */
+/* ステージFileの永続コピーを残したまま、Folderへ同名ファイルを格納する。 */
+bool RpgObjectFolder_StoreFileInDirectory(const char *sourcePath, const char *destinationDirectory);
 bool RpgObjectFolder_OpenZipperDirectory(void);
+/* Folder を移動せずに Zipper 構造へ更新し、以後の Inbox と Explorer のルートに採用する。 */
+bool RpgObjectFolder_ActivateReferenceFolderAsZipper(RpgStage *stage, RpgGridCell cell);
 void RpgObjectFolder_PrepareZipperAnimationCommand(void);
 // cmd の実行要求を一度だけ受け取る。アニメーション・ゲーム機能の内容は呼び出し側で独立して処理する。
 bool RpgObjectFolder_BeginZipperCommandRequest(void);
@@ -32,6 +37,9 @@ bool RpgObjectFolder_RestoreDataShotFromMetadata(RpgDataShot *shot);
 
 // フォルダ寿命はオブジェクト寿命と一致する。メタデータだけの通常ブロックには生成しない。
 void RpgObjectFolders_PrepareAttachmentFolders(const RpgAttachments *attachments);
+void RpgObjectFolders_PrepareReferenceFolderMetadata(const RpgStage *stage);
+/* PNG配置物はマスを占有せず、データ弾と同じ build/objects 配下の所有フォルダを使う。 */
+void RpgObjectFolders_PrepareImageObjectFolders(const RpgImageObjects *objects);
 void RpgObjectFolders_UpdateDataShotLifetimes(RpgDataShots *shots, const RpgAttachments *attachments,
                                               RpgReferenceObjects *referenceObjects);
 bool RpgObjectFolder_AttachmentHasLinkedFiles(const RpgAttachment *attachment);
@@ -42,7 +50,7 @@ bool RpgObjectFolder_MoveAttachmentFolder(const RpgAttachment *from, const RpgAt
 void RpgObjectFolder_RemoveAttachmentFolder(const RpgAttachment *attachment);
 
 /* 指定ステージの build を生成し、その中をオブジェクトフォルダの保存先として選択する。 */
-bool RpgObjectFolders_BeginStageBuild(int stageNumber, const RpgStage *stage,
+bool RpgObjectFolders_BeginStageBuild(int stageNumber, RpgStage *stage,
                                       const RpgAttachments *attachments, Vector2 playerStartPosition,
                                       bool isSimpleBuild,
                                       char *buildPath, size_t buildPathSize);

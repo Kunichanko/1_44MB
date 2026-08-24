@@ -1,6 +1,8 @@
 // 依存する自プロジェクト内ファイル: rpg_runtime.h, game_font.h, rpg_block_inventory.h, rpg_object_folder.h, rpg_runtime_update.h, rpg_explorer_shell.h
 // 役割: 本編とエディター内プレイで共通のRPGフレーム更新と描画を実装する。
+// 依存関係を更新: rpg_viewport.h を追加した。
 #include "rpg_runtime.h"
+#include "rpg_viewport.h"
 #include "raymath.h"
 #include <stddef.h>
 #include <math.h>
@@ -15,17 +17,159 @@
 #include "game_font.h"
 #include "rpg_block_inventory.h"
 #include "rpg_object_folder.h"
+#include "rpg_stage_build.h"
+#include "rpg_explorer_launcher.h"
 #include "rpg_explorer_shell.h"
 #include "rpg_runtime_update.h"
 #include "rpg_scene.h"
-enum { RPG_SCREEN_WIDTH = 960, RPG_SCREEN_HEIGHT = 540 };
+enum { RPG_SCREEN_WIDTH = 960, RPG_SCREEN_HEIGHT = 540, RPG_PLAY_AREA_HEIGHT = 480 };
 static const float zipperImportAnimationDuration = 0.60f;
 static Texture2D folderReturnIcon = { 0 };
 static bool hasLoadedFolderReturnIcon = false;
 
+/* 依存先: rpg_stage の追従File、rpg_object_folder の実ファイル移動。
+   役割: 追従FileをFolderへ渡す間だけ表示位置を管理し、描画とファイル操作を分離する。 */
+typedef struct RpgReferenceFolderTransfer {
+    RpgStage *stage;
+    RpgReferenceObjects *objects;
+    RpgReferenceTarget folderTarget;
+    int followerIndex;
+    char sourcePath[RPG_STAGE_REFERENCE_PATH_LENGTH];
+    char destinationDirectory[RPG_STAGE_REFERENCE_PATH_LENGTH];
+    Vector2 startPosition;
+    Vector2 destinationPosition;
+    float drawScale;
+    float elapsed;
+    bool active;
+} RpgReferenceFolderTransfer;
+
+static RpgReferenceFolderTransfer referenceFolderTransfer = {
+    .folderTarget = { .kind = RPG_REFERENCE_TARGET_NONE, .row = -1, .column = -1, .dropIndex = -1 },
+    .followerIndex = -1
+};
+static const float referenceFolderTransferDuration = 0.42f;
+
+void RpgRuntime_ResetTransientState(void)
+{
+    referenceFolderTransfer = (RpgReferenceFolderTransfer){
+        .folderTarget = { .kind = RPG_REFERENCE_TARGET_NONE, .row = -1, .column = -1, .dropIndex = -1 },
+        .followerIndex = -1
+    };
+}
+
 static const char *npcTalkPrompt = u8"[E] \u8a71\u3057\u304b\u3051\u308b";
 static const char *zipperInspectPrompt = u8"[I] \u8abf\u3079\u308b";
 static const Rectangle referenceTextCloseButton = { 648.0f, 262.0f, 144.0f, 26.0f };
+
+static bool IsReferenceFolderTarget(const RpgStage *stage, RpgReferenceTarget target)
+{
+    return stage != NULL && target.kind == RPG_REFERENCE_TARGET_CELL && target.row >= 0 &&
+           target.row < RPG_STAGE_ROWS && target.column >= 0 && target.column < RPG_STAGE_WORLD_COLUMNS &&
+           RpgBlockInventory_IsReferenceFolder(stage->blocks[target.row][target.column]);
+}
+
+/* 弧を描く二次ベジェ補間で、FileがFolderへ収まる動きを作る。 */
+static Vector2 GetReferenceFolderTransferPosition(void)
+{
+    float progress;
+    Vector2 control;
+    float inverse;
+    if (!referenceFolderTransfer.active) return (Vector2){ 0.0f, 0.0f };
+    progress = Clamp(referenceFolderTransfer.elapsed / referenceFolderTransferDuration, 0.0f, 1.0f);
+    control = (Vector2){ (referenceFolderTransfer.startPosition.x + referenceFolderTransfer.destinationPosition.x) * 0.5f,
+                         fminf(referenceFolderTransfer.startPosition.y,
+                               referenceFolderTransfer.destinationPosition.y) - RPG_STAGE_TILE_SIZE * 1.5f };
+    inverse = 1.0f - progress;
+    return Vector2Add(Vector2Add(Vector2Scale(referenceFolderTransfer.startPosition, inverse * inverse),
+                                 Vector2Scale(control, 2.0f * inverse * progress)),
+                      Vector2Scale(referenceFolderTransfer.destinationPosition, progress * progress));
+}
+
+static bool StartReferenceFolderTransfer(RpgRuntimeContext *context, RpgReferenceTarget folderTarget)
+{
+    int followerIndex;
+    RpgReferenceObject *follower;
+    const char *destinationDirectory;
+    if (context == NULL || referenceFolderTransfer.active || !IsReferenceFolderTarget(context->stage, folderTarget))
+        return false;
+    followerIndex = RpgReferenceObjects_FindFollowerIndex(context->referenceDrops);
+    if (followerIndex < 0 || folderTarget.row < 0 || folderTarget.column < 0) return false;
+    follower = &context->referenceDrops->entries[followerIndex];
+    destinationDirectory = RpgReferenceObjects_GetTargetPath(context->stage, context->referenceDrops, folderTarget);
+    if (follower->path[0] == '\0' || destinationDirectory[0] == '\0') return false;
+    referenceFolderTransfer = (RpgReferenceFolderTransfer){
+        .stage = context->stage,
+        .objects = context->referenceDrops,
+        .folderTarget = folderTarget,
+        .followerIndex = followerIndex,
+        .sourcePath = { 0 },
+        .destinationDirectory = { 0 },
+        .startPosition = follower->position,
+        .destinationPosition = { (folderTarget.column + 0.5f) * RPG_STAGE_TILE_SIZE,
+                                 (folderTarget.row + 0.5f) * RPG_STAGE_TILE_SIZE },
+        .drawScale = follower->drawScale > 0.0f ? follower->drawScale : 1.0f,
+        .elapsed = 0.0f,
+        .active = true
+    };
+    /* 演出中にフォルダや配列の状態が変わっても、開始時に選んだ入出力先だけを使う。 */
+    snprintf(referenceFolderTransfer.sourcePath, sizeof(referenceFolderTransfer.sourcePath), "%s", follower->path);
+    snprintf(referenceFolderTransfer.destinationDirectory, sizeof(referenceFolderTransfer.destinationDirectory), "%s",
+             destinationDirectory);
+    /* アニメーション表示をこのモジュールへ一本化し、通常の追従更新から切り離す。 */
+    follower->followsPlayer = false;
+    return true;
+}
+
+static int FindReferenceDropByPath(const RpgReferenceObjects *objects, const char *path)
+{
+    if (objects == NULL || path == NULL || path[0] == '\0') return -1;
+    for (int index = 0; index < objects->count; index++)
+        if (strcmp(objects->entries[index].path, path) == 0) return index;
+    return -1;
+}
+
+static void UpdateReferenceFolderTransfer(RpgRuntimeContext *context, float deltaTime)
+{
+    RpgReferenceFolderTransfer *transfer = &referenceFolderTransfer;
+    RpgReferenceTarget fileTarget;
+    int followerIndex;
+    if (!transfer->active) return;
+    if (context == NULL || context->stage != transfer->stage || context->referenceDrops != transfer->objects) {
+        transfer->active = false;
+        transfer->followerIndex = -1;
+        return;
+    }
+    transfer->elapsed += deltaTime;
+    if (transfer->elapsed < referenceFolderTransferDuration) return;
+    followerIndex = FindReferenceDropByPath(transfer->objects, transfer->sourcePath);
+    if (followerIndex < 0) {
+        transfer->active = false;
+        transfer->followerIndex = -1;
+        return;
+    }
+    fileTarget = (RpgReferenceTarget){ .kind = RPG_REFERENCE_TARGET_DROP, .row = -1, .column = -1,
+                                       .dropIndex = followerIndex };
+    if (RpgObjectFolder_StoreFileInDirectory(transfer->sourcePath, transfer->destinationDirectory)) {
+        RpgReferenceObjects_RemoveTarget(transfer->stage, transfer->objects, fileTarget);
+        snprintf(context->itemMessage, (size_t)context->itemMessageSize, "File stored in folder");
+        GameFont_AddText(context->itemMessage);
+        *context->itemMessageTimer = 2.0f;
+    } else {
+        /* 実ファイル操作が失敗してもFileを失わない。追従へ復帰させて再試行可能にする。 */
+        transfer->objects->entries[followerIndex].followsPlayer = true;
+        snprintf(context->itemMessage, (size_t)context->itemMessageSize, "Could not store File");
+        GameFont_AddText(context->itemMessage);
+        *context->itemMessageTimer = 2.0f;
+    }
+    transfer->active = false;
+    transfer->followerIndex = -1;
+}
+
+static int GetReferenceFolderTransferExcludedIndex(const RpgReferenceObjects *objects)
+{
+    if (!referenceFolderTransfer.active || referenceFolderTransfer.objects != objects) return -1;
+    return referenceFolderTransfer.followerIndex;
+}
 
 static bool LoadReferenceText(const char *filePath, char *text, size_t textSize)
 {
@@ -54,10 +198,30 @@ static const char *GetReferenceFileName(const char *filePath)
     return fileName[0] != '\0' ? fileName : "FILE.txt";
 }
 
+/* ゲーム内表示は安全に読めるテキスト形式だけに限定し、画像・実行ファイルなどのバイト列は描画しない。 */
+static bool IsTextReferenceFile(const char *filePath)
+{
+    const char *extension = strrchr(GetReferenceFileName(filePath), '.');
+    static const char *textExtensions[] = { ".txt", ".md", ".csv", ".json", ".log", ".cfg", ".ini" };
+    if (extension == NULL) return false;
+    for (int index = 0; index < (int)(sizeof(textExtensions) / sizeof(textExtensions[0])); index++) {
+        const char *left = extension;
+        const char *right = textExtensions[index];
+        while (*left != '\0' && *right != '\0') {
+            char character = *left;
+            if (character >= 'A' && character <= 'Z') character = (char)(character - 'A' + 'a');
+            if (character != *right) break;
+            left++; right++;
+        }
+        if (*left == '\0' && *right == '\0') return true;
+    }
+    return false;
+}
+
 static void RegisterReferenceFileNames(const RpgStage *stage)
 {
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
-        if (stage->blocks[row][column] == RPG_BLOCK_REFERENCE_FILE)
+        if (RpgBlockInventory_IsReferenceObject(stage->blocks[row][column]))
             GameFont_AddText(GetReferenceFileName(RpgStage_GetReferencePathAtCell(stage, row, column)));
     }
 }
@@ -66,7 +230,9 @@ static void OpenTextFile(const char *path, char *fileName, size_t fileNameSize,
                          char *text, size_t textSize, bool *isOpen)
 {
     snprintf(fileName, fileNameSize, "%s", GetReferenceFileName(path));
-    if (path[0] != '\0' && LoadReferenceText(path, text, textSize)) {
+    if (!IsTextReferenceFile(path)) {
+        snprintf(text, textSize, "This file type cannot be displayed in the game.");
+    } else if (path[0] != '\0' && LoadReferenceText(path, text, textSize)) {
         GameFont_AddText(text);
     } else {
         snprintf(text, textSize, "Text file is not assigned or cannot be read.");
@@ -82,8 +248,10 @@ static Rectangle GetReferenceTargetBounds(const RpgReferenceObjects *objects, Rp
         return (Rectangle){ target.column * RPG_STAGE_TILE_SIZE, target.row * RPG_STAGE_TILE_SIZE,
                             RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE };
     if (target.kind == RPG_REFERENCE_TARGET_DROP && target.dropIndex >= 0 && target.dropIndex < objects->count) {
-        Vector2 position = objects->entries[target.dropIndex].position;
-        return (Rectangle){ position.x - 24.0f, position.y - 24.0f, 48.0f, 48.0f };
+        const RpgReferenceObject *object = &objects->entries[target.dropIndex];
+        float size = 48.0f * (object->drawScale > 0.0f ? object->drawScale : 1.0f);
+        return (Rectangle){ object->position.x - size * 0.5f, object->position.y - size * 0.5f,
+                            size, size };
     }
     return (Rectangle){ 0 };
 }
@@ -142,6 +310,8 @@ static void StartZipperFolderReturnVisual(RpgRuntimeContext *context)
 {
     RpgZipper *zipper = context->zipper;
     zipper->isFolderReturnAnimating = true;
+    zipper->folderReturnDelayElapsed = context->layout != NULL ?
+        Clamp((*context->layout).zipperFolderReturnAnimationDelay, 0.0f, 5.0f) : 0.0f;
     zipper->folderReturnElapsed = 0.0f;
     zipper->folderReturnDuration = context->layout != NULL ?
         Clamp((*context->layout).zipperFolderReturnDuration, 0.10f, 5.0f) : 0.45f;
@@ -327,6 +497,41 @@ void RpgRuntime_ProcessZipperCommand(RpgRuntimeContext *context)
     StartZipperCommand(context);
 }
 
+/* Folder内のCMD要求はbuild監視から一度だけ届く。同じエリアのFolderだけをZipper化し、
+   既存の追従・射出処理へ状態を渡すことで、専用の追従処理を増やさない。 */
+void RpgRuntime_ProcessReferenceFolderZipperCommand(RpgRuntimeContext *context)
+{
+    RpgGridCell folderCell;
+    int playerMapIndex;
+    if (context == NULL || context->stage == NULL || context->player == NULL || context->zipper == NULL ||
+        context->zipperFollowsPlayer == NULL || context->isZipperLaunched == NULL ||
+        context->isZipperControllable == NULL || context->attachedDataShotIndex == NULL ||
+        context->attachedAttachmentIndex == NULL || context->isZipperAttachedToBlock == NULL ||
+        context->zipperAttachedBlockCell == NULL) return;
+    playerMapIndex = (int)(context->player->position.x / (RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE));
+    if (!RpgStageBuild_ConsumeReferenceFolderZipperRequest(context->stage, playerMapIndex, &folderCell) ||
+        !RpgObjectFolder_ActivateReferenceFolderAsZipper(context->stage, folderCell)) return;
+    context->zipper->character.position = (Vector2){ (folderCell.column + 0.5f) * RPG_STAGE_TILE_SIZE,
+                                                      (folderCell.row + 1.0f) * RPG_STAGE_TILE_SIZE };
+    context->zipper->character.verticalSpeed = 0.0f;
+    context->zipper->character.isGrounded = true;
+    *context->zipperFollowsPlayer = true;
+    *context->isZipperLaunched = false;
+    *context->isZipperControllable = true;
+    *context->attachedDataShotIndex = -1;
+    *context->attachedAttachmentIndex = -1;
+    *context->isZipperAttachedToBlock = false;
+    *context->zipperAttachedBlockCell = (RpgGridCell){ -1, -1 };
+    /* マップ上の Folder 表示だけを Zipper 表示へ切り替える。実体は同じ Folder を Zipper 構造へ更新して保持する。 */
+    context->stage->blocks[folderCell.row][folderCell.column] = 0;
+    context->stage->referencePaths[folderCell.row][folderCell.column][0] = '\0';
+    if (context->itemMessage != NULL && context->itemMessageSize > 0) {
+        snprintf(context->itemMessage, (size_t)context->itemMessageSize, "Folder became Zipper");
+        GameFont_AddText(context->itemMessage);
+    }
+    if (context->itemMessageTimer != NULL) *context->itemMessageTimer = 2.0f;
+}
+
 void RpgRuntime_UpdateZipperFolderReturn(RpgRuntimeContext *context, float deltaTime)
 {
     RpgZipper *zipper;
@@ -339,6 +544,11 @@ void RpgRuntime_UpdateZipperFolderReturn(RpgRuntimeContext *context, float delta
         RunZipperCommandFunction(context);
     }
     if (!zipper->isFolderReturnAnimating) return;
+    if (zipper->folderReturnDelayElapsed > 0.0f) {
+        zipper->folderReturnDelayElapsed -= deltaTime;
+        if (zipper->folderReturnDelayElapsed > 0.0f) return;
+        zipper->folderReturnDelayElapsed = 0.0f;
+    }
     zipper->folderReturnElapsed += deltaTime;
     if (zipper->folderReturnElapsed >= zipper->folderReturnDuration) {
         zipper->isFolderReturnAnimating = false;
@@ -354,7 +564,7 @@ void RpgRuntime_DrawZipperFolderReturn(const RpgZipper *zipper)
     float progress, eased, size;
     Vector2 position;
     Rectangle destination;
-    if (zipper == NULL || !zipper->isFolderReturnAnimating) return;
+    if (zipper == NULL || !zipper->isFolderReturnAnimating || zipper->folderReturnDelayElapsed > 0.0f) return;
     progress = Clamp(zipper->folderReturnElapsed / Clamp(zipper->folderReturnDuration, 0.10f, 5.0f), 0.0f, 1.0f);
     eased = progress * progress * (3.0f - 2.0f * progress);
     position = Vector2Lerp(zipper->folderReturnStart, zipper->folderReturnDestination, eased);
@@ -376,7 +586,7 @@ static void DrawZipper(Texture2D zipperTexture, const RpgCharacter *zipper, floa
     int frameIndex = animationElapsed >= 0.0f && frameCount > 1 ?
         (int)Clamp(animationElapsed / zipperImportAnimationDuration * frameCount, 0.0f, (float)(frameCount - 1)) : 0;
     Rectangle source = { frameIndex * 32.0f, 0.0f, 32.0f, 40.0f };
-    Rectangle destination = RpgZipper_GetSpriteBounds(zipper, 380.0f);
+    Rectangle destination = RpgZipper_GetPixelAlignedSpriteBounds(zipper, 380.0f);
     DrawRectangleRounded((Rectangle){ destination.x - 3.0f, destination.y - 3.0f,
                                       destination.width + 6.0f, destination.height + 6.0f },
                          0.18f, 4, Fade(DARKBLUE, 0.28f));
@@ -397,30 +607,40 @@ static void DrawMoveSprite(Texture2D zipperTexture, const RpgCharacter *player, 
     } else {
         RpgCharacter sprite = target == RPG_INSPECT_MOVE_PLAYER ? *player : *npc;
         sprite.position = (Vector2){ x, 400.0f };
-        RpgCharacter_Draw(&sprite, "");
+        if (target == RPG_INSPECT_MOVE_PLAYER) RpgCharacter_DrawPlayer(&sprite, RPG_CHARACTER_ANIMATION_IDLE);
+        else RpgCharacter_Draw(&sprite, "");
     }
+}
+
+static float GetStageViewportZoom(void)
+{
+    return (float)RPG_SCREEN_WIDTH / (float)(RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE);
 }
 
 static void UpdateRpgCamera(Camera2D *camera, float playerX, bool followsPlayer)
 {
+    // 本編・エディター内プレイで同一の16x8マス表示倍率を使う。
+    camera->zoom = GetStageViewportZoom();
+    camera->offset = (Vector2){ RPG_SCREEN_WIDTH / 2.0f, RPG_PLAY_AREA_HEIGHT / 2.0f };
+    float halfViewWidth = RPG_SCREEN_WIDTH / (2.0f * camera->zoom);
     if (followsPlayer) {
         camera->target.x = playerX;
-        if (camera->target.x < RPG_SCREEN_WIDTH / 2.0f) camera->target.x = RPG_SCREEN_WIDTH / 2.0f;
-        if (camera->target.x > RPG_STAGE_WORLD_WIDTH - RPG_SCREEN_WIDTH / 2.0f)
-            camera->target.x = RPG_STAGE_WORLD_WIDTH - RPG_SCREEN_WIDTH / 2.0f;
+        if (camera->target.x < halfViewWidth) camera->target.x = halfViewWidth;
+        if (camera->target.x > RPG_STAGE_WORLD_WIDTH - halfViewWidth)
+            camera->target.x = RPG_STAGE_WORLD_WIDTH - halfViewWidth;
     } else {
         int mapIndex = (int)(playerX / (RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE));
         if (mapIndex >= RPG_STAGE_MAP_COUNT) mapIndex = RPG_STAGE_MAP_COUNT - 1;
         camera->target.x = mapIndex * RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE +
                            RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE / 2.0f;
     }
-    camera->target.y = RPG_SCREEN_HEIGHT / 2.0f;
+    camera->target.y = RPG_STAGE_WORLD_HEIGHT / 2.0f;
 }
 
 static void UpdateZipperFollow(RpgZipper *zipper, const RpgCharacter *player, float deltaTime)
 {
     // 帰還時は主人公の少し後ろ・同じ足元へ、X/Yをまとめて滑らかに追従させる。
-    Vector2 target = { player->position.x - 48.0f * player->scale, player->position.y };
+    Vector2 target = { player->position.x - RPG_STAGE_TILE_SIZE * player->scale, player->position.y };
     Vector2 distance = Vector2Subtract(target, zipper->character.position);
     float maximumStep = zipper->followSpeed * deltaTime;
     float distanceLength = Vector2Length(distance);
@@ -473,7 +693,7 @@ static Rectangle GetZipperForwardCollisionBounds(Rectangle bounds, Vector2 veloc
 static bool DoesZipperHitReferenceFile(const RpgStage *stage, Rectangle bounds, Vector2 *center)
 {
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
-        if (stage->blocks[row][column] != RPG_BLOCK_REFERENCE_FILE) continue;
+        if (!RpgBlockInventory_IsReferenceObject(stage->blocks[row][column])) continue;
         Rectangle cell = { column * RPG_STAGE_TILE_SIZE, row * RPG_STAGE_TILE_SIZE,
                            RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE };
         if (CheckCollisionRecs(bounds, cell)) {
@@ -564,7 +784,7 @@ static void UpdateLaunchedZipper(RpgZipper *zipper, Vector2 *velocity, const Rpg
         bool hitWorldEdge = forwardCollisionBounds.x < 0.0f ||
             forwardCollisionBounds.x + forwardCollisionBounds.width > RPG_STAGE_WORLD_WIDTH ||
             forwardCollisionBounds.y < 0.0f ||
-            forwardCollisionBounds.y + forwardCollisionBounds.height > RPG_SCREEN_HEIGHT;
+            forwardCollisionBounds.y + forwardCollisionBounds.height > RPG_STAGE_WORLD_HEIGHT;
         if (hitWorldEdge || RpgStage_FindSolidCollisionCenter(stage, forwardCollisionBounds, &collisionCenter)) {
             if (!hitWorldEdge) {
                 MoveZipperCollisionCenterTo(&candidate, collisionCenter);
@@ -612,6 +832,11 @@ static void UpdateZipperAttachedToDataShot(RpgZipper *zipper, const RpgDataShots
     *attachedDataShotIndex = -1;
 }
 
+Rectangle RpgRuntime_GetStopButtonBounds(void)
+{
+    return (Rectangle){ 740.0f, 506.0f, 92.0f, 26.0f };
+}
+
 static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
                          const RpgStage *stage,
                          Camera2D camera, bool followsPlayer,
@@ -636,17 +861,30 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
                           bool isReferencePointerFeedbackSuppressed,
                           bool isReferenceDragActive, RpgReferenceTarget draggedReferenceTarget,
                           Vector2 referenceDragPosition,
-                          float zipperAnimationElapsed, bool showStopButton, RpgSceneState *scene)
+                          float zipperAnimationElapsed, const RpgStageBackground *stageBackground,
+                          float backgroundBrightness, float blockBrightness,
+                          bool isZipperLaunched, RpgCharacterAnimation playerAnimation,
+                          bool showStopButton, RpgSceneState *scene)
 {
     (void)npcInspectCompleted;
-    BeginDrawing();
-    ClearBackground((Color){ 135, 206, 235, 255 });
-    DrawCircle(780, 95, 42, Fade(YELLOW, 0.9f));
-    DrawEllipse(180, 105, 80, 20, Fade(RAYWHITE, 0.85f));
-    DrawEllipse(510, 160, 110, 24, Fade(RAYWHITE, 0.8f));
+    (void)stage3IntroIndex;
+    RpgViewport_BeginFrame();
+    ClearBackground(BLACK);
     BeginMode2D(camera);
-    DrawRectangle(0, 400, RPG_STAGE_WORLD_WIDTH, 140, (Color){ 103, 161, 70, 255 });
-    RpgStage_Draw(stage, false);
+    // 背景を各エリアのマス座標で描画し、共有ランタイムでもブロックと一致させる。
+    for (int mapIndex = 0; mapIndex < RPG_STAGE_MAP_COUNT; mapIndex++) {
+        if (!RpgStage_IsMapActive(stage, mapIndex)) continue;
+        RpgStageBackground_Draw(stageBackground,
+                                (Rectangle){ (float)(mapIndex * RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE),
+                                             0.0f,
+                                             (float)(RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE),
+                                             (float)(RPG_STAGE_ROWS * RPG_STAGE_TILE_SIZE) },
+                                backgroundBrightness);
+    }
+    /* 最背面PNGは背景の後、ブロックより前に描画する。 */
+    RpgImageObjects_DrawLayer(&stage->imageObjects, 0, RPG_STAGE_WORLD_COLUMNS,
+                              RPG_STAGE_TILE_SIZE, WHITE, RPG_IMAGE_OBJECT_LAYER_BACK);
+    RpgStage_Draw(stage, false, blockBrightness);
     // 通常ブロックへ紐づけたファイルは、そのブロック自体を強調する。
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
         RpgObjectFolder objectFolder = { .cell = { row, column } };
@@ -661,9 +899,9 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
         const RpgAttachment *attachment = &attachments->entries[index];
         if (attachment->isZipperHeld) continue;
         if (!RpgObjectFolder_AttachmentHasLinkedFiles(attachment)) continue;
-        Vector2 position = RpgAttachments_GetPosition(attachment, 0);
-        DrawCircleV(position, 27.0f, Fade(GOLD, 0.30f));
-        DrawCircleLines((int)position.x, (int)position.y, 27.0f, ORANGE);
+        Vector2 position = RpgStage_SnapRenderPoint(RpgAttachments_GetPosition(attachment, 0));
+        DrawCircleV(position, 15.0f, Fade(GOLD, 0.30f));
+        DrawCircleLines((int)position.x, (int)position.y, 15.0f, ORANGE);
     }
     for (int index = 0; index < RPG_DATA_SHOT_MAX_COUNT; index++) {
         const RpgDataShot *shot = &dataShots->entries[index];
@@ -676,27 +914,40 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
                                             draggedReferenceTarget.row : -1,
                                         isReferenceDragActive && draggedReferenceTarget.kind == RPG_REFERENCE_TARGET_CELL ?
                                             draggedReferenceTarget.column : -1);
-    RpgReferenceObjects_DrawExcept(referenceDrops, fileTexture,
-                                   isReferenceDragActive && draggedReferenceTarget.kind == RPG_REFERENCE_TARGET_DROP ?
-                                       draggedReferenceTarget.dropIndex : -1);
+    int excludedReferenceDropIndex = isReferenceDragActive &&
+        draggedReferenceTarget.kind == RPG_REFERENCE_TARGET_DROP ? draggedReferenceTarget.dropIndex :
+        GetReferenceFolderTransferExcludedIndex(referenceDrops);
+    RpgReferenceObjects_DrawExcept(referenceDrops, fileTexture, excludedReferenceDropIndex);
+    if (GetReferenceFolderTransferExcludedIndex(referenceDrops) >= 0) {
+        Vector2 transferPosition = GetReferenceFolderTransferPosition();
+        float transferSize = 48.0f * referenceFolderTransfer.drawScale;
+        RpgStage_DrawReferenceObject(fileTexture, (Rectangle){ transferPosition.x - transferSize * 0.5f,
+                                      transferPosition.y - transferSize * 0.5f, transferSize, transferSize }, WHITE);
+    }
     if (isReferenceDragActive && draggedReferenceTarget.kind == RPG_REFERENCE_TARGET_CELL)
         RpgStage_DrawReferenceObject(fileTexture, GetReferenceTargetBounds(referenceDrops, draggedReferenceTarget),
                                      Fade(WHITE, 0.28f));
     RpgItems_Draw(items);
     RpgMapEvents_Draw(events);
-    DrawRectangle(0, 400, RPG_STAGE_WORLD_WIDTH, 14, DARKGREEN);
     RpgStage_DrawEffects(stage);
     RpgWires_Draw(wires, stage);
     RpgWires_DrawElectric(wires, dataShots, 0, RPG_STAGE_WORLD_COLUMNS);
     RpgReceivers_Draw(receivers);
     RpgAttachments_Draw(attachments);
     RpgDataShots_Draw(dataShots);
+    /* 中間PNGはブロックより前、キャラクターより後に固定する。 */
+    RpgImageObjects_DrawLayer(&stage->imageObjects, 0, RPG_STAGE_WORLD_COLUMNS,
+                              RPG_STAGE_TILE_SIZE, WHITE,
+                              RPG_IMAGE_OBJECT_LAYER_BLOCK_FRONT_CHARACTER_BACK);
     DrawZipper(zipperTexture, &zipper->character, zipperAnimationElapsed);
     RpgRuntime_DrawZipperFolderReturn(zipper);
     if (isMoveSpriteVisible) DrawMoveSprite(zipperTexture, player, npc, zipper, moveSpriteTarget, moveSpriteX);
     RpgCharacter_Draw(npc, "NPC");
-    RpgCharacter_Draw(player, "Hero");
-    RpgZipper_DrawPointerFeedback(RpgZipper_GetSpriteBounds(&zipper->character, 380.0f),
+    RpgCharacter_DrawPlayer(player, isZipperLaunched ? RPG_CHARACTER_ANIMATION_ZIPGO : playerAnimation);
+    /* 最前面PNGはキャラクター描画後に重ねる。 */
+    RpgImageObjects_DrawLayer(&stage->imageObjects, 0, RPG_STAGE_WORLD_COLUMNS,
+                              RPG_STAGE_TILE_SIZE, WHITE, RPG_IMAGE_OBJECT_LAYER_FRONT);
+    RpgZipper_DrawPointerFeedback(RpgZipper_GetPixelAlignedSpriteBounds(&zipper->character, 380.0f),
                                   isZipperPointerHovered, isZipperPointerSelected);
     if (!isReferencePointerFeedbackSuppressed && selectedReferenceTarget.kind != RPG_REFERENCE_TARGET_NONE) {
         Rectangle selectedBounds = GetReferenceTargetBounds(referenceDrops, selectedReferenceTarget);
@@ -710,10 +961,13 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
             hoveredReferenceTarget.dropIndex == selectedReferenceTarget.dropIndex;
         RpgZipper_DrawPointerFeedback(hoveredBounds, true, isSelected);
     }
-    if (isReferenceDragActive)
-        RpgStage_DrawReferenceObject(fileTexture, (Rectangle){ referenceDragPosition.x - 24.0f,
-                                                                referenceDragPosition.y - 24.0f,
-                                                                RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE }, WHITE);
+    if (isReferenceDragActive) {
+        Rectangle draggedBounds = GetReferenceTargetBounds(referenceDrops, draggedReferenceTarget);
+        float draggedSize = draggedBounds.width > 0.0f ? draggedBounds.width : RPG_STAGE_TILE_SIZE;
+        RpgStage_DrawReferenceObject(fileTexture, (Rectangle){ referenceDragPosition.x - draggedSize * 0.5f,
+                                                                referenceDragPosition.y - draggedSize * 0.5f,
+                                                                draggedSize, draggedSize }, WHITE);
+    }
     if (canTalk && dialogueIndex < 0) {
         DrawRectangle((int)npc->position.x - 48, (int)npc->position.y - 116, 96, 24,
                       Fade(RAYWHITE, 0.9f));
@@ -736,42 +990,347 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
         DrawRectangle((int)(x - fileNameWidth / 2.0f - 6.0f), (int)y, (int)fileNameWidth + 12, 44,
                       Fade(RAYWHITE, 0.9f));
         GameFont_Draw(referenceFileName, x - fileNameWidth / 2.0f, y + 3.0f, 16.0f, DARKBLUE);
-        GameFont_Draw("[E] 開く", x - 24.0f, y + 22.0f, 15.0f, MAROON);
+        if (IsReferenceFolderTarget(stage, nearbyReferenceTarget)) {
+            const char *folderPrompt = RpgReferenceObjects_FindFollowerIndex(referenceDrops) >= 0 ?
+                                       "[E] Open  [P] Store" : "[E] Open";
+            GameFont_Draw(folderPrompt, x - 48.0f, y + 22.0f, 15.0f, MAROON);
+        } else {
+            GameFont_Draw("[E] Open  [G] Acquire", x - 48.0f, y + 22.0f, 15.0f, MAROON);
+        }
     }
     EndMode2D();
-    DrawText("RPG Version  -  Move: A/D or Arrow keys  Jump: W  Launch Zipper: Space", 24, 22, 22, DARKGRAY);
-    DrawText("Approach the NPC and press E", 24, 48, 18, DARKGRAY);
-    DrawText(followsPlayer ? "Camera: Follow [C]" : "Camera: Map Pivot [C]", 700, 48, 17,
-             DARKBLUE);
+    // 本編のワールドと常設操作UIを混在させない。上部帯は不透明にして、ゲーム描画をUIの背後へ見せない。
+    DrawRectangle(0, 480, RPG_VIEWPORT_WIDTH, RPG_VIEWPORT_HEIGHT - 480, Fade(RAYWHITE, 0.97f));
+    DrawLine(0, 480, RPG_VIEWPORT_WIDTH, 480, LIGHTGRAY);
     DrawText(TextFormat("Area (%d, %d)", stage->mapGridX[currentMap], stage->mapGridY[currentMap]),
-             24, 500, 20, RAYWHITE);
+             18, 490, 16, DARKGRAY);
+    DrawText("Move: A/D or arrows   Jump: W   Launch Zipper: Space", 160, 490, 14, DARKGRAY);
+    DrawText(followsPlayer ? "Camera: Follow [C]" : "Camera: Map Pivot [C]", 510, 515, 14,
+             DARKBLUE);
     if (itemMessageTimer > 0.0f) GameFont_Draw(itemMessage, 300, 90, 24, MAROON);
     if (isReferenceTextOpen) DrawReferenceTextPanel(referenceFileName, referenceText);
-    const RpgInspect *activeInspect = inspectTarget == 2 ? zipperInspect : inspect;
+    const RpgInspect *entryInspect = stage3Event != NULL ? &stage3Event->inspect : inspect;
+    const RpgInspect *activeInspect = inspectTarget == 2 ? zipperInspect :
+                                     inspectTarget == 3 ? entryInspect : inspect;
     bool isInspectDialogue = inspectTarget >= 0 &&
                              activeInspect->functions[inspectFunctionIndex].type == RPG_INSPECT_DIALOGUE;
-    if (dialogueIndex >= 0 || stage3IntroIndex >= 0 || isInspectDialogue) {
+    if (dialogueIndex >= 0 || isInspectDialogue) {
         const Rectangle dialogBounds = { 150.0f, 350.0f, 660.0f, 130.0f };
         const Rectangle speakerBounds = { 174.0f, 332.0f, 150.0f, 36.0f };
         DrawRectangleRec(dialogBounds, Fade(RAYWHITE, 0.96f));
         DrawRectangleLinesEx(dialogBounds, 2.0f, DARKBLUE);
         DrawRectangleRec(speakerBounds, DARKBLUE);
         const RpgDialogue *inspectDialogue = isInspectDialogue ? &activeInspect->functions[inspectFunctionIndex].dialogue : NULL;
-        const char *speaker = inspectDialogue != NULL ? inspectDialogue->speakers[inspectLineIndex] : stage3IntroIndex >= 0 ? stage3Event->dialogue.speakers[stage3IntroIndex] : dialogue->speakers[dialogueIndex];
-        const char *text = inspectDialogue != NULL ? inspectDialogue->lines[inspectLineIndex] : stage3IntroIndex >= 0 ? stage3Event->dialogue.lines[stage3IntroIndex] : dialogue->lines[dialogueIndex];
+        const char *speaker = inspectDialogue != NULL ? inspectDialogue->speakers[inspectLineIndex] : dialogue->speakers[dialogueIndex];
+        const char *text = inspectDialogue != NULL ? inspectDialogue->lines[inspectLineIndex] : dialogue->lines[dialogueIndex];
         GameFont_Draw(speaker, 190, 340, 21, RAYWHITE);
         GameFont_Draw(text, 178, 390, 24, DARKBLUE);
-        GameFont_Draw(inspectDialogue != NULL ? TextFormat("E: next  function %d / %d, line %d / %d", inspectFunctionIndex + 1, activeInspect->functionCount, inspectLineIndex + 1, inspectDialogue->lineCount) : stage3IntroIndex >= 0 ? TextFormat("E: 次へ  %d / %d", stage3IntroIndex + 1, stage3Event->dialogue.lineCount) : TextFormat("E: 次へ  %d / %d", dialogueIndex + 1, dialogue->lineCount),
+        GameFont_Draw(inspectDialogue != NULL ? TextFormat("E: next  function %d / %d, line %d / %d", inspectFunctionIndex + 1, activeInspect->functionCount, inspectLineIndex + 1, inspectDialogue->lineCount) : TextFormat("E: 次へ  %d / %d", dialogueIndex + 1, dialogue->lineCount),
                       178, 432, 17, GRAY);
     }
     if (showStopButton) {
-        DrawRectangle(198, 10, 92, 26, MAROON);
-        DrawRectangleLines(198, 10, 92, 26, RAYWHITE);
-        DrawText("Stop [F2]", 205, 16, 15, RAYWHITE);
+        Rectangle stopButtonBounds = RpgRuntime_GetStopButtonBounds();
+        DrawRectangleRec(stopButtonBounds, MAROON);
+        DrawRectangleLinesEx(stopButtonBounds, 1.0f, RAYWHITE);
+        DrawText("Stop [F2]", (int)stopButtonBounds.x + 7, (int)stopButtonBounds.y + 6, 15, RAYWHITE);
     }
     if (RpgScene_IsGameSettings(scene)) RpgScene_DrawGameSettingsOverlay(scene);
     else if (scene != NULL) RpgScene_DrawGameSettingsButton();
-    EndDrawing();
+    RpgViewport_EndFrame();
+}
+
+/* NPC、Zipper、入場イベントで同じ Function 実行器を使うための対象選択。 */
+static RpgInspect *GetRuntimeActiveInspect(RpgRuntimeContext *context)
+{
+    if (*context->inspectTarget == 2) return &context->zipper->inspect;
+    if (*context->inspectTarget == 3 && context->activeEntryEvent != NULL &&
+        *context->activeEntryEvent != NULL) return &(*context->activeEntryEvent)->inspect;
+    return context->inspect;
+}
+
+enum { RPG_RUNTIME_ACTIVE_MOVE_COUNT = RPG_INSPECT_MAX_FUNCTIONS };
+
+typedef struct RpgRuntimeMoveState {
+    RpgInspectMove *move;
+    float elapsed;
+    float startX;
+    float startY;
+    float transitionElapsed;
+    bool running;
+    bool transitioned;
+} RpgRuntimeMoveState;
+
+/* Function列は複数のMoveを同時に開始できる。実行状態は保存データではなくランタイム専用。 */
+static RpgRuntimeMoveState runtimeInspectMoves[RPG_RUNTIME_ACTIVE_MOVE_COUNT] = { 0 };
+static const RpgStage *runtimeInspectMoveStage = NULL;
+
+static void ResetRuntimeInspectMovesIfStageChanged(const RpgRuntimeContext *context)
+{
+    if (context == NULL) return;
+    if (runtimeInspectMoveStage != context->stage ||
+        (context->activeInspectMove != NULL && context->isInspectMoveRunning != NULL &&
+         *context->activeInspectMove == NULL && !*context->isInspectMoveRunning)) {
+        memset(runtimeInspectMoves, 0, sizeof(runtimeInspectMoves));
+        runtimeInspectMoveStage = context->stage;
+    }
+}
+
+static bool HasRunningRuntimeInspectMove(void)
+{
+    for (int index = 0; index < RPG_RUNTIME_ACTIVE_MOVE_COUNT; index++)
+        if (runtimeInspectMoves[index].move != NULL && runtimeInspectMoves[index].running) return true;
+    return false;
+}
+
+static bool HasRunningPlayerWalkMove(void)
+{
+    for (int index = 0; index < RPG_RUNTIME_ACTIVE_MOVE_COUNT; index++)
+        if (runtimeInspectMoves[index].move != NULL && runtimeInspectMoves[index].running &&
+            runtimeInspectMoves[index].move->target == RPG_INSPECT_MOVE_PLAYER &&
+            runtimeInspectMoves[index].move->walkAnimationEnabled) return true;
+    return false;
+}
+
+static void SyncLegacyRuntimeMoveState(RpgRuntimeContext *context)
+{
+    RpgRuntimeMoveState *representative = NULL;
+    for (int index = 0; index < RPG_RUNTIME_ACTIVE_MOVE_COUNT; index++)
+        if (runtimeInspectMoves[index].move != NULL) {
+            representative = &runtimeInspectMoves[index];
+            if (representative->running) break;
+        }
+    if (context->isInspectMoveRunning != NULL) *context->isInspectMoveRunning = HasRunningRuntimeInspectMove();
+    if (context->activeInspectMove != NULL) *context->activeInspectMove = representative != NULL ? representative->move : NULL;
+    if (representative != NULL) {
+        if (context->inspectMoveElapsed != NULL) *context->inspectMoveElapsed = representative->elapsed;
+        if (context->inspectMoveStartX != NULL) *context->inspectMoveStartX = representative->startX;
+        if (context->inspectMoveStartY != NULL) *context->inspectMoveStartY = representative->startY;
+        if (context->inspectMoveTransitionElapsed != NULL)
+            *context->inspectMoveTransitionElapsed = representative->transitionElapsed;
+    }
+}
+
+static void CompleteRuntimeInspect(RpgRuntimeContext *context)
+{
+    /* Function列の完了は対象種別に依存しない。入力を止める全実行状態をここだけで解放する。 */
+    bool keepsRunningMove = context->isInspectMoveRunning != NULL && *context->isInspectMoveRunning;
+    /* 先行MoveはFunction列の終了後も最後まで更新する。終了済みのMoveだけをここで破棄する。 */
+    if (!keepsRunningMove && context->activeInspectMove != NULL) *context->activeInspectMove = NULL;
+    if (context->inspectMoveTransitionElapsed != NULL) *context->inspectMoveTransitionElapsed = 0.0f;
+    if (context->activeWaitFunctionIndex != NULL) *context->activeWaitFunctionIndex = -1;
+    if (context->inspectWaitElapsed != NULL) *context->inspectWaitElapsed = 0.0f;
+    if (context->stage3IntroIndex != NULL) *context->stage3IntroIndex = -1;
+    if (!keepsRunningMove && context->player != NULL) context->player->isMoving = false;
+    if (*context->inspectTarget == 2) {
+        *context->zipperFollowsPlayer = true;
+        *context->isZipperControllable = true;
+        *context->zipperInspectCompleted = true;
+    } else if (*context->inspectTarget == 1) {
+        *context->npcInspectCompleted = true;
+    }
+    *context->inspectTarget = -1;
+    *context->inspectFunctionIndex = -1;
+    *context->inspectLineIndex = -1;
+}
+
+/* Moveの進行状態をFunction列から独立して保持し、次のFunctionへ進んだ後も移動を続ける。 */
+/* 旧単一Move実装。複数Move状態へ移行済みのため、互換参照としてのみ残す。 */
+#if 0
+static bool StartRuntimeInspectMoveLegacy(RpgRuntimeContext *context, RpgInspectMove *move)
+{
+    if (context == NULL || move == NULL || context->activeInspectMove == NULL ||
+        context->inspectMoveTransitionElapsed == NULL) return false;
+    /* activeが同じでrunning=falseなら、移動済みで次Function待機中。二重開始しない。 */
+    if (*context->activeInspectMove == move) return *context->isInspectMoveRunning;
+    if (*context->isInspectMoveRunning) return false;
+    int imageIndex = move->target == RPG_INSPECT_MOVE_IMAGE_OBJECT ?
+                     RpgImageObjects_FindById(&context->stage->imageObjects, move->targetImageObjectId) : -1;
+    RpgImageObject *imageTarget = imageIndex >= 0 ? &context->stage->imageObjects.entries[imageIndex] : NULL;
+    if (move->target == RPG_INSPECT_MOVE_IMAGE_OBJECT && imageTarget == NULL)
+        move->target = RPG_INSPECT_MOVE_PLAYER;
+    *context->activeInspectMove = move;
+    *context->isInspectMoveRunning = true;
+    *context->inspectMoveElapsed = 0.0f;
+    *context->inspectMoveTransitionElapsed = 0.0f;
+    *context->inspectMoveStartX = imageTarget != NULL ?
+                                RpgImageObjects_GetWorldCenterX(imageTarget, RPG_STAGE_TILE_SIZE) :
+                                move->target == RPG_INSPECT_MOVE_PLAYER ? context->player->position.x :
+                                move->target == RPG_INSPECT_MOVE_NPC ? context->npc->position.x : context->zipper->character.position.x;
+    *context->inspectMoveStartY = imageTarget != NULL ?
+                                RpgImageObjects_GetWorldCenterY(imageTarget, RPG_STAGE_TILE_SIZE) :
+                                move->target == RPG_INSPECT_MOVE_PLAYER ? context->player->position.y :
+                                move->target == RPG_INSPECT_MOVE_NPC ? context->npc->position.y : context->zipper->character.position.y;
+    return true;
+}
+
+/* 進行中Moveだけを更新する。Functionの選択位置に依存しないため、Dialogueへ進んでも止まらない。 */
+static void UpdateRuntimeInspectMoveLegacy(RpgRuntimeContext *context, float deltaTime)
+{
+    if (context == NULL || context->activeInspectMove == NULL || !*context->isInspectMoveRunning ||
+        *context->activeInspectMove == NULL) return;
+    RpgInspectMove *move = *context->activeInspectMove;
+    int imageIndex = move->target == RPG_INSPECT_MOVE_IMAGE_OBJECT ?
+                     RpgImageObjects_FindById(&context->stage->imageObjects, move->targetImageObjectId) : -1;
+    RpgImageObject *imageTarget = imageIndex >= 0 ? &context->stage->imageObjects.entries[imageIndex] : NULL;
+    if (move->target == RPG_INSPECT_MOVE_IMAGE_OBJECT && imageTarget == NULL)
+        move->target = RPG_INSPECT_MOVE_PLAYER;
+    *context->inspectMoveElapsed += deltaTime;
+    float progress = Clamp(*context->inspectMoveElapsed / move->duration, 0.0f, 1.0f);
+    float easedProgress = RpgInspect_EaseMoveProgress(move->easing, progress);
+    float currentX = RpgInspect_MoveAxisHasX(move->axis) ?
+        *context->inspectMoveStartX + (move->destinationX - *context->inspectMoveStartX) * easedProgress :
+        *context->inspectMoveStartX;
+    float currentY = RpgInspect_MoveAxisHasY(move->axis) ?
+        *context->inspectMoveStartY + (move->destinationY - *context->inspectMoveStartY) * easedProgress :
+        *context->inspectMoveStartY;
+    if (imageTarget != NULL) RpgImageObjects_SetRuntimePosition(imageTarget, (Vector2){ currentX, currentY });
+    else {
+        float *targetX = move->target == RPG_INSPECT_MOVE_PLAYER ? &context->player->position.x :
+                         move->target == RPG_INSPECT_MOVE_NPC ? &context->npc->position.x : &context->zipper->character.position.x;
+        float *targetY = move->target == RPG_INSPECT_MOVE_PLAYER ? &context->player->position.y :
+                         move->target == RPG_INSPECT_MOVE_NPC ? &context->npc->position.y : &context->zipper->character.position.y;
+        *targetX = currentX;
+        *targetY = currentY;
+    }
+    if (move->target == RPG_INSPECT_MOVE_PLAYER) {
+        context->player->isMoving = move->walkAnimationEnabled;
+        if (move->walkAnimationEnabled) {
+            context->player->animationElapsed += deltaTime * move->walkAnimationSpeed;
+            if (fabsf(currentX - *context->inspectMoveStartX) > 0.01f)
+                context->player->facingDirection = currentX >= *context->inspectMoveStartX ? 1 : -1;
+        }
+    }
+    if (progress >= 1.0f) {
+        if (imageTarget != NULL)
+            RpgImageObjects_CommitRuntimePosition(imageTarget, RPG_STAGE_TILE_SIZE, RPG_STAGE_WORLD_COLUMNS,
+                                                  RPG_STAGE_ROWS);
+        /* activeは遷移待ちの識別として残す。次Functionへ進んだ時点で解放する。 */
+        *context->isInspectMoveRunning = false;
+        if (move->target == RPG_INSPECT_MOVE_PLAYER) context->player->isMoving = false;
+    }
+}
+
+/* 完了済みの即時Functionを同一フレームで連結する。時間を必要とするFunctionだけが次フレームへ継続する。 */
+#endif
+
+static RpgRuntimeMoveState *StartRuntimeInspectMove(RpgRuntimeContext *context, RpgInspectMove *move)
+{
+    if (context == NULL || move == NULL) return NULL;
+    ResetRuntimeInspectMovesIfStageChanged(context);
+    for (int index = 0; index < RPG_RUNTIME_ACTIVE_MOVE_COUNT; index++)
+        if (runtimeInspectMoves[index].move == move && !runtimeInspectMoves[index].transitioned)
+            return &runtimeInspectMoves[index];
+    RpgRuntimeMoveState *state = NULL;
+    for (int index = 0; index < RPG_RUNTIME_ACTIVE_MOVE_COUNT; index++)
+        if (runtimeInspectMoves[index].move == NULL) { state = &runtimeInspectMoves[index]; break; }
+    if (state == NULL) return NULL;
+    int imageIndex = move->target == RPG_INSPECT_MOVE_IMAGE_OBJECT ?
+                     RpgImageObjects_FindById(&context->stage->imageObjects, move->targetImageObjectId) : -1;
+    RpgImageObject *imageTarget = imageIndex >= 0 ? &context->stage->imageObjects.entries[imageIndex] : NULL;
+    if (move->target == RPG_INSPECT_MOVE_IMAGE_OBJECT && imageTarget == NULL) move->target = RPG_INSPECT_MOVE_PLAYER;
+    *state = (RpgRuntimeMoveState){
+        .move = move, .running = true,
+        .startX = imageTarget != NULL ? RpgImageObjects_GetWorldCenterX(imageTarget, RPG_STAGE_TILE_SIZE) :
+                  move->target == RPG_INSPECT_MOVE_PLAYER ? context->player->position.x :
+                  move->target == RPG_INSPECT_MOVE_NPC ? context->npc->position.x : context->zipper->character.position.x,
+        .startY = imageTarget != NULL ? RpgImageObjects_GetWorldCenterY(imageTarget, RPG_STAGE_TILE_SIZE) :
+                  move->target == RPG_INSPECT_MOVE_PLAYER ? context->player->position.y :
+                  move->target == RPG_INSPECT_MOVE_NPC ? context->npc->position.y : context->zipper->character.position.y
+    };
+    SyncLegacyRuntimeMoveState(context);
+    return state;
+}
+
+static void UpdateRuntimeInspectMove(RpgRuntimeContext *context, float deltaTime)
+{
+    if (context == NULL) return;
+    ResetRuntimeInspectMovesIfStageChanged(context);
+    bool playerWalkActive = false;
+    for (int index = 0; index < RPG_RUNTIME_ACTIVE_MOVE_COUNT; index++) {
+        RpgRuntimeMoveState *state = &runtimeInspectMoves[index];
+        if (state->move == NULL || !state->running) continue;
+        RpgInspectMove *move = state->move;
+        int imageIndex = move->target == RPG_INSPECT_MOVE_IMAGE_OBJECT ?
+                         RpgImageObjects_FindById(&context->stage->imageObjects, move->targetImageObjectId) : -1;
+        RpgImageObject *imageTarget = imageIndex >= 0 ? &context->stage->imageObjects.entries[imageIndex] : NULL;
+        if (move->target == RPG_INSPECT_MOVE_IMAGE_OBJECT && imageTarget == NULL) move->target = RPG_INSPECT_MOVE_PLAYER;
+        state->elapsed += deltaTime;
+        float progress = Clamp(state->elapsed / move->duration, 0.0f, 1.0f);
+        float easedProgress = RpgInspect_EaseMoveProgress(move->easing, progress);
+        float currentX = RpgInspect_MoveAxisHasX(move->axis) ? state->startX + (move->destinationX - state->startX) * easedProgress : state->startX;
+        float currentY = RpgInspect_MoveAxisHasY(move->axis) ? state->startY + (move->destinationY - state->startY) * easedProgress : state->startY;
+        if (imageTarget != NULL) RpgImageObjects_SetRuntimePosition(imageTarget, (Vector2){ currentX, currentY });
+        else {
+            float *targetX = move->target == RPG_INSPECT_MOVE_PLAYER ? &context->player->position.x : move->target == RPG_INSPECT_MOVE_NPC ? &context->npc->position.x : &context->zipper->character.position.x;
+            float *targetY = move->target == RPG_INSPECT_MOVE_PLAYER ? &context->player->position.y : move->target == RPG_INSPECT_MOVE_NPC ? &context->npc->position.y : &context->zipper->character.position.y;
+            *targetX = currentX;
+            *targetY = currentY;
+        }
+        if (move->target == RPG_INSPECT_MOVE_PLAYER && move->walkAnimationEnabled) {
+            playerWalkActive = true;
+            context->player->animationElapsed += deltaTime * move->walkAnimationSpeed;
+            if (fabsf(currentX - state->startX) > 0.01f) context->player->facingDirection = currentX >= state->startX ? 1 : -1;
+        }
+        if (progress >= 1.0f) {
+            if (imageTarget != NULL) RpgImageObjects_CommitRuntimePosition(imageTarget, RPG_STAGE_TILE_SIZE, RPG_STAGE_WORLD_COLUMNS, RPG_STAGE_ROWS);
+            state->running = false;
+            if (state->transitioned) state->move = NULL;
+        }
+    }
+    /* 通常入力の移動状態はRpgRuntime_UpdateWorldが所有する。イベントMoveが
+       実行中の間だけここで上書きし、Moveが無い通常フレームで停止状態を壊さない。 */
+    if (playerWalkActive || *context->inspectTarget >= 0)
+        context->player->isMoving = playerWalkActive;
+    SyncLegacyRuntimeMoveState(context);
+}
+
+static void AdvanceRuntimeInspectFunctions(RpgRuntimeContext *context, float deltaTime)
+{
+    if (context == NULL) return;
+    for (int iteration = 0; iteration < RPG_INSPECT_MAX_FUNCTIONS && *context->inspectTarget >= 0; iteration++) {
+        RpgInspect *inspect = GetRuntimeActiveInspect(context);
+        if (*context->inspectFunctionIndex < 0 ||
+            *context->inspectFunctionIndex >= inspect->functionCount) {
+            CompleteRuntimeInspect(context);
+            return;
+        }
+        RpgInspectFunction *function = &inspect->functions[*context->inspectFunctionIndex];
+        if (function->type == RPG_INSPECT_DIALOGUE) return;
+        if (function->type == RPG_INSPECT_MOVE) {
+            RpgInspectMove *move = &function->move;
+            RpgRuntimeMoveState *moveState = StartRuntimeInspectMove(context, move);
+            /* Moveは完了を待たず、開始から設定秒数で次Functionへ渡す。実行中の移動は
+               activeInspectMoveが引き続き更新するため、待ち時間0では即座に連結できる。 */
+            if (moveState == NULL) return;
+            moveState->transitionElapsed += deltaTime;
+            if (moveState->transitionElapsed < move->nextFunctionDelay) return;
+            moveState->transitioned = true;
+            if (!moveState->running) moveState->move = NULL;
+        } else if (function->type == RPG_INSPECT_WAIT) {
+            if (function->wait.duration > 0.0f) {
+                if (*context->activeWaitFunctionIndex != *context->inspectFunctionIndex) {
+                    *context->activeWaitFunctionIndex = *context->inspectFunctionIndex;
+                    *context->inspectWaitElapsed = 0.0f;
+                }
+                *context->inspectWaitElapsed += deltaTime;
+                if (*context->inspectWaitElapsed < function->wait.duration) return;
+            }
+            *context->activeWaitFunctionIndex = -1;
+            *context->inspectWaitElapsed = 0.0f;
+        } else if (function->type == RPG_INSPECT_LAYER_CHANGE) {
+            int imageIndex = RpgImageObjects_FindById(&context->stage->imageObjects,
+                                                      function->layerChange.targetImageObjectId);
+            if (imageIndex >= 0)
+                context->stage->imageObjects.entries[imageIndex].layer =
+                    Clamp(function->layerChange.layer, 0, 2);
+        } else return;
+        (*context->inspectFunctionIndex)++;
+        (*context->inspectLineIndex) = 0;
+        if (*context->inspectFunctionIndex >= inspect->functionCount) {
+            CompleteRuntimeInspect(context);
+            return;
+        }
+    }
 }
 
 
@@ -829,12 +1388,23 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
             }
         }
 #endif
+        /* ステージへビルドして入った直後のイベントは、最初の入力より前に一度だけ開始する。 */
+        if (!(*context->stage3IntroShown) && (*context->stage3Event).inspect.enabled &&
+            (*context->stage3Event).inspect.functionCount > 0) {
+            if (context->activeEntryEvent != NULL) (*context->activeEntryEvent) = context->stage3Event;
+            (*context->inspectTarget) = 3;
+            (*context->inspectFunctionIndex) = 0;
+            (*context->inspectLineIndex) = 0;
+            (*context->stage3IntroShown) = true;
+        }
         RpgRuntimeUpdateContext runtimeMovementContext = {
             .player = &(*context->player), .npc = &(*context->npc), .stage = &(*context->stage), .attachments = &(*context->attachments),
             .signalBlocks = &(*context->signalBlocks), .dataShots = &(*context->dataShots), .buttonEvent = &(*context->buttonEvent),
             .receivers = &(*context->receivers), .wires = &(*context->wires), .layout = &(*context->layout),
             .wasButtonPressed = &(*context->wasDataButtonPressed),
-            .acceptsPlayerInput = (*context->dialogueIndex) < 0 && (*context->stage3IntroIndex) < 0 && (*context->inspectTarget) < 0 && !(*context->isReferenceTextOpen),
+            .acceptsPlayerInput = (*context->dialogueIndex) < 0 && (*context->stage3IntroIndex) < 0 &&
+                                  (*context->inspectTarget) < 0 && !(*context->isInspectMoveRunning) &&
+                                  !(*context->isReferenceTextOpen),
             .updatesWorldSystems = false
         };
         // 信号・データ弾を含む更新は後段で1回だけ実行する。
@@ -843,11 +1413,12 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
             if ((*context->zipperFollowsPlayer)) {
                 // 射出開始位置は常に主人公。カーソルへ向かう単位ベクトルを固定して直進させる。
                 (*context->zipper).character.position = (*context->player).position;
-                Vector2 direction = Vector2Subtract(GetScreenToWorld2D(GetMousePosition(), (*context->camera)),
+                Vector2 direction = Vector2Subtract(GetScreenToWorld2D(RpgViewport_GetMousePosition(), (*context->camera)),
                                                     GetZipperCollisionCenter(&(*context->zipper)));
                 if (Vector2LengthSqr(direction) < 0.001f) direction = (Vector2){ 1.0f, 0.0f };
                 (*context->zipperLaunchVelocity) = Vector2Scale(Vector2Normalize(direction), (*context->zipper).launchSpeed);
                 (*context->isZipperLaunched) = true;
+                RpgCharacter_ResetAnimation(&(*context->player));
                 (*context->zipperFollowsPlayer) = false;
                 (*context->attachedDataShotIndex) = -1;
                 (*context->attachedAttachmentIndex) = -1;
@@ -897,6 +1468,7 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
                                  &(*context->attachedAttachmentIndex));
         else if ((*context->zipperFollowsPlayer) && (*context->inspectTarget) < 0 && (*context->dialogueIndex) < 0 && (*context->stage3IntroIndex) < 0 && !(*context->isReferenceTextOpen))
             UpdateZipperFollow(&(*context->zipper), &(*context->player), GetFrameTime());
+        RpgRuntime_ProcessReferenceFolderZipperCommand(context);
         RpgRuntime_ProcessZipperCommand(context);
         if ((*context->zipperAnimationElapsed) >= 0.0f) {
             (*context->zipperAnimationElapsed) += GetFrameTime();
@@ -906,9 +1478,15 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
         bool canTalk = RpgCharacter_IsNear(&(*context->player), &(*context->npc), 72.0f);
         RpgReferenceTarget nearbyReferenceTarget = { .kind = RPG_REFERENCE_TARGET_NONE,
                                                        .row = -1, .column = -1, .dropIndex = -1 };
+        RpgReferenceTarget nearbyFolderTarget = { .kind = RPG_REFERENCE_TARGET_NONE,
+                                                    .row = -1, .column = -1, .dropIndex = -1 };
         bool canReadReference = RpgReferenceObjects_FindNearbyTarget(&(*context->stage), &(*context->referenceDrops),
                                                                        (*context->player).position, 72.0f,
                                                                        &nearbyReferenceTarget);
+        bool canStoreReference = RpgReferenceObjects_FindNearbyFolderTarget(&(*context->stage),
+                                                                              (*context->player).position, 72.0f,
+                                                                              &nearbyFolderTarget) &&
+                                 RpgReferenceObjects_FindFollowerIndex(&(*context->referenceDrops)) >= 0;
         if (canReadReference) {
             const char *referencePath = RpgReferenceObjects_GetTargetPath(&(*context->stage), &(*context->referenceDrops),
                                                                            nearbyReferenceTarget);
@@ -917,6 +1495,10 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
         }
         if ((*context->itemMessageTimer) > 0.0f) (*context->itemMessageTimer) -= GetFrameTime();
         RpgReferenceObjects_Update(&(*context->referenceDrops), GetFrameTime());
+        UpdateReferenceFolderTransfer(context, GetFrameTime());
+        RpgReferenceObjects_UpdateFollowers(&(*context->referenceDrops), (*context->player).position,
+                                            (*context->player).scale, (*context->player).moveSpeed,
+                                            (*context->layout).referenceFollowerScale, GetFrameTime());
         for (int index = 0; index < (*context->items).count; index++) if (!(*context->items).entries[index].collected &&
             fabsf((*context->player).position.x - (*context->items).entries[index].position.x) <= 28.0f) {
             (*context->items).entries[index].collected = true;
@@ -933,73 +1515,179 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
             (*context->inspectLineIndex) = 0;
         }
         // 調べる機能列のMoveは、対象を指定時間で補間して完了後に次の機能へ進める。
-        if ((*context->inspectTarget) >= 0) {
-            RpgInspect *activeInspect = (*context->inspectTarget) == 2 ? &(*context->zipper).inspect : &(*context->inspect);
+        /* 旧Context互換用。現行Contextは下の独立Move更新を使う。 */
+        /* 旧単一Move実装は複数Move実装と競合するため無効化する。 */
+#if 0
+        if (context->activeInspectMove == NULL && (*context->inspectTarget) >= 0) {
+            RpgInspect *activeInspect = GetRuntimeActiveInspect(context);
             if (activeInspect->functions[(*context->inspectFunctionIndex)].type == RPG_INSPECT_MOVE) {
                 RpgInspectMove *move = &activeInspect->functions[(*context->inspectFunctionIndex)].move;
+                int imageIndex = move->target == RPG_INSPECT_MOVE_IMAGE_OBJECT ?
+                                 RpgImageObjects_FindById(&(*context->stage).imageObjects, move->targetImageObjectId) : -1;
+                RpgImageObject *imageTarget = imageIndex >= 0 ? &(*context->stage).imageObjects.entries[imageIndex] : NULL;
+                if (move->target == RPG_INSPECT_MOVE_IMAGE_OBJECT && imageTarget == NULL)
+                    move->target = RPG_INSPECT_MOVE_PLAYER;
                 if (!(*context->isInspectMoveRunning)) {
                     (*context->isInspectMoveRunning) = true;
                     (*context->inspectMoveElapsed) = 0.0f;
-                    (*context->inspectMoveStartX) = move->target == RPG_INSPECT_MOVE_PLAYER ? (*context->player).position.x :
+                    (*context->inspectMoveStartX) = imageTarget != NULL ?
+                                        RpgImageObjects_GetWorldCenterX(imageTarget, RPG_STAGE_TILE_SIZE) :
+                                        move->target == RPG_INSPECT_MOVE_PLAYER ? (*context->player).position.x :
                                         move->target == RPG_INSPECT_MOVE_NPC ? (*context->npc).position.x : (*context->zipper).character.position.x;
+                    (*context->inspectMoveStartY) = imageTarget != NULL ?
+                                        RpgImageObjects_GetWorldCenterY(imageTarget, RPG_STAGE_TILE_SIZE) :
+                                        move->target == RPG_INSPECT_MOVE_PLAYER ? (*context->player).position.y :
+                                        move->target == RPG_INSPECT_MOVE_NPC ? (*context->npc).position.y : (*context->zipper).character.position.y;
                 }
                 (*context->inspectMoveElapsed) += GetFrameTime();
                 float progress = Clamp((*context->inspectMoveElapsed) / move->duration, 0.0f, 1.0f);
-                float *targetX = move->target == RPG_INSPECT_MOVE_PLAYER ? &(*context->player).position.x :
-                                 move->target == RPG_INSPECT_MOVE_NPC ? &(*context->npc).position.x : &(*context->zipper).character.position.x;
-                *targetX = (*context->inspectMoveStartX) + (move->destinationX - (*context->inspectMoveStartX)) * progress;
+                float easedProgress = RpgInspect_EaseMoveProgress(move->easing, progress);
+                float currentX = RpgInspect_MoveAxisHasX(move->axis) ?
+                    (*context->inspectMoveStartX) + (move->destinationX - (*context->inspectMoveStartX)) * easedProgress :
+                    (*context->inspectMoveStartX);
+                float currentY = RpgInspect_MoveAxisHasY(move->axis) ?
+                    (*context->inspectMoveStartY) + (move->destinationY - (*context->inspectMoveStartY)) * easedProgress :
+                    (*context->inspectMoveStartY);
+                if (imageTarget != NULL) RpgImageObjects_SetRuntimePosition(imageTarget, (Vector2){ currentX, currentY });
+                else {
+                    float *targetX = move->target == RPG_INSPECT_MOVE_PLAYER ? &(*context->player).position.x :
+                                     move->target == RPG_INSPECT_MOVE_NPC ? &(*context->npc).position.x : &(*context->zipper).character.position.x;
+                    float *targetY = move->target == RPG_INSPECT_MOVE_PLAYER ? &(*context->player).position.y :
+                                     move->target == RPG_INSPECT_MOVE_NPC ? &(*context->npc).position.y : &(*context->zipper).character.position.y;
+                    *targetX = currentX;
+                    *targetY = currentY;
+                }
                 if (progress >= 1.0f) {
+                    if (imageTarget != NULL)
+                        RpgImageObjects_CommitRuntimePosition(imageTarget, RPG_STAGE_TILE_SIZE, RPG_STAGE_WORLD_COLUMNS,
+                                                              RPG_STAGE_ROWS);
                     (*context->isInspectMoveRunning) = false;
                     (*context->inspectFunctionIndex)++;
-                    if ((*context->inspectFunctionIndex) >= activeInspect->functionCount) {
-                        if ((*context->inspectTarget) == 2) {
-                            (*context->zipperFollowsPlayer) = true;
-                            (*context->isZipperControllable) = true;
-                            (*context->zipperInspectCompleted) = true;
-                        } else (*context->npcInspectCompleted) = true;
-                        (*context->inspectTarget) = -1;
-                        (*context->inspectFunctionIndex) = -1;
-                        (*context->inspectLineIndex) = -1;
-                    } else (*context->inspectLineIndex) = 0;
+                    if ((*context->inspectFunctionIndex) >= activeInspect->functionCount)
+                        CompleteRuntimeInspect(context);
+                    else (*context->inspectLineIndex) = 0;
                 }
             }
         }
+ #endif
+        /* MoveはFunction列から独立して進めるため、次のFunctionへ遷移しても止まらない。 */
+        UpdateRuntimeInspectMove(context, GetFrameTime());
+#if 0
+        if ((*context->inspectTarget) >= 0) {
+            RpgInspect *activeInspect = GetRuntimeActiveInspect(context);
+            if ((*context->inspectFunctionIndex) < 0 ||
+                (*context->inspectFunctionIndex) >= activeInspect->functionCount) {
+                /* 空のFunction列や終端でも、必ず共通の完了処理を通して入力を返す。 */
+                CompleteRuntimeInspect(context);
+            } else {
+            RpgInspectFunction *function = &activeInspect->functions[(*context->inspectFunctionIndex)];
+            if (function->type == RPG_INSPECT_MOVE) {
+                RpgInspectMove *move = &function->move;
+                StartRuntimeInspectMove(context, move);
+                if (!(*context->isInspectMoveRunning) && *context->activeInspectMove == move) {
+                    *context->inspectMoveTransitionElapsed += GetFrameTime();
+                    if (*context->inspectMoveTransitionElapsed >= move->nextFunctionDelay) {
+                        (*context->inspectFunctionIndex)++;
+                        (*context->inspectLineIndex) = 0;
+                        *context->activeInspectMove = NULL;
+                        *context->inspectMoveTransitionElapsed = 0.0f;
+                        if ((*context->inspectFunctionIndex) >= activeInspect->functionCount)
+                            CompleteRuntimeInspect(context);
+                    }
+                }
+            } else if (function->type == RPG_INSPECT_WAIT && context->activeWaitFunctionIndex != NULL &&
+                       context->inspectWaitElapsed != NULL) {
+                if (*context->activeWaitFunctionIndex != *context->inspectFunctionIndex) {
+                    *context->activeWaitFunctionIndex = *context->inspectFunctionIndex;
+                    *context->inspectWaitElapsed = 0.0f;
+                }
+                *context->inspectWaitElapsed += GetFrameTime();
+                if (*context->inspectWaitElapsed >= function->wait.duration) {
+                    *context->activeWaitFunctionIndex = -1;
+                    *context->inspectWaitElapsed = 0.0f;
+                    (*context->inspectFunctionIndex)++;
+                    (*context->inspectLineIndex) = 0;
+                    if ((*context->inspectFunctionIndex) >= activeInspect->functionCount)
+                        CompleteRuntimeInspect(context);
+                }
+            } else if (function->type == RPG_INSPECT_LAYER_CHANGE) {
+                int imageIndex = RpgImageObjects_FindById(&context->stage->imageObjects,
+                                                          function->layerChange.targetImageObjectId);
+                if (imageIndex >= 0)
+                    context->stage->imageObjects.entries[imageIndex].layer =
+                        Clamp(function->layerChange.layer, 0, 2);
+                (*context->inspectFunctionIndex)++;
+                (*context->inspectLineIndex) = 0;
+                if ((*context->inspectFunctionIndex) >= activeInspect->functionCount)
+                    CompleteRuntimeInspect(context);
+            }
+            }
+        }
+#endif
+        AdvanceRuntimeInspectFunctions(context, GetFrameTime());
         int currentMap = (int)((*context->player).position.x / (RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE)) + 1;
-        if (currentMap == 3 && (*context->previousMap) != 3 && (*context->stage3Event).enabled && !(*context->stage3IntroShown)) {
-            (*context->stage3IntroIndex) = 0;
-            (*context->stage3IntroShown) = true;
+        int areaIndex = currentMap - 1;
+        /* エリアイベントは、そのエリアに初めて入った瞬間だけ既存の会話表示で実行する。 */
+        if ((*context->inspectTarget) < 0 && (*context->dialogueIndex) < 0 &&
+            (*context->stage3IntroIndex) < 0 && context->areaEntryEvents != NULL &&
+            context->areaEntryShown != NULL && areaIndex >= 0 && areaIndex < RPG_STAGE_MAP_COUNT &&
+            (*context->stage).mapActive[areaIndex] && !context->areaEntryShown[areaIndex]) {
+            RpgStage3Event *areaEvent = &context->areaEntryEvents->entries[areaIndex];
+            context->areaEntryShown[areaIndex] = true;
+            if (areaEvent->inspect.enabled && areaEvent->inspect.functionCount > 0) {
+                if (context->activeEntryEvent != NULL) (*context->activeEntryEvent) = areaEvent;
+                (*context->inspectTarget) = 3;
+                (*context->inspectFunctionIndex) = 0;
+                (*context->inspectLineIndex) = 0;
+            }
         }
         (*context->previousMap) = currentMap;
+        bool isReferenceCollected = canReadReference && !referenceFolderTransfer.active &&
+                                   !IsReferenceFolderTarget(&(*context->stage), nearbyReferenceTarget) &&
+                                   IsKeyPressed(KEY_G) &&
+                                   (*context->inspectTarget) < 0 && (*context->dialogueIndex) < 0 &&
+                                   (*context->stage3IntroIndex) < 0 && !(*context->isReferenceTextOpen);
+        if (isReferenceCollected && RpgReferenceObjects_CollectTarget(&(*context->stage),
+                                                                       &(*context->referenceDrops),
+                                                                       nearbyReferenceTarget)) {
+            snprintf(itemMessage, (size_t)context->itemMessageSize, "File acquired: %s",
+                     context->referenceFileName);
+            GameFont_AddText(itemMessage);
+            (*context->itemMessageTimer) = 2.0f;
+            (*context->selectedReferencePointerTarget).kind = RPG_REFERENCE_TARGET_NONE;
+            (*context->isReferencePointerFeedbackSuppressed) = true;
+            canReadReference = false;
+            nearbyReferenceTarget.kind = RPG_REFERENCE_TARGET_NONE;
+        }
+        if (canStoreReference && !referenceFolderTransfer.active && IsKeyPressed(KEY_P) &&
+            (*context->inspectTarget) < 0 && (*context->dialogueIndex) < 0 &&
+            (*context->stage3IntroIndex) < 0 && !(*context->isReferenceTextOpen) &&
+            StartReferenceFolderTransfer(context, nearbyFolderTarget)) {
+            (*context->selectedReferencePointerTarget).kind = RPG_REFERENCE_TARGET_NONE;
+            (*context->isReferencePointerFeedbackSuppressed) = true;
+        }
         bool isReferenceCloseClicked = (*context->isReferenceTextOpen) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
-                                       CheckCollisionPointRec(GetMousePosition(), referenceTextCloseButton);
+                                       CheckCollisionPointRec(RpgViewport_GetMousePosition(), referenceTextCloseButton);
         if (isReferenceCloseClicked) {
             (*context->isReferenceTextOpen) = false;
         } else if (IsKeyPressed(KEY_E)) {
             if ((*context->isReferenceTextOpen)) {
                 // ファイル表示も会話と同じく、Eで閉じるまでプレイヤー操作を止める。
                 (*context->isReferenceTextOpen) = false;
-            } else if ((*context->inspectTarget) >= 0 && !(*context->isInspectMoveRunning)) {
-                const RpgInspect *activeInspect = (*context->inspectTarget) == 2 ? &(*context->zipper).inspect : &(*context->inspect);
-                if (activeInspect->functions[(*context->inspectFunctionIndex)].type == RPG_INSPECT_DIALOGUE) {
+            } else if ((*context->inspectTarget) >= 0) {
+                const RpgInspect *activeInspect = GetRuntimeActiveInspect(context);
+                if ((*context->inspectFunctionIndex) < 0 ||
+                    (*context->inspectFunctionIndex) >= activeInspect->functionCount) {
+                    CompleteRuntimeInspect(context);
+                } else if (activeInspect->functions[(*context->inspectFunctionIndex)].type == RPG_INSPECT_DIALOGUE) {
                     (*context->inspectLineIndex)++;
                     if ((*context->inspectLineIndex) >= activeInspect->functions[(*context->inspectFunctionIndex)].dialogue.lineCount) {
                         (*context->inspectFunctionIndex)++;
                         (*context->inspectLineIndex) = 0;
-                        if ((*context->inspectFunctionIndex) >= activeInspect->functionCount) {
-                            if ((*context->inspectTarget) == 2) {
-                                (*context->zipperFollowsPlayer) = true;
-                                (*context->isZipperControllable) = true;
-                                (*context->zipperInspectCompleted) = true;
-                            } else (*context->npcInspectCompleted) = true;
-                            (*context->inspectTarget) = -1;
-                            (*context->inspectFunctionIndex) = -1;
-                            (*context->inspectLineIndex) = -1;
-                        }
+                        if ((*context->inspectFunctionIndex) >= activeInspect->functionCount)
+                            CompleteRuntimeInspect(context);
                     }
                 }
-            } else if ((*context->stage3IntroIndex) >= 0) {
-                (*context->stage3IntroIndex)++;
-                if ((*context->stage3IntroIndex) >= (*context->stage3Event).dialogue.lineCount) (*context->stage3IntroIndex) = -1;
             } else
             if ((*context->dialogueIndex) >= 0) {
                 (*context->dialogueIndex)++;
@@ -1007,10 +1695,13 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
             } else if (canTalk) {
                 (*context->dialogueIndex) = 0;
             } else if (canReadReference) {
-                OpenTextFile(RpgReferenceObjects_GetTargetPath(&(*context->stage), &(*context->referenceDrops),
-                                                                nearbyReferenceTarget),
-                             context->referenceFileName, (size_t)context->referenceFileNameSize, context->referenceText,
-                             (size_t)context->referenceTextSize, &(*context->isReferenceTextOpen));
+                const char *referencePath = RpgReferenceObjects_GetTargetPath(&(*context->stage), &(*context->referenceDrops),
+                                                                                nearbyReferenceTarget);
+                if (IsReferenceFolderTarget(&(*context->stage), nearbyReferenceTarget))
+                    RpgExplorerLauncher_OpenDirectory(referencePath);
+                else OpenTextFile(referencePath, context->referenceFileName, (size_t)context->referenceFileNameSize,
+                                  context->referenceText, (size_t)context->referenceTextSize,
+                                  &(*context->isReferenceTextOpen));
                 (*context->selectedReferencePointerTarget).kind = RPG_REFERENCE_TARGET_NONE;
                 (*context->isReferencePointerFeedbackSuppressed) = true;
             }
@@ -1027,12 +1718,15 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
             (*context->inspectFunctionIndex) = 0;
             (*context->inspectLineIndex) = 0;
         }
+        /* 入力・エリア侵入で開始または更新された列を同一フレームで実行する。
+           時間を設定したFunctionだけが次フレーム以降へ継続する。 */
+        AdvanceRuntimeInspectFunctions(context, 0.0f);
         UpdateRpgCamera(&(*context->camera), (*context->player).position.x, (*context->cameraFollowsPlayer));
         RpgReferenceTarget hoveredReferencePointerTarget = { .kind = RPG_REFERENCE_TARGET_NONE,
                                                                .row = -1, .column = -1, .dropIndex = -1 };
         bool isReferencePointerHovered = false;
         if (!(*context->isReferenceTextOpen) && (*context->inspectTarget) < 0 && (*context->dialogueIndex) < 0 && (*context->stage3IntroIndex) < 0) {
-            Vector2 pointerWorldPosition = GetScreenToWorld2D(GetMousePosition(), (*context->camera));
+            Vector2 pointerWorldPosition = GetScreenToWorld2D(RpgViewport_GetMousePosition(), (*context->camera));
             isReferencePointerHovered = !(*context->isReferenceDragActive) &&
                                         RpgReferenceObjects_FindTarget(&(*context->stage), &(*context->referenceDrops),
                                                                        pointerWorldPosition,
@@ -1042,10 +1736,13 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
                 if (isReferencePointerHovered) {
                     if ((*context->lastReferencePointerClickTime) >= 0.0 &&
                         GetTime() - (*context->lastReferencePointerClickTime) <= 0.35) {
-                        OpenTextFile(RpgReferenceObjects_GetTargetPath(&(*context->stage), &(*context->referenceDrops),
-                                                                        hoveredReferencePointerTarget),
-                                     context->referenceFileName, (size_t)context->referenceFileNameSize,
-                                     context->referenceText, (size_t)context->referenceTextSize, &(*context->isReferenceTextOpen));
+                        const char *referencePath = RpgReferenceObjects_GetTargetPath(&(*context->stage), &(*context->referenceDrops),
+                                                                                        hoveredReferencePointerTarget);
+                        if (IsReferenceFolderTarget(&(*context->stage), hoveredReferencePointerTarget))
+                            RpgExplorerLauncher_OpenDirectory(referencePath);
+                        else OpenTextFile(referencePath, context->referenceFileName,
+                                          (size_t)context->referenceFileNameSize, context->referenceText,
+                                          (size_t)context->referenceTextSize, &(*context->isReferenceTextOpen));
                         (*context->isReferencePointerPressed) = false;
                         (*context->lastReferencePointerClickTime) = -1.0;
                     } else {
@@ -1094,7 +1791,7 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
         bool isZipperPointerHovered = false;
         if (((*context->zipperFollowsPlayer) || (*context->isZipperAttachedToBlock) || (*context->attachedDataShotIndex) >= 0) && (*context->inspectTarget) < 0 && (*context->dialogueIndex) < 0 &&
             (*context->stage3IntroIndex) < 0 && !(*context->isReferenceTextOpen)) {
-            Vector2 pointerWorldPosition = GetScreenToWorld2D(GetMousePosition(), (*context->camera));
+            Vector2 pointerWorldPosition = GetScreenToWorld2D(RpgViewport_GetMousePosition(), (*context->camera));
             Rectangle zipperBounds = RpgZipper_GetSpriteBounds(&(*context->zipper).character, 380.0f);
             isZipperPointerHovered = CheckCollisionPointRec(pointerWorldPosition, zipperBounds);
             if (!isZipperPointerHovered) (*context->isZipperPointerFeedbackSuppressed) = false;
@@ -1115,8 +1812,14 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
         } else {
             zipperPointerSelected = false;
         }
+        const RpgStage3Event *activeEntryEvent = context->stage3Event;
+        if (context->activeEntryEvent != NULL && (*context->activeEntryEvent) != NULL)
+            activeEntryEvent = *context->activeEntryEvent;
+        RpgCharacterAnimation playerAnimation = RPG_CHARACTER_ANIMATION_AUTOMATIC;
+        if (HasRunningPlayerWalkMove())
+            playerAnimation = RPG_CHARACTER_ANIMATION_WALK;
         DrawRpgWorld(&(*context->player), &(*context->npc), &(*context->stage), (*context->camera), (*context->cameraFollowsPlayer), currentMap, canTalk,
-                     &(*context->dialogue), (*context->dialogueIndex), (*context->stage3IntroIndex), &(*context->stage3Event), &(*context->zipper), zipperTexture, fileTexture, &(*context->inspect), &(*context->zipper).inspect,
+                     &(*context->dialogue), (*context->dialogueIndex), (*context->stage3IntroIndex), activeEntryEvent, &(*context->zipper), zipperTexture, fileTexture, &(*context->inspect), &(*context->zipper).inspect,
                      (*context->inspectTarget), (*context->inspectFunctionIndex), (*context->inspectLineIndex), false, 0.0f, RPG_INSPECT_MOVE_PLAYER,
                      (*context->npcInspectCompleted), (*context->zipperInspectCompleted),
                      isZipperPointerHovered && !(*context->isZipperPointerFeedbackSuppressed), zipperPointerSelected,
@@ -1126,7 +1829,9 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
                      hoveredReferencePointerTarget, (*context->selectedReferencePointerTarget),
                      (*context->isReferencePointerFeedbackSuppressed), (*context->isReferenceDragActive),
                      (*context->draggedReferenceTarget), (*context->referenceDragPosition),
-                     (*context->zipperAnimationElapsed), context->showStopButton, context->scene);
+                     (*context->zipperAnimationElapsed), context->stageBackground,
+                     context->layout->backgroundBrightness, context->layout->blockBrightness,
+                     (*context->isZipperLaunched), playerAnimation, context->showStopButton, context->scene);
     }
 
 #undef fileTexture

@@ -1,6 +1,7 @@
 // 依存する自プロジェクト内ファイル: rpg_stage_storage.h
 // 役割: Settings/Stage/Stage番号の実フォルダを扱い、各ステージ設定を読み書きする。
 #include "rpg_stage_storage.h"
+#include "rpg_block_inventory.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -14,8 +15,18 @@
 
 static bool GetStageRootPath(char *path, int size)
 {
-    return snprintf(path, (size_t)size, "%s../assets/Settings/Stage", GetApplicationDirectory()) > 0;
+    const char *suffix = RpgStageStorage_GetDomain() == RPG_STAGE_STORAGE_GAME_PACKAGE ? "Stage" : "../assets/Settings/Stage";
+    return snprintf(path, (size_t)size, "%s%s", GetApplicationDirectory(), suffix) > 0;
 }
+
+static RpgStageStorageDomain storageDomain = RPG_STAGE_STORAGE_SETTINGS;
+static bool GetStageDirectoryPath(int stageNumber, char *path, int size);
+
+void RpgStageStorage_SetDomain(RpgStageStorageDomain domain)
+{ storageDomain = domain; }
+
+RpgStageStorageDomain RpgStageStorage_GetDomain(void)
+{ return storageDomain; }
 
 static bool GetCatalogPath(char *path, int size)
 {
@@ -35,6 +46,30 @@ static bool CreateDirectoryPath(const char *path)
     (void)path;
     return false;
 #endif
+}
+
+/* UTF-8 のステージ内パスを Windows のワイド文字 API 経由で開く。日本語名の参照ファイルも
+   パッケージ化・展開できるよう、アーカイブ入出力はこの入口を必ず使う。 */
+static FILE *OpenUtf8File(const char *path, const wchar_t *mode)
+{
+#ifdef _WIN32
+    wchar_t widePath[RPG_STAGE_PATH_LENGTH];
+    if (path == NULL || mode == NULL ||
+        MultiByteToWideChar(CP_UTF8, 0, path, -1, widePath, RPG_STAGE_PATH_LENGTH) <= 0) return NULL;
+    return _wfopen(widePath, mode);
+#else
+    (void)path;
+    (void)mode;
+    return NULL;
+#endif
+}
+
+static bool IsSafeFolderName(const char *name)
+{
+    if (name == NULL || name[0] == '\0' || strlen(name) >= 120) return false;
+    for (const unsigned char *cursor = (const unsigned char *)name; *cursor != '\0'; cursor++)
+        if (*cursor < 0x20 || strchr("\\/:*?\"<>|", *cursor) != NULL) return false;
+    return strcmp(name, ".") != 0 && strcmp(name, "..") != 0;
 }
 
 static void RemoveDirectoryTree(const char *directory)
@@ -65,6 +100,183 @@ static void RemoveDirectoryTree(const char *directory)
 #endif
 }
 
+/* 静的な設計データだけを実行用パッケージへ複製する。旧 build は実行中データなので除外する。 */
+static bool WriteStaticPackageTree(const char *source, const char *relativePath, FILE *package)
+{
+#ifdef _WIN32
+    char search[RPG_STAGE_PATH_LENGTH];
+    wchar_t wideSearch[RPG_STAGE_PATH_LENGTH];
+    WIN32_FIND_DATAW data;
+    HANDLE handle;
+    if (package == NULL || snprintf(search, sizeof(search), "%s\\*", source) <= 0 ||
+        MultiByteToWideChar(CP_UTF8, 0, search, -1, wideSearch, RPG_STAGE_PATH_LENGTH) <= 0) return false;
+    handle = FindFirstFileW(wideSearch, &data);
+    if (handle == INVALID_HANDLE_VALUE) return true;
+    do {
+        char name[512], child[RPG_STAGE_PATH_LENGTH], childRelative[RPG_STAGE_PATH_LENGTH];
+        if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0 ||
+            WideCharToMultiByte(CP_UTF8, 0, data.cFileName, -1, name, (int)sizeof(name), NULL, NULL) <= 0 ||
+            _stricmp(name, "build") == 0 ||
+            snprintf(child, sizeof(child), "%s\\%s", source, name) <= 0 ||
+            snprintf(childRelative, sizeof(childRelative), "%s%s%s", relativePath,
+                     relativePath[0] == '\0' ? "" : "\\", name) <= 0) continue;
+        if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            if (!WriteStaticPackageTree(child, childRelative, package)) { FindClose(handle); return false; }
+        } else {
+            FILE *input = OpenUtf8File(child, L"rb");
+            long length;
+            char buffer[4096];
+            size_t readCount;
+            if (input == NULL || fseek(input, 0, SEEK_END) != 0 || (length = ftell(input)) < 0 ||
+                fseek(input, 0, SEEK_SET) != 0 || fprintf(package, "FILE %u %ld\n", (unsigned)strlen(childRelative), length) < 0 ||
+                fwrite(childRelative, 1, strlen(childRelative), package) != strlen(childRelative)) { if (input != NULL) fclose(input); FindClose(handle); return false; }
+            while ((readCount = fread(buffer, 1, sizeof(buffer), input)) > 0)
+                if (fwrite(buffer, 1, readCount, package) != readCount) { fclose(input); FindClose(handle); return false; }
+            fclose(input);
+        }
+    } while (FindNextFileW(handle, &data) != 0);
+    FindClose(handle);
+    return true;
+#else
+    (void)source; (void)relativePath; (void)package;
+    return false;
+#endif
+}
+
+static bool EnsurePackageParentDirectories(const char *path)
+{
+    char parent[RPG_STAGE_PATH_LENGTH];
+    if (snprintf(parent, sizeof(parent), "%s", path) <= 0) return false;
+    for (char *cursor = parent; *cursor != '\0'; cursor++) {
+        if (*cursor != '\\') continue;
+        *cursor = '\0';
+        if (!CreateDirectoryPath(parent)) { *cursor = '\\'; return false; }
+        *cursor = '\\';
+    }
+    return true;
+}
+
+static bool ExtractStaticPackage(int stageNumber)
+{
+    char root[RPG_STAGE_PATH_LENGTH], name[RPG_STAGE_NAME_LENGTH], packagePath[RPG_STAGE_PATH_LENGTH], target[RPG_STAGE_PATH_LENGTH];
+    FILE *package;
+    if (snprintf(root, sizeof(root), "%sStage\\game", GetApplicationDirectory()) <= 0) return false;
+    RpgStageCatalog_GetName(stageNumber, name, (int)sizeof(name));
+    if (snprintf(packagePath, sizeof(packagePath), "%s\\%s\\stage.package", root, name) <= 0 ||
+        snprintf(target, sizeof(target), "%s\\%s\\static", root, name) <= 0 ||
+        (package = OpenUtf8File(packagePath, L"rb")) == NULL) return false;
+    RemoveDirectoryTree(target);
+    if (!CreateDirectoryPath(target)) { fclose(package); return false; }
+    for (;;) {
+        unsigned pathLength = 0;
+        long length = 0;
+        int first = fgetc(package);
+        if (first == EOF || first == 'E') break;
+        ungetc(first, package);
+        if (fscanf(package, "FILE %u %ld\n", &pathLength, &length) != 2 || pathLength == 0 || pathLength >= RPG_STAGE_PATH_LENGTH || length < 0) { fclose(package); return false; }
+        char relative[RPG_STAGE_PATH_LENGTH], destination[RPG_STAGE_PATH_LENGTH], buffer[4096];
+        FILE *output;
+        if (fread(relative, 1, pathLength, package) != pathLength) { fclose(package); return false; }
+        relative[pathLength] = '\0';
+        if (snprintf(destination, sizeof(destination), "%s\\%s", target, relative) <= 0 || !EnsurePackageParentDirectories(destination) ||
+            (output = OpenUtf8File(destination, L"wb")) == NULL) { fclose(package); return false; }
+        long remaining = length;
+        while (remaining > 0) {
+            size_t chunk = remaining > (long)sizeof(buffer) ? sizeof(buffer) : (size_t)remaining;
+            if (fread(buffer, 1, chunk, package) != chunk || fwrite(buffer, 1, chunk, output) != chunk) { fclose(output); fclose(package); return false; }
+            remaining -= (long)chunk;
+        }
+        fclose(output);
+    }
+    fclose(package);
+    return true;
+}
+
+bool RpgStageStorage_PublishStage(int stageNumber)
+{
+    char source[RPG_STAGE_PATH_LENGTH], packageRoot[RPG_STAGE_PATH_LENGTH], packageStage[RPG_STAGE_PATH_LENGTH];
+    char target[RPG_STAGE_PATH_LENGTH], temporary[RPG_STAGE_PATH_LENGTH];
+    RpgStageStorageDomain previous = storageDomain;
+    bool result;
+    storageDomain = RPG_STAGE_STORAGE_SETTINGS;
+    if (!GetStageDirectoryPath(stageNumber, source, (int)sizeof(source))) { storageDomain = previous; return false; }
+    storageDomain = RPG_STAGE_STORAGE_GAME_PACKAGE;
+    if (!GetStageRootPath(packageRoot, (int)sizeof(packageRoot))) { storageDomain = previous; return false; }
+    RpgStageCatalog_GetName(stageNumber, packageStage, (int)sizeof(packageStage));
+    if (!CreateDirectoryPath(packageRoot) ||
+        snprintf(target, sizeof(target), "%s\\game", packageRoot) <= 0 ||
+        !CreateDirectoryPath(target) ||
+        snprintf(target, sizeof(target), "%s\\game\\%s", packageRoot, packageStage) <= 0 ||
+        !CreateDirectoryPath(target) || snprintf(target, sizeof(target), "%s\\game\\%s\\stage.package", packageRoot, packageStage) <= 0 ||
+        snprintf(temporary, sizeof(temporary), "%s.tmp", target) <= 0) {
+        storageDomain = previous; return false;
+    }
+    {
+        wchar_t wideTemporary[RPG_STAGE_PATH_LENGTH], wideTarget[RPG_STAGE_PATH_LENGTH];
+        FILE *package;
+        if (MultiByteToWideChar(CP_UTF8, 0, temporary, -1, wideTemporary, RPG_STAGE_PATH_LENGTH) <= 0 ||
+            MultiByteToWideChar(CP_UTF8, 0, target, -1, wideTarget, RPG_STAGE_PATH_LENGTH) <= 0) {
+            storageDomain = previous;
+            return false;
+        }
+        DeleteFileW(wideTemporary);
+        package = OpenUtf8File(temporary, L"wb");
+        if (package == NULL) result = false;
+        else {
+            result = WriteStaticPackageTree(source, "", package) && fputs("END\n", package) >= 0;
+            if (fclose(package) != 0) result = false;
+        }
+        /* 完成済みの一時パッケージだけを置換する。失敗しても前回の本編用パッケージは壊さない。 */
+        if (result) result = MoveFileExW(wideTemporary, wideTarget,
+                                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+        if (!result) DeleteFileW(wideTemporary);
+    }
+    RpgStageStorage_ClearPackagedStaticStage(stageNumber);
+    storageDomain = previous;
+    return result;
+}
+
+bool RpgStageStorage_PublishCatalog(const RpgStageCatalog *catalog)
+{
+    char source[RPG_STAGE_PATH_LENGTH], destination[RPG_STAGE_PATH_LENGTH];
+    RpgStageStorageDomain previous = storageDomain;
+    bool result = false;
+    (void)catalog;
+    storageDomain = RPG_STAGE_STORAGE_SETTINGS;
+    if (!GetCatalogPath(source, (int)sizeof(source))) goto finish;
+    storageDomain = RPG_STAGE_STORAGE_GAME_PACKAGE;
+    if (!GetCatalogPath(destination, (int)sizeof(destination))) goto finish;
+#ifdef _WIN32
+    {
+        wchar_t wideSource[RPG_STAGE_PATH_LENGTH], wideDestination[RPG_STAGE_PATH_LENGTH], wideTemporary[RPG_STAGE_PATH_LENGTH];
+        char temporary[RPG_STAGE_PATH_LENGTH];
+        char root[RPG_STAGE_PATH_LENGTH];
+        if (GetStageRootPath(root, (int)sizeof(root)) && CreateDirectoryPath(root) &&
+            MultiByteToWideChar(CP_UTF8, 0, source, -1, wideSource, RPG_STAGE_PATH_LENGTH) > 0 &&
+            MultiByteToWideChar(CP_UTF8, 0, destination, -1, wideDestination, RPG_STAGE_PATH_LENGTH) > 0 &&
+            snprintf(temporary, sizeof(temporary), "%s.tmp", destination) > 0 &&
+            MultiByteToWideChar(CP_UTF8, 0, temporary, -1, wideTemporary, RPG_STAGE_PATH_LENGTH) > 0) {
+            DeleteFileW(wideTemporary);
+            result = CopyFileW(wideSource, wideTemporary, FALSE) != 0 &&
+                     MoveFileExW(wideTemporary, wideDestination,
+                                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+            if (!result) DeleteFileW(wideTemporary);
+        }
+    }
+#endif
+finish:
+    storageDomain = previous;
+    return result;
+}
+
+void RpgStageStorage_ClearPackagedStaticStage(int stageNumber)
+{
+    char root[RPG_STAGE_PATH_LENGTH], name[RPG_STAGE_NAME_LENGTH], path[RPG_STAGE_PATH_LENGTH];
+    if (stageNumber <= 0 || snprintf(root, sizeof(root), "%sStage\\game", GetApplicationDirectory()) <= 0) return;
+    RpgStageCatalog_GetName(stageNumber, name, (int)sizeof(name));
+    if (snprintf(path, sizeof(path), "%s\\%s\\static", root, name) > 0) RemoveDirectoryTree(path);
+}
+
 void RpgStageCatalog_GetName(int stageNumber, char *name, int size)
 {
     if (name != NULL && size > 0) snprintf(name, (size_t)size, "Stage%d", stageNumber);
@@ -75,7 +287,18 @@ static bool GetStageDirectoryPath(int stageNumber, char *path, int size)
     char root[RPG_STAGE_PATH_LENGTH], name[RPG_STAGE_NAME_LENGTH];
     if (stageNumber <= 0 || path == NULL || size <= 0 || !GetStageRootPath(root, (int)sizeof(root))) return false;
     RpgStageCatalog_GetName(stageNumber, name, (int)sizeof(name));
-    return snprintf(path, (size_t)size, "%s\\%s", root, name) > 0;
+    return RpgStageStorage_GetDomain() == RPG_STAGE_STORAGE_GAME_PACKAGE ?
+           snprintf(path, (size_t)size, "%s\\game\\%s\\static", root, name) > 0 :
+           snprintf(path, (size_t)size, "%s\\%s", root, name) > 0;
+}
+
+bool RpgStageStorage_GetRuntimePath(int stageNumber, RpgStageRuntimeKind kind, char *path, int size)
+{
+    char name[RPG_STAGE_NAME_LENGTH];
+    const char *folder = kind == RPG_STAGE_RUNTIME_EDITOR ? "editor" : "game";
+    if (stageNumber <= 0 || path == NULL || size <= 0) return false;
+    RpgStageCatalog_GetName(stageNumber, name, (int)sizeof(name));
+    return snprintf(path, (size_t)size, "%sStage\\%s\\%s", GetApplicationDirectory(), folder, name) > 0;
 }
 
 bool RpgStageStorage_GetFilePath(int stageNumber, const char *fileName, char *path, int size)
@@ -91,6 +314,163 @@ bool RpgStageStorage_EnsureStageDirectory(int stageNumber)
     return GetStageRootPath(root, (int)sizeof(root)) && CreateDirectoryPath(root) &&
            GetStageDirectoryPath(stageNumber, directory, (int)sizeof(directory)) &&
            CreateDirectoryPath(directory);
+}
+
+bool RpgStageStorage_CreateBuildFolder(int stageNumber, const char *name, char *path, int size)
+{
+    char buildPath[RPG_STAGE_PATH_LENGTH];
+    if (path == NULL || size <= 0 || !IsSafeFolderName(name) || !RpgStageStorage_EnsureStageDirectory(stageNumber) ||
+        !RpgStageStorage_GetFilePath(stageNumber, "folder_defs", buildPath, (int)sizeof(buildPath)) ||
+        !CreateDirectoryPath(buildPath) || snprintf(path, (size_t)size, "%s\\%s", buildPath, name) <= 0) return false;
+    return CreateDirectoryPath(path);
+}
+
+bool RpgStageStorage_RenameBuildFolder(int stageNumber, const char *oldPath, const char *name,
+                                       char *newPath, int newPathSize)
+{
+#ifdef _WIN32
+    char buildPath[RPG_STAGE_PATH_LENGTH], destination[RPG_STAGE_PATH_LENGTH];
+    wchar_t oldWide[RPG_STAGE_PATH_LENGTH], newWide[RPG_STAGE_PATH_LENGTH];
+    if (oldPath == NULL || oldPath[0] == '\0' || !IsSafeFolderName(name) ||
+        !RpgStageStorage_EnsureStageDirectory(stageNumber) ||
+        !RpgStageStorage_GetFilePath(stageNumber, "folder_defs", buildPath, (int)sizeof(buildPath)) ||
+        !CreateDirectoryPath(buildPath) ||
+        snprintf(destination, sizeof(destination), "%s\\%s", buildPath, name) <= 0) return false;
+    /* 同名の既存フォルダを誤って上書きしない。作成済みなら元と同一パスだけを許可する。 */
+    if (strcmp(oldPath, destination) == 0) {
+        if (newPath != NULL && newPathSize > 0) snprintf(newPath, (size_t)newPathSize, "%s", destination);
+        return true;
+    }
+    if (MultiByteToWideChar(CP_UTF8, 0, oldPath, -1, oldWide, RPG_STAGE_PATH_LENGTH) <= 0 ||
+        MultiByteToWideChar(CP_UTF8, 0, destination, -1, newWide, RPG_STAGE_PATH_LENGTH) <= 0) return false;
+    /* CreateBuildFolderが作った空フォルダを消してから、MoveFileで名前を変更する。 */
+    if (GetFileAttributesW(newWide) != INVALID_FILE_ATTRIBUTES) return false;
+    if (MoveFileW(oldWide, newWide) == 0) return false;
+    if (newPath != NULL && newPathSize > 0) snprintf(newPath, (size_t)newPathSize, "%s", destination);
+    return true;
+#else
+    (void)stageNumber; (void)oldPath; (void)name; (void)newPath; (void)newPathSize;
+    return false;
+#endif
+}
+
+/* Fileオブジェクトのコピー先はマスごとの専用フォルダに固定する。
+   コピーに成功してから旧フォルダを差し替えるため、選択元のファイルには一切変更を加えない。 */
+bool RpgStageStorage_CopyReferenceFileToBuild(int stageNumber, int row, int column,
+                                              const char *sourcePath, char *copiedPath, int copiedPathSize)
+{
+#ifdef _WIN32
+    char referenceRoot[RPG_STAGE_PATH_LENGTH];
+    char targetDirectory[RPG_STAGE_PATH_LENGTH];
+    char temporaryPath[RPG_STAGE_PATH_LENGTH];
+    char destinationPath[RPG_STAGE_PATH_LENGTH];
+    const char *fileName;
+    wchar_t wideSource[RPG_STAGE_PATH_LENGTH];
+    wchar_t wideTemporary[RPG_STAGE_PATH_LENGTH];
+    wchar_t wideDestination[RPG_STAGE_PATH_LENGTH];
+    DWORD attributes;
+
+    if (copiedPath == NULL || copiedPathSize <= 0 || sourcePath == NULL || sourcePath[0] == '\0' ||
+        row < 0 || row >= RPG_STAGE_ROWS || column < 0 || column >= RPG_STAGE_WORLD_COLUMNS ||
+        !RpgStageStorage_EnsureStageDirectory(stageNumber) ||
+        !RpgStageStorage_GetFilePath(stageNumber, "reference_files", referenceRoot, (int)sizeof(referenceRoot)) ||
+        !CreateDirectoryPath(referenceRoot)) return false;
+
+    if (MultiByteToWideChar(CP_UTF8, 0, sourcePath, -1, wideSource, RPG_STAGE_PATH_LENGTH) <= 0) return false;
+    attributes = GetFileAttributesW(wideSource);
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) return false;
+
+    fileName = strrchr(sourcePath, '\\');
+    if (fileName == NULL) fileName = strrchr(sourcePath, '/');
+    fileName = fileName == NULL ? sourcePath : fileName + 1;
+    if (fileName[0] == '\0') return false;
+
+    if (snprintf(targetDirectory, sizeof(targetDirectory), "%s\\reference_r%02d_c%03d",
+                 referenceRoot, row, column) <= 0 ||
+        snprintf(temporaryPath, sizeof(temporaryPath), "%s\\.reference_r%02d_c%03d.tmp",
+                 referenceRoot, row, column) <= 0 ||
+        snprintf(destinationPath, sizeof(destinationPath), "%s\\%s", targetDirectory, fileName) <= 0 ||
+        MultiByteToWideChar(CP_UTF8, 0, temporaryPath, -1, wideTemporary, RPG_STAGE_PATH_LENGTH) <= 0 ||
+        MultiByteToWideChar(CP_UTF8, 0, destinationPath, -1, wideDestination, RPG_STAGE_PATH_LENGTH) <= 0) return false;
+
+    /* 一時ファイルへのコピーが成功した場合だけ、既存のコピーを置換する。 */
+    DeleteFileW(wideTemporary);
+    if (CopyFileW(wideSource, wideTemporary, FALSE) == 0) return false;
+    RemoveDirectoryTree(targetDirectory);
+    if (!CreateDirectoryPath(targetDirectory) || MoveFileExW(wideTemporary, wideDestination,
+                                                               MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == 0) {
+        DeleteFileW(wideTemporary);
+        return false;
+    }
+    snprintf(copiedPath, (size_t)copiedPathSize, "%s", destinationPath);
+    return true;
+#else
+    (void)stageNumber; (void)row; (void)column; (void)sourcePath; (void)copiedPath; (void)copiedPathSize;
+    return false;
+#endif
+}
+
+/* Play停止時はマップ状態だけ戻るため、格納済みFileの元コピーが消える場合がある。
+   File選択元であるassets/Filesから、不足した実行用コピーだけをPlay開始前に復元する。 */
+bool RpgStageStorage_RepairReferenceFileCopies(int stageNumber, RpgStage *stage)
+{
+#ifdef _WIN32
+    char fallbackPath[RPG_STAGE_PATH_LENGTH];
+    char repairedPath[RPG_STAGE_PATH_LENGTH];
+    if (stage == NULL || stageNumber <= 0) return true;
+    for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0;
+         column < RPG_STAGE_WORLD_COLUMNS; column++) {
+        const char *currentPath;
+        const char *fileName;
+        wchar_t wideCurrent[RPG_STAGE_PATH_LENGTH];
+        DWORD attributes;
+        if (stage->blocks[row][column] != RPG_BLOCK_REFERENCE_FILE) continue;
+        currentPath = RpgStage_GetReferencePathAtCell(stage, row, column);
+        if (currentPath[0] == '\0' ||
+            MultiByteToWideChar(CP_UTF8, 0, currentPath, -1, wideCurrent,
+                                RPG_STAGE_PATH_LENGTH) <= 0) continue;
+        attributes = GetFileAttributesW(wideCurrent);
+        if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) continue;
+        fileName = strrchr(currentPath, '\\');
+        if (fileName == NULL) fileName = strrchr(currentPath, '/');
+        fileName = fileName == NULL ? currentPath : fileName + 1;
+        if (fileName[0] == '\0' ||
+            snprintf(fallbackPath, sizeof(fallbackPath), "%s../assets/Files/%s",
+                     GetApplicationDirectory(), fileName) <= 0 ||
+            !RpgStageStorage_CopyReferenceFileToBuild(stageNumber, row, column, fallbackPath,
+                                                       repairedPath, (int)sizeof(repairedPath)) ||
+            !RpgStage_SetReferencePathAtCell(stage, row, column, repairedPath)) continue;
+    }
+    return true;
+#else
+    (void)stageNumber;
+    (void)stage;
+    return true;
+#endif
+}
+
+void RpgStageStorage_RemoveReferenceFileCopy(int stageNumber, const char *copiedPath)
+{
+#ifdef _WIN32
+    char buildPath[RPG_STAGE_PATH_LENGTH];
+    char referenceRoot[RPG_STAGE_PATH_LENGTH];
+    char directory[RPG_STAGE_PATH_LENGTH];
+    char *separator;
+    size_t rootLength;
+    if (copiedPath == NULL || copiedPath[0] == '\0' ||
+        !RpgStageStorage_GetFilePath(stageNumber, "reference_files", buildPath, (int)sizeof(buildPath)) ||
+        snprintf(referenceRoot, sizeof(referenceRoot), "%s\\reference_files\\reference_r", buildPath) <= 0) return;
+    rootLength = strlen(referenceRoot);
+    /* 生成済みコピー専用の接頭辞以外には触れず、外部ファイルを削除しない。 */
+    if (_strnicmp(copiedPath, referenceRoot, rootLength) != 0) return;
+    if (snprintf(directory, sizeof(directory), "%s", copiedPath) <= 0 ||
+        (separator = strrchr(directory, '\\')) == NULL ||
+        _strnicmp(directory, referenceRoot, rootLength) != 0) return;
+    *separator = '\0';
+    RemoveDirectoryTree(directory);
+#else
+    (void)stageNumber; (void)copiedPath;
+#endif
 }
 
 static bool GetLegacyFilePath(const char *fileName, char *path, int size)
@@ -226,7 +606,7 @@ bool RpgStageCatalog_Save(RpgStageCatalog *catalog)
             RemoveDirectoryTree(folder);
     }
     SetCatalogSavedState(catalog);
-    return true;
+    return RpgStageStorage_GetDomain() != RPG_STAGE_STORAGE_SETTINGS || RpgStageStorage_PublishCatalog(catalog);
 }
 
 static bool LoadFilePath(int stageNumber, const char *fileName, char *path, int size)
@@ -235,14 +615,38 @@ static bool LoadFilePath(int stageNumber, const char *fileName, char *path, int 
     return stageNumber == 1 && GetLegacyFilePath(fileName, path, size);
 }
 
+/* 実行版は Settings を参照しない。保存済みの参照先をパッケージ内の静的コピーへ差し替える。 */
+static void RebasePackagedReferenceFiles(int stageNumber, RpgStage *stage)
+{
+    char root[RPG_STAGE_PATH_LENGTH];
+    if (stage == NULL || RpgStageStorage_GetDomain() != RPG_STAGE_STORAGE_GAME_PACKAGE ||
+        !RpgStageStorage_GetFilePath(stageNumber, "reference_files", root, (int)sizeof(root))) return;
+    for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
+        const char *source;
+        const char *fileName;
+        char target[RPG_STAGE_REFERENCE_PATH_LENGTH];
+        if (stage->blocks[row][column] != RPG_BLOCK_REFERENCE_FILE) continue;
+        source = RpgStage_GetReferencePathAtCell(stage, row, column);
+        fileName = strrchr(source, '\\');
+        if (fileName == NULL) fileName = strrchr(source, '/');
+        fileName = fileName == NULL ? source : fileName + 1;
+        if (fileName[0] == '\0') continue;
+        if (snprintf(target, sizeof(target), "%s\\reference_r%02d_c%03d\\%s", root, row, column, fileName) > 0)
+            RpgStage_SetReferencePathAtCell(stage, row, column, target);
+    }
+}
+
 bool RpgStageStorage_LoadStage(int stageNumber, RpgStageData *data)
 {
     char path[RPG_STAGE_PATH_LENGTH];
     if (data == NULL || stageNumber <= 0) return false;
+    if (RpgStageStorage_GetDomain() == RPG_STAGE_STORAGE_GAME_PACKAGE)
+        (void)ExtractStaticPackage(stageNumber);
     data->layout = RpgLayout_Default();
     data->stage = RpgStage_Default();
     data->dialogue = RpgDialogue_Default();
     data->stage3Event = RpgStage3Event_Default();
+    RpgAreaEntryEvents_Initialize(&data->areaEntryEvents);
     data->npcInspectData = RpgInspect_Default("Inspect", "Nothing unusual here.");
     data->items = RpgItems_Default(); data->wires = RpgWires_Default();
     data->receivers = RpgReceivers_Default(); data->attachments = RpgAttachments_Default();
@@ -251,7 +655,17 @@ bool RpgStageStorage_LoadStage(int stageNumber, RpgStageData *data)
     LOAD_STAGE_FILE("rpg_layout.cfg", RpgLayout_Load, &data->layout);
     LOAD_STAGE_FILE("rpg_stage.cfg", RpgStage_Load, &data->stage);
     LOAD_STAGE_FILE("rpg_dialogue.txt", RpgDialogue_Load, &data->dialogue);
-    LOAD_STAGE_FILE("rpg_stage3_event.cfg", RpgStage3Event_Load, &data->stage3Event);
+    LOAD_STAGE_FILE("rpg_stage_entry_event.cfg", RpgStage3Event_Load, &data->stage3Event);
+    bool areaEntryEventsLoaded = false;
+    if (LoadFilePath(stageNumber, "rpg_area_entry_events.cfg", path, (int)sizeof(path)))
+        areaEntryEventsLoaded = RpgAreaEntryEvents_Load(path, &data->areaEntryEvents);
+    /* 旧「Area 3 dialogue」は、初回エリア入場イベントへ一度だけ移行する。 */
+    if (!areaEntryEventsLoaded && LoadFilePath(stageNumber, "rpg_stage3_event.cfg", path, (int)sizeof(path))) {
+        RpgStage3Event legacyAreaEvent = RpgStage3Event_Default();
+        int legacyAreaIndex = RpgStage_GetMapAtGrid(&data->stage, 2, 0);
+        if (legacyAreaIndex >= 0 && RpgStage3Event_Load(path, &legacyAreaEvent))
+            data->areaEntryEvents.entries[legacyAreaIndex] = legacyAreaEvent;
+    }
     LOAD_STAGE_FILE("rpg_inspect.cfg", RpgInspect_Load, &data->npcInspectData);
     LOAD_STAGE_FILE("rpg_items.cfg", RpgItems_Load, &data->items);
     LOAD_STAGE_FILE("rpg_wires.cfg", RpgWires_Load, &data->wires);
@@ -265,6 +679,7 @@ bool RpgStageStorage_LoadStage(int stageNumber, RpgStageData *data)
     RpgAttachments_MigrateLegacyButtons(&data->attachments, &data->stage);
     RpgAttachments_RemoveBroken(&data->attachments, &data->stage);
     RpgSignalBlocks_RemoveBroken(&data->signalBlocks, &data->stage);
+    RebasePackagedReferenceFiles(stageNumber, &data->stage);
     return true;
 }
 
@@ -275,10 +690,11 @@ bool RpgStageStorage_SaveStage(int stageNumber, const RpgStageData *data)
         !RpgStageStorage_EnsureStageDirectory(stageNumber)) return false;
 #define SAVE_STAGE_FILE(name, function, source) \
     (RpgStageStorage_GetFilePath(stageNumber, (name), path, (int)sizeof(path)) && function(path, (source)))
-    return SAVE_STAGE_FILE("rpg_layout.cfg", RpgLayout_Save, &data->layout) &&
+    bool saved = SAVE_STAGE_FILE("rpg_layout.cfg", RpgLayout_Save, &data->layout) &&
            SAVE_STAGE_FILE("rpg_stage.cfg", RpgStage_Save, &data->stage) &&
            SAVE_STAGE_FILE("rpg_dialogue.txt", RpgDialogue_Save, &data->dialogue) &&
-           SAVE_STAGE_FILE("rpg_stage3_event.cfg", RpgStage3Event_Save, &data->stage3Event) &&
+           SAVE_STAGE_FILE("rpg_stage_entry_event.cfg", RpgStage3Event_Save, &data->stage3Event) &&
+           SAVE_STAGE_FILE("rpg_area_entry_events.cfg", RpgAreaEntryEvents_Save, &data->areaEntryEvents) &&
            SAVE_STAGE_FILE("rpg_inspect.cfg", RpgInspect_Save, &data->npcInspectData) &&
            SAVE_STAGE_FILE("rpg_items.cfg", RpgItems_Save, &data->items) &&
            SAVE_STAGE_FILE("rpg_wires.cfg", RpgWires_Save, &data->wires) &&
@@ -287,4 +703,5 @@ bool RpgStageStorage_SaveStage(int stageNumber, const RpgStageData *data)
            SAVE_STAGE_FILE("rpg_signal_blocks.cfg", RpgSignalBlocks_Save, &data->signalBlocks) &&
            SAVE_STAGE_FILE("rpg_map_events.cfg", RpgMapEvents_Save, &data->mapEvents);
 #undef SAVE_STAGE_FILE
+    return saved && (RpgStageStorage_GetDomain() != RPG_STAGE_STORAGE_SETTINGS || RpgStageStorage_PublishStage(stageNumber));
 }

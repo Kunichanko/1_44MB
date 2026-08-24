@@ -1,5 +1,6 @@
-// 依存する自プロジェクト内ファイル: rpg_item.h
+// 依存する自プロジェクト内ファイル: rpg_item.h, rpg_stage.h
 #include "rpg_item.h"
+#include "rpg_stage.h"
 #include "rpg_stage.h"
 #include <stdio.h>
 #include <string.h>
@@ -49,6 +50,7 @@ bool RpgItems_RemoveAtPosition(RpgItems *items, Vector2 position, float distance
 void RpgItems_Draw(const RpgItems *items)
 {
     for (int index = 0; index < items->count; index++) if (!items->entries[index].collected)
-        DrawPoly(items->entries[index].position, 5, 15.0f, -90.0f, GOLD);
+        DrawPoly(RpgStage_SnapRenderPoint(items->entries[index].position), 5,
+                 RpgStage_SnapRenderCoordinate(15.0f), -90.0f, GOLD);
 }
 // 役割: マップ上のアイテムと、消滅物から引き継いだ File.png ドロップを管理する。

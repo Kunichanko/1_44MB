@@ -119,10 +119,11 @@ static void RpgReceivers_DrawWithOffset(const RpgReceivers *receivers, int first
     for (int index = 0; index < receivers->count; index++) {
         const RpgReceiver *receiver = &receivers->entries[index];
         if (receiver->cell.column < firstColumn || receiver->cell.column >= lastColumn) continue;
-        Vector2 anchor = RpgReceivers_GetAnchor(receiver, firstColumn);
+        Vector2 anchor = RpgStage_SnapRenderPoint(RpgReceivers_GetAnchor(receiver, firstColumn));
         Rectangle recess = receiver->side == RPG_GRID_SIDE_TOP || receiver->side == RPG_GRID_SIDE_BOTTOM ?
             (Rectangle){ anchor.x - 12.0f, anchor.y - 4.0f, 24.0f, 8.0f } :
             (Rectangle){ anchor.x - 4.0f, anchor.y - 12.0f, 8.0f, 24.0f };
+        recess = RpgStage_SnapRenderRectangle(recess);
         // ブロックの縁を掘り込んだように見せるため、外枠より暗い内側を描く。
         DrawRectangleRec(recess, DARKBROWN);
         DrawRectangleLinesEx(recess, 2.0f, GOLD);

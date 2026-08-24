@@ -24,6 +24,8 @@ Texture2D RpgExplorerShell_GetTexture(const RpgExplorerShellCache *cache, int sl
 Texture2D RpgExplorerShell_GetFolderTexture(const RpgExplorerShellCache *cache);
 // Windows Shellの実フォルダアイコンをraylib Textureとして取得する。呼び出し側でキャッシュして使う。
 Texture2D RpgExplorerShell_LoadFolderIconTexture(void);
+// Windows Shellの実ファイルアイコンをraylib Textureとして取得する。呼び出し側でキャッシュして使う。
+Texture2D RpgExplorerShell_LoadFileIconTexture(void);
 void RpgExplorerShell_Unload(RpgExplorerShellCache *cache);
 
 #endif

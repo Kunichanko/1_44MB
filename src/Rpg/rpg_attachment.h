@@ -20,8 +20,8 @@ typedef struct RpgAttachment {
     float dataSpeed;
     float dataInterval;
     bool dataPreviewEnabled;
-    // 実弾のフォルダ内容を見た目へ変換する係数。容量係数の単位は 1KB。
-    float sizePerFile;
+    // 実弾のファイルごとの増分。32pxマスの半分(16px)単位へ正規化する。
+    float sizePerFile; /* 8px（1マスの1/4）単位で正規化する。 */
     float speedPerKilobyte;
     // プレビュー専用の仮想フォルダ内容。実際のフォルダや実弾には影響しない。
     int previewFileCount;
@@ -55,6 +55,7 @@ bool RpgAttachments_MoveDataPathEndpoint(RpgAttachments *attachments, const RpgS
                                           int attachmentIndex, int row, int column);
 bool RpgAttachments_FindDataPathEndpoint(const RpgAttachments *attachments, int row, int column,
                                          int *attachmentIndex);
+// 支持ブロックと空気マスの境界にある取付基準点。描画・選択・当たり判定で共用する。
 Vector2 RpgAttachments_GetPosition(const RpgAttachment *attachment, int firstColumn);
 // 保存旗の土台ブロック上へ、キャラクターの足元基準で復帰させる座標を返す。
 Vector2 RpgAttachments_GetSaveFlagRespawnPosition(const RpgAttachment *attachment);

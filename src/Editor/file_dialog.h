@@ -6,7 +6,8 @@
 #include <stddef.h>
 
 bool FileDialog_SelectPng(char *destinationPath, size_t destinationPathSize);
-bool FileDialog_SelectText(char *destinationPath, size_t destinationPathSize,
+/* Reference File用: 種類を限定せず、選択した実ファイルのUTF-8パスを返す。 */
+bool FileDialog_SelectFile(char *destinationPath, size_t destinationPathSize,
                            const char *initialDirectory);
 
 #endif

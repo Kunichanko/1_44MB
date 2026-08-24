@@ -33,6 +33,7 @@ typedef struct RpgStageData {
     RpgStage stage;
     RpgDialogue dialogue;
     RpgStage3Event stage3Event;
+    RpgAreaEntryEvents areaEntryEvents;
     RpgInspect npcInspectData;
     RpgItems items;
     RpgWires wires;
@@ -41,6 +42,24 @@ typedef struct RpgStageData {
     RpgSignalBlocks signalBlocks;
     RpgMapEvents mapEvents;
 } RpgStageData;
+
+/* 保存先の役割。EDITOR は設計情報、GAME_PACKAGE は実行ファイルだけで使う配布済み静的情報。 */
+typedef enum RpgStageStorageDomain {
+    RPG_STAGE_STORAGE_SETTINGS = 0,
+    RPG_STAGE_STORAGE_GAME_PACKAGE
+} RpgStageStorageDomain;
+
+typedef enum RpgStageRuntimeKind {
+    RPG_STAGE_RUNTIME_GAME = 0,
+    RPG_STAGE_RUNTIME_EDITOR
+} RpgStageRuntimeKind;
+
+void RpgStageStorage_SetDomain(RpgStageStorageDomain domain);
+RpgStageStorageDomain RpgStageStorage_GetDomain(void);
+bool RpgStageStorage_GetRuntimePath(int stageNumber, RpgStageRuntimeKind kind, char *path, int size);
+bool RpgStageStorage_PublishStage(int stageNumber);
+bool RpgStageStorage_PublishCatalog(const RpgStageCatalog *catalog);
+void RpgStageStorage_ClearPackagedStaticStage(int stageNumber);
 
 bool RpgStageCatalog_Load(RpgStageCatalog *catalog);
 bool RpgStageCatalog_Save(RpgStageCatalog *catalog);
@@ -58,5 +77,15 @@ bool RpgStageStorage_LoadStage(int stageNumber, RpgStageData *data);
 bool RpgStageStorage_SaveStage(int stageNumber, const RpgStageData *data);
 bool RpgStageStorage_EnsureStageDirectory(int stageNumber);
 bool RpgStageStorage_GetFilePath(int stageNumber, const char *fileName, char *path, int size);
+/* StageN/build配下のゲーム内Folder用実フォルダを、名前だけを入力として安全に管理する。 */
+bool RpgStageStorage_CreateBuildFolder(int stageNumber, const char *name, char *path, int size);
+bool RpgStageStorage_RenameBuildFolder(int stageNumber, const char *oldPath, const char *name,
+                                       char *newPath, int newPathSize);
+/* Fileオブジェクト用に、選択元をStageN/build/reference_filesへコピーして実行時パスを返す。 */
+bool RpgStageStorage_CopyReferenceFileToBuild(int stageNumber, int row, int column,
+                                              const char *sourcePath, char *copiedPath, int copiedPathSize);
+bool RpgStageStorage_RepairReferenceFileCopies(int stageNumber, RpgStage *stage);
+/* 同じステージのreference_files配下にある、以前のFileオブジェクト用コピーだけを削除する。 */
+void RpgStageStorage_RemoveReferenceFileCopy(int stageNumber, const char *copiedPath);
 
 #endif

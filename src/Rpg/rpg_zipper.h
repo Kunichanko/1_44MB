@@ -36,6 +36,7 @@ typedef struct RpgZipper {
     bool isFolderReturnPending;
     bool isFolderReturnAnimating;
     bool isFolderReturnCommitPending;
+    float folderReturnDelayElapsed;
     float folderReturnElapsed;
     float folderReturnDuration;
     Vector2 folderReturnStart;
@@ -47,6 +48,7 @@ void RpgZipper_ClearHeldObject(RpgZipper *zipper);
 bool RpgZipper_Load(const char *filePath, RpgZipper *zipper);
 bool RpgZipper_Save(const char *filePath, const RpgZipper *zipper);
 Rectangle RpgZipper_GetSpriteBounds(const RpgCharacter *character, float groundY);
+Rectangle RpgZipper_GetPixelAlignedSpriteBounds(const RpgCharacter *character, float groundY);
 void RpgZipper_DrawPointerFeedback(Rectangle bounds, bool isHovered, bool isSelected);
 
 #endif

@@ -3,8 +3,19 @@
 
 #include "raymath.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
+
+/* データ弾のファイルごとの増分は、32pxマスの1/4（8px）単位だけを許可する。 */
+static float RpgAttachments_NormalizeShotSizePerFile(float sizePerFile)
+{
+    const float sizeStep = RPG_STAGE_TILE_SIZE * 0.25f;
+    int stepCount = (int)roundf(sizePerFile / sizeStep);
+    if (stepCount < 1) stepCount = 1;
+    if (stepCount > 8) stepCount = 8;
+    return sizeStep * (float)stepCount;
+}
 
 static bool RpgAttachments_IsCellInStage(RpgGridCell cell)
 {
@@ -110,7 +121,7 @@ bool RpgAttachments_Load(const char *filePath, RpgAttachments *attachments)
         attachment->dataSpeed = 120.0f;
         attachment->dataInterval = 1.0f;
         attachment->dataPreviewEnabled = false;
-        attachment->sizePerFile = 8.0f;
+        attachment->sizePerFile = RPG_STAGE_TILE_SIZE * 0.25f;
         attachment->speedPerKilobyte = 1.0f / 64.0f;
         attachment->previewFileCount = 2;
         attachment->previewTotalBytes = 0;
@@ -143,6 +154,7 @@ bool RpgAttachments_Load(const char *filePath, RpgAttachments *attachments)
                 attachment->dataPath.cellCount < 1 || attachment->dataPath.cellCount > RPG_GRID_PATH_MAX_CELLS) {
                 fclose(file); return false;
             }
+            attachment->sizePerFile = RpgAttachments_NormalizeShotSizePerFile(attachment->sizePerFile);
             attachment->dataPreviewEnabled = previewEnabled != 0;
             for (int pathIndex = 0; pathIndex < attachment->dataPath.cellCount; pathIndex++)
                 if (fscanf(file, "%d %d", &attachment->dataPath.cells[pathIndex].row,
@@ -183,7 +195,7 @@ bool RpgAttachments_Add(RpgAttachments *attachments, const RpgStage *stage, int 
     RpgGridCell outerCell = RpgGridPath_GetSideNeighbor(cell, side);
     RpgAttachment attachment = { .type = type, .folderId = RpgAttachments_GetNextFolderId(attachments), .cell = cell, .side = side, .dataSize = 8.0f,
                                  .dataSpeed = 120.0f, .dataInterval = 1.0f,
-                                 .sizePerFile = 8.0f, .speedPerKilobyte = 1.0f / 64.0f,
+                                 .sizePerFile = RPG_STAGE_TILE_SIZE * 0.25f, .speedPerKilobyte = 1.0f / 64.0f,
                                  .previewFileCount = 2, .previewTotalBytes = 0,
                                  .dataPath = { .cellCount = 1, .cells = { outerCell } } };
     if (attachments->count >= RPG_ATTACHMENT_MAX_COUNT || !RpgBlockInventory_IsAttachment(type) ||
@@ -298,7 +310,8 @@ Vector2 RpgAttachments_GetPosition(const RpgAttachment *attachment, int firstCol
     float x = (outerCell.column - firstColumn) * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f;
     float y = outerCell.row * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f;
     // 外側1マスのうち、土台だけを取付先ブロック側の辺へ寄せる。
-    float offset = RPG_STAGE_TILE_SIZE * 0.5f - 6.0f;
+    // 支持ブロックと空気マスの境界を唯一の取付基準にする。描画・当たり判定・ドラッグはすべてこの値を使う。
+    float offset = RPG_STAGE_TILE_SIZE * 0.5f;
     if (attachment->side == RPG_GRID_SIDE_TOP) y += offset;
     else if (attachment->side == RPG_GRID_SIDE_RIGHT) x -= offset;
     else if (attachment->side == RPG_GRID_SIDE_BOTTOM) y -= offset;
@@ -373,59 +386,68 @@ void RpgAttachments_RemoveBroken(RpgAttachments *attachments, const RpgStage *st
     }
 }
 
+static Vector2 RpgAttachments_GetOutwardDirection(RpgGridSide side)
+{
+    if (side == RPG_GRID_SIDE_RIGHT) return (Vector2){ 1.0f, 0.0f };
+    if (side == RPG_GRID_SIDE_BOTTOM) return (Vector2){ 0.0f, 1.0f };
+    if (side == RPG_GRID_SIDE_LEFT) return (Vector2){ -1.0f, 0.0f };
+    return (Vector2){ 0.0f, -1.0f };
+}
+
 static void RpgAttachments_DrawIcon(int type, Vector2 position, RpgGridSide side, float alpha)
 {
+    position = RpgStage_SnapRenderPoint(position);
+    Vector2 direction = RpgAttachments_GetOutwardDirection(side);
+    Vector2 perpendicular = { -direction.y, direction.x };
     if (type == RPG_BLOCK_ATTACHMENT_SAVE_FLAG) {
-        DrawLineEx((Vector2){ position.x, position.y + 18.0f }, (Vector2){ position.x, position.y - 18.0f },
-                   3.0f, Fade(DARKBROWN, alpha));
-        DrawCircleV((Vector2){ position.x, position.y - 19.0f }, 3.0f, Fade(GOLD, alpha));
+        // 保存旗は常に地面の上へ正立させる。取付辺の回転で旗形状を崩さない。
+        Vector2 tip = { position.x, position.y - 23.0f };
+        DrawLineEx(position, tip, 2.5f, Fade(DARKBROWN, alpha));
+        DrawCircleV(tip, 2.5f, Fade(GOLD, alpha));
         return;
     }
     if (type == RPG_BLOCK_ATTACHMENT_DATA_BUTTON) {
-        bool vertical = side == RPG_GRID_SIDE_TOP || side == RPG_GRID_SIDE_BOTTOM;
-        Rectangle base = vertical ? (Rectangle){ position.x - 17.0f, position.y - 5.0f, 34.0f, 10.0f } :
-                                  (Rectangle){ position.x - 5.0f, position.y - 17.0f, 10.0f, 34.0f };
+        // 取付面へ台座が触れるよう、押し部は支持面から3pxだけ空気側へ置く。
+        Vector2 center = Vector2Add(position, Vector2Scale(direction, 3.0f));
+        bool horizontalDirection = direction.x != 0.0f;
+        Rectangle base = horizontalDirection ? (Rectangle){ center.x - 3.5f, center.y - 10.0f, 7.0f, 20.0f } :
+                                               (Rectangle){ center.x - 10.0f, center.y - 3.5f, 20.0f, 7.0f };
         DrawRectangleRec(base, Fade(DARKGRAY, alpha));
-        DrawRectangleLinesEx(base, 1.5f, Fade(RAYWHITE, alpha));
-        DrawCircleV(position, 7.0f, Fade(RED, alpha));
-        DrawCircleLines((int)position.x, (int)position.y, 7.0f, Fade(MAROON, alpha));
+        DrawRectangleLinesEx(base, 1.0f, Fade(RAYWHITE, alpha));
+        DrawCircleV(center, 4.5f, Fade(RED, alpha));
+        DrawCircleLines((int)center.x, (int)center.y, 4.5f, Fade(MAROON, alpha));
         return;
     }
     if (type != RPG_BLOCK_ATTACHMENT_RADIO_EMITTER) return;
-    Vector2 direction = { 0.0f, -1.0f };
-    if (side == RPG_GRID_SIDE_RIGHT) direction = (Vector2){ 1.0f, 0.0f };
-    else if (side == RPG_GRID_SIDE_BOTTOM) direction = (Vector2){ 0.0f, 1.0f };
-    else if (side == RPG_GRID_SIDE_LEFT) direction = (Vector2){ -1.0f, 0.0f };
-    Vector2 perpendicular = { -direction.y, direction.x };
-    Vector2 coil = { position.x + direction.x * 12.0f, position.y + direction.y * 12.0f };
-    Vector2 sphere = { position.x + direction.x * 24.0f, position.y + direction.y * 24.0f };
-    // 土台・コイル・発生球を、向きに応じてマス内へ連ねて描く。
-    DrawLineEx((Vector2){ position.x - perpendicular.x * 9.0f, position.y - perpendicular.y * 9.0f },
-               (Vector2){ position.x + perpendicular.x * 9.0f, position.y + perpendicular.y * 9.0f },
-               9.0f, Fade(DARKGRAY, alpha));
-    DrawLineEx((Vector2){ position.x - perpendicular.x * 8.0f, position.y - perpendicular.y * 8.0f },
-               (Vector2){ position.x + perpendicular.x * 8.0f, position.y + perpendicular.y * 8.0f },
-               4.0f, Fade(GRAY, alpha));
-    DrawLineEx(position, coil, 3.0f, Fade(GOLD, alpha));
-    DrawCircleV(coil, 9.0f, Fade(DARKBLUE, alpha));
-    DrawCircleLines((int)coil.x, (int)coil.y, 9.0f, Fade(SKYBLUE, alpha));
-    DrawCircleLines((int)coil.x, (int)coil.y, 5.0f, Fade(RAYWHITE, alpha));
-    DrawLineEx(coil, sphere, 3.0f, Fade(SKYBLUE, alpha));
-    DrawCircleV(sphere, 8.0f, Fade((Color){ 98, 221, 255, 255 }, alpha));
-    DrawCircleLines((int)sphere.x, (int)sphere.y, 8.0f, Fade(RAYWHITE, alpha));
-    DrawCircleLines((int)sphere.x, (int)sphere.y, 12.0f, Fade(SKYBLUE, alpha * 0.65f));
+    Vector2 base = Vector2Add(position, Vector2Scale(direction, 3.0f));
+    Vector2 coil = Vector2Add(position, Vector2Scale(direction, 12.0f));
+    Vector2 sphere = Vector2Add(position, Vector2Scale(direction, 21.0f));
+    // 1マスの外側セルからはみ出さないよう、土台・コイル・発生球を32px内へ収める。
+    DrawLineEx((Vector2){ base.x - perpendicular.x * 8.0f, base.y - perpendicular.y * 8.0f },
+               (Vector2){ base.x + perpendicular.x * 8.0f, base.y + perpendicular.y * 8.0f },
+               5.0f, Fade(DARKGRAY, alpha));
+    DrawLineEx(position, coil, 2.0f, Fade(GOLD, alpha));
+    DrawCircleV(coil, 5.5f, Fade(DARKBLUE, alpha));
+    DrawCircleLines((int)coil.x, (int)coil.y, 5.5f, Fade(SKYBLUE, alpha));
+    DrawCircleLines((int)coil.x, (int)coil.y, 3.0f, Fade(RAYWHITE, alpha));
+    DrawLineEx(coil, sphere, 2.0f, Fade(SKYBLUE, alpha));
+    DrawCircleV(sphere, 4.5f, Fade((Color){ 98, 221, 255, 255 }, alpha));
+    DrawCircleLines((int)sphere.x, (int)sphere.y, 4.5f, Fade(RAYWHITE, alpha));
+    DrawCircleLines((int)sphere.x, (int)sphere.y, 6.5f, Fade(SKYBLUE, alpha * 0.65f));
 }
 
 static void RpgAttachments_DrawSaveFlag(const RpgAttachment *attachment, Vector2 position, float alpha)
 {
+    position = RpgStage_SnapRenderPoint(position);
     RpgAttachments_DrawIcon(attachment->type, position, attachment->side, alpha);
     if (attachment->type == RPG_BLOCK_ATTACHMENT_SAVE_FLAG && attachment->flagRaised) {
-        DrawTriangle((Vector2){ position.x + 2.0f, position.y - 17.0f },
-                     (Vector2){ position.x + 23.0f, position.y - 10.0f },
-                     (Vector2){ position.x + 2.0f, position.y - 3.0f }, Fade(RED, alpha));
-        DrawTriangleLines((Vector2){ position.x + 2.0f, position.y - 17.0f },
-                          (Vector2){ position.x + 23.0f, position.y - 10.0f },
-                          (Vector2){ position.x + 2.0f, position.y - 3.0f }, Fade(RAYWHITE, alpha));
+        Vector2 poleTop = { position.x, position.y - 22.0f };
+        Vector2 flagBottom = { poleTop.x + 1.0f, poleTop.y + 11.0f };
+        Vector2 flagTip = { poleTop.x + 13.0f, poleTop.y + 6.0f };
+        DrawTriangle((Vector2){ poleTop.x + 1.0f, poleTop.y + 2.0f }, flagTip, flagBottom,
+                     Fade(RED, alpha));
+        DrawTriangleLines((Vector2){ poleTop.x + 1.0f, poleTop.y + 2.0f }, flagTip, flagBottom,
+                          Fade(RAYWHITE, alpha));
     }
 }
 
@@ -477,16 +499,19 @@ void RpgAttachments_DrawDataPaths(const RpgAttachments *attachments, int mapInde
             RpgGridCell second = path->cells[cellIndex + 1];
             if (first.column < firstColumn || first.column >= lastColumn ||
                 second.column < firstColumn || second.column >= lastColumn) continue;
-            Vector2 start = { (first.column - firstColumn) * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f,
-                              first.row * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f };
-            Vector2 end = { (second.column - firstColumn) * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f,
-                            second.row * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f };
+            Vector2 start = RpgStage_SnapRenderPoint((Vector2){
+                (first.column - firstColumn) * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f,
+                first.row * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f });
+            Vector2 end = RpgStage_SnapRenderPoint((Vector2){
+                (second.column - firstColumn) * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f,
+                second.row * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f });
             DrawLineEx(start, end, 3.0f, Fade(YELLOW, 0.75f));
         }
         RpgGridCell endCell = path->cells[path->cellCount - 1];
         if (endCell.column >= firstColumn && endCell.column < lastColumn) {
-            Vector2 end = { (endCell.column - firstColumn) * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f,
-                            endCell.row * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f };
+            Vector2 end = RpgStage_SnapRenderPoint((Vector2){
+                (endCell.column - firstColumn) * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f,
+                endCell.row * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f });
             DrawCircleLines((int)end.x, (int)end.y, 8.0f, YELLOW);
         }
     }

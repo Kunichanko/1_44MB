@@ -13,7 +13,7 @@ RpgZipper RpgZipper_Default(void)
     // 初期配置はステージID (2, 0)、すなわち3番目のステージの中央下辺に固定する。
     zipper.character = RpgCharacter_Create((Vector2){ 2.0f * RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE +
                                                        RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE * 0.5f,
-                                                       8.0f * RPG_STAGE_TILE_SIZE }, ORANGE, BROWN);
+                                                       RPG_STAGE_GROUND_TOP }, ORANGE, BROWN);
     zipper.inspect = RpgInspect_Default("Zipper", "Nothing unusual here.");
     zipper.launchSpeed = 720.0f;
     zipper.returnSpeed = 180.0f;
@@ -33,6 +33,7 @@ void RpgZipper_ClearHeldObject(RpgZipper *zipper)
     zipper->isFolderReturnPending = false;
     zipper->isFolderReturnAnimating = false;
     zipper->isFolderReturnCommitPending = false;
+    zipper->folderReturnDelayElapsed = 0.0f;
     zipper->folderReturnElapsed = 0.0f;
     zipper->folderReturnDuration = 0.45f;
 }
@@ -95,6 +96,10 @@ bool RpgZipper_Load(const char *filePath, RpgZipper *zipper)
     bool loaded = readCount >= 2;
     if (readCount >= 4) zipper->launchPreviewEnabled = previewEnabled != 0;
     fclose(file);
+    if (zipper->character.position.y > RPG_STAGE_WORLD_HEIGHT) {
+        RpgZipper defaults = RpgZipper_Default();
+        zipper->character.position = defaults.character.position;
+    }
     return loaded;
 }
 
@@ -118,6 +123,11 @@ Rectangle RpgZipper_GetSpriteBounds(const RpgCharacter *character, float groundY
     float width = height * (32.0f / 40.0f);
     return (Rectangle){ character->position.x - width * 0.5f,
                         character->position.y - height, width, height };
+}
+
+Rectangle RpgZipper_GetPixelAlignedSpriteBounds(const RpgCharacter *character, float groundY)
+{
+    return RpgStage_SnapRenderRectangle(RpgZipper_GetSpriteBounds(character, groundY));
 }
 
 void RpgZipper_DrawPointerFeedback(Rectangle bounds, bool isHovered, bool isSelected)

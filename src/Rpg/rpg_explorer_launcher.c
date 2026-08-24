@@ -15,6 +15,9 @@
 #include <shellapi.h>
 #define RPG_EXPLORER_SHOW_NORMAL 1
 
+/* Zipper は固定フォルダではなく、現在採用中のフォルダ構造を開く。 */
+static char activeZipperDirectory[1200] = { 0 };
+
 static bool ToWide(const char *path, wchar_t *wide, int count)
 {
     return path != NULL && MultiByteToWideChar(CP_UTF8, 0, path, -1, wide, count) > 0;
@@ -27,6 +30,19 @@ static bool ToAbsoluteWide(const char *path, wchar_t *wide, int count)
     if (!ToWide(path, input, (int)(sizeof(input) / sizeof(input[0])))) return false;
     length = GetFullPathNameW(input, (DWORD)count, wide, NULL);
     return length > 0 && length < (DWORD)count;
+}
+
+/* Folder配置物の実体はビルド初期化で消える場合があるため、開く直前に空フォルダだけ復元する。 */
+static bool EnsureDirectoryExists(const wchar_t *directory)
+{
+    DWORD attributes = GetFileAttributesW(directory);
+    if (attributes != INVALID_FILE_ATTRIBUTES) return (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    return CreateDirectoryW(directory, NULL) != 0 || GetLastError() == ERROR_ALREADY_EXISTS;
+}
+
+static bool OpenWindowsExplorer(const wchar_t *directory)
+{
+    return (INT_PTR)ShellExecuteW(NULL, L"open", directory, NULL, NULL, RPG_EXPLORER_SHOW_NORMAL) > 32;
 }
 
 static bool GetZipperDirectory(char *path, size_t size)
@@ -96,18 +112,41 @@ bool RpgExplorerLauncher_SaveMode(RpgExplorerMode mode)
 #endif
 }
 
+void RpgExplorerLauncher_SetZipperDirectory(const char *path)
+{
+    if (path == NULL || path[0] == '\0') activeZipperDirectory[0] = '\0';
+    else snprintf(activeZipperDirectory, sizeof(activeZipperDirectory), "%s", path);
+}
+
 bool RpgExplorerLauncher_OpenZipperDirectory(void)
 {
 #ifdef _WIN32
     char directory[1200];
     wchar_t wideDirectory[1200];
     EnsureSettingsDirectory();
-    if (!GetZipperDirectory(directory, sizeof(directory)) ||
+    if (!((activeZipperDirectory[0] != '\0' &&
+           snprintf(directory, sizeof(directory), "%s", activeZipperDirectory) > 0) ||
+          GetZipperDirectory(directory, sizeof(directory))) ||
         !ToAbsoluteWide(directory, wideDirectory, (int)(sizeof(wideDirectory) / sizeof(wideDirectory[0])))) return false;
     if (RpgExplorerLauncher_LoadMode() == RPG_EXPLORER_MODE_WINDOWS)
-        return (INT_PTR)ShellExecuteW(NULL, L"open", wideDirectory, NULL, NULL, RPG_EXPLORER_SHOW_NORMAL) > 32;
-    return OpenVirtualExplorer(wideDirectory);
+        return OpenWindowsExplorer(wideDirectory);
+    return OpenVirtualExplorer(wideDirectory) || OpenWindowsExplorer(wideDirectory);
 #else
+    return false;
+#endif
+}
+
+bool RpgExplorerLauncher_OpenDirectory(const char *path)
+{
+#ifdef _WIN32
+    wchar_t wideDirectory[1200];
+    if (!ToAbsoluteWide(path, wideDirectory, (int)(sizeof(wideDirectory) / sizeof(wideDirectory[0]))) ||
+        !EnsureDirectoryExists(wideDirectory)) return false;
+    /* build/cells・objectsなどはZipper専用UIの対象外。実Explorerで直接開き、
+       プレイ中でもbuild配下の生成物を確実に確認・操作できるようにする。 */
+    return OpenWindowsExplorer(wideDirectory);
+#else
+    (void)path;
     return false;
 #endif
 }

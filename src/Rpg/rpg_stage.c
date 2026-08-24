@@ -18,6 +18,26 @@
 #include <windows.h>
 #endif
 
+float RpgStage_SnapRenderCoordinate(float coordinate)
+{
+    const float displayScale = 960.0f / (float)(RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE);
+    return roundf(coordinate * displayScale) / displayScale;
+}
+
+Vector2 RpgStage_SnapRenderPoint(Vector2 point)
+{
+    return (Vector2){ RpgStage_SnapRenderCoordinate(point.x),
+                      RpgStage_SnapRenderCoordinate(point.y) };
+}
+
+Rectangle RpgStage_SnapRenderRectangle(Rectangle rectangle)
+{
+    return (Rectangle){ RpgStage_SnapRenderCoordinate(rectangle.x),
+                        RpgStage_SnapRenderCoordinate(rectangle.y),
+                        RpgStage_SnapRenderCoordinate(rectangle.width),
+                        RpgStage_SnapRenderCoordinate(rectangle.height) };
+}
+
 static void NormalizeReferencePath(const char *source, char *destination, size_t destinationSize)
 {
     // 旧設定のCP932パスと、現行のUTF-8パスをどちらもUTF-8へそろえる。
@@ -46,14 +66,21 @@ static void ClearMapSlot(RpgStage *stage, int mapIndex)
             stage->blocks[row][firstColumn + column] = 0;
             stage->referencePaths[row][firstColumn + column][0] = '\0';
         }
+    for (int index = stage->imageObjects.count - 1; index >= 0; index--) {
+        RpgImageObject *object = &stage->imageObjects.entries[index];
+        if (object->column < firstColumn || object->column >= firstColumn + RPG_STAGE_COLUMNS) continue;
+        int remaining = stage->imageObjects.count - index - 1;
+        if (remaining > 0) memmove(object, object + 1, (size_t)remaining * sizeof(*object));
+        stage->imageObjects.count--;
+    }
 }
 
 static void FillMapGround(RpgStage *stage, int mapIndex)
 {
     int firstColumn = mapIndex * RPG_STAGE_COLUMNS;
     for (int column = firstColumn; column < firstColumn + RPG_STAGE_COLUMNS; column++) {
-        stage->blocks[8][column] = 1;
-        stage->blocks[9][column] = 1;
+        stage->blocks[RPG_STAGE_GROUND_START_ROW][column] = 1;
+        stage->blocks[RPG_STAGE_GROUND_START_ROW + 1][column] = 1;
     }
 }
 
@@ -159,6 +186,7 @@ bool RpgStage_RemoveMap(RpgStage *stage, int mapIndex)
 RpgStage RpgStage_Default(void)
 {
     RpgStage stage = {0};
+    stage.imageObjects = RpgImageObjects_Default();
     for (int mapIndex = 0; mapIndex < RPG_STAGE_INITIAL_MAP_COUNT; mapIndex++) {
         stage.mapActive[mapIndex] = true;
         stage.mapGridX[mapIndex] = mapIndex;
@@ -175,6 +203,36 @@ bool RpgStage_Load(const char *filePath, RpgStage *stage)
     if (file == NULL) return false;
     *stage = RpgStage_Default();
     memset(stage->referencePaths, 0, sizeof(stage->referencePaths));
+    int savedTileSize = 0, savedColumns = 0, savedRows = 0;
+    bool isCurrentGrid = fgets(line, sizeof(line), file) != NULL &&
+                         sscanf(line, "grid %d %d %d", &savedTileSize, &savedColumns, &savedRows) == 3 &&
+                         savedTileSize == RPG_STAGE_TILE_SIZE && savedColumns == RPG_STAGE_COLUMNS &&
+                         savedRows == RPG_STAGE_ROWS;
+    if (!isCurrentGrid) {
+        /* 旧48px・20x10形式はマスの対応を保てないため、地面だけの新グリッドへ安全に初期化する。 */
+        bool readingAreas = false;
+        rewind(file);
+        while (fgets(line, sizeof(line), file) != NULL) {
+            if (strncmp(line, "areas_begin", 11) == 0) {
+                memset(stage->mapActive, 0, sizeof(stage->mapActive));
+                memset(stage->mapGridX, 0, sizeof(stage->mapGridX));
+                memset(stage->mapGridY, 0, sizeof(stage->mapGridY));
+                readingAreas = true;
+            } else if (readingAreas) {
+                int mapIndex, gridX, gridY;
+                if (sscanf(line, "area %d %d %d", &mapIndex, &gridX, &gridY) == 3 &&
+                    mapIndex >= 0 && mapIndex < RPG_STAGE_MAP_COUNT) {
+                    stage->mapActive[mapIndex] = true;
+                    stage->mapGridX[mapIndex] = gridX;
+                    stage->mapGridY[mapIndex] = gridY;
+                }
+            }
+        }
+        fclose(file);
+        for (int mapIndex = 0; mapIndex < RPG_STAGE_MAP_COUNT; mapIndex++)
+            if (stage->mapActive[mapIndex]) FillMapGround(stage, mapIndex);
+        return RpgStage_Save(filePath, stage);
+    }
     // 旧3ステージ形式は行ごとに読み、存在しない4〜6ステージを初期地面のまま残す。
     for (int row = 0; row < RPG_STAGE_ROWS; row++) {
         if (fgets(line, sizeof(line), file) == NULL) break;
@@ -192,12 +250,72 @@ bool RpgStage_Load(const char *filePath, RpgStage *stage)
     while (fgets(line, sizeof(line), file) != NULL) {
         int row;
         int column;
+        int imageAppearance;
+        int imageLayer;
+        int imageHasCustomPosition;
+        float imageScale;
+        float imagePositionX;
+        float imagePositionY;
         char path[RPG_STAGE_REFERENCE_PATH_LENGTH];
         if (sscanf(line, "reference %d %d %259[^\n]", &row, &column, path) == 3 &&
             row >= 0 && row < RPG_STAGE_ROWS && column >= 0 && column < RPG_STAGE_WORLD_COLUMNS &&
-            stage->blocks[row][column] == RPG_BLOCK_REFERENCE_FILE) {
+            RpgBlockInventory_IsReferenceObject(stage->blocks[row][column])) {
             NormalizeReferencePath(path, stage->referencePaths[row][column],
                                    RPG_STAGE_REFERENCE_PATH_LENGTH);
+        } else if (sscanf(line, "image4 %d %d %d %d %f %d %f %f %259[^\n]", &row, &column, &imageAppearance,
+                          &imageLayer, &imageScale, &imageHasCustomPosition, &imagePositionX, &imagePositionY,
+                          path) == 9 && row >= 0 && row < RPG_STAGE_ROWS && column >= 0 &&
+                   column < RPG_STAGE_WORLD_COLUMNS) {
+            int imageIndex = RpgImageObjects_Add(&stage->imageObjects, row, column);
+            if (imageIndex >= 0) {
+                RpgImageObject *object = &stage->imageObjects.entries[imageIndex];
+                object->scale = Clamp(imageScale, 0.25f, 8.0f);
+                object->appearance = imageAppearance >= RPG_IMAGE_OBJECT_APPEARANCE_PNG &&
+                                     imageAppearance <= RPG_IMAGE_OBJECT_APPEARANCE_SHELL_FILE ?
+                                     (RpgImageObjectAppearance)imageAppearance : RPG_IMAGE_OBJECT_APPEARANCE_PNG;
+                object->layer = imageLayer >= RPG_IMAGE_OBJECT_LAYER_BACK && imageLayer < RPG_IMAGE_OBJECT_LAYER_COUNT ?
+                                (RpgImageObjectLayer)imageLayer : RPG_IMAGE_OBJECT_LAYER_BLOCK_FRONT_CHARACTER_BACK;
+                object->hasCustomPosition = imageHasCustomPosition != 0;
+                object->positionX = imagePositionX;
+                object->positionY = imagePositionY;
+                if (strcmp(path, "-") != 0) NormalizeReferencePath(path, object->path, sizeof(object->path));
+            }
+        } else if (sscanf(line, "image3 %d %d %d %d %f %259[^\n]", &row, &column, &imageAppearance,
+                          &imageLayer, &imageScale, path) == 6 &&
+                   row >= 0 && row < RPG_STAGE_ROWS && column >= 0 && column < RPG_STAGE_WORLD_COLUMNS) {
+            int imageIndex = RpgImageObjects_Add(&stage->imageObjects, row, column);
+            if (imageIndex >= 0) {
+                RpgImageObject *object = &stage->imageObjects.entries[imageIndex];
+                object->scale = Clamp(imageScale, 0.25f, 8.0f);
+                object->appearance = imageAppearance >= RPG_IMAGE_OBJECT_APPEARANCE_PNG &&
+                                     imageAppearance <= RPG_IMAGE_OBJECT_APPEARANCE_SHELL_FILE ?
+                                     (RpgImageObjectAppearance)imageAppearance : RPG_IMAGE_OBJECT_APPEARANCE_PNG;
+                object->layer = imageLayer >= RPG_IMAGE_OBJECT_LAYER_BACK && imageLayer < RPG_IMAGE_OBJECT_LAYER_COUNT ?
+                                (RpgImageObjectLayer)imageLayer : RPG_IMAGE_OBJECT_LAYER_BLOCK_FRONT_CHARACTER_BACK;
+                if (strcmp(path, "-") != 0)
+                    NormalizeReferencePath(path, object->path, sizeof(object->path));
+            }
+        } else if (sscanf(line, "image2 %d %d %d %f %259[^\n]", &row, &column, &imageLayer, &imageScale, path) == 5 &&
+                   row >= 0 && row < RPG_STAGE_ROWS && column >= 0 && column < RPG_STAGE_WORLD_COLUMNS) {
+            int imageIndex = RpgImageObjects_Add(&stage->imageObjects, row, column);
+            if (imageIndex >= 0) {
+                stage->imageObjects.entries[imageIndex].scale = Clamp(imageScale, 0.25f, 8.0f);
+                stage->imageObjects.entries[imageIndex].layer =
+                    imageLayer >= RPG_IMAGE_OBJECT_LAYER_BACK && imageLayer < RPG_IMAGE_OBJECT_LAYER_COUNT ?
+                    (RpgImageObjectLayer)imageLayer : RPG_IMAGE_OBJECT_LAYER_BLOCK_FRONT_CHARACTER_BACK;
+                if (strcmp(path, "-") != 0)
+                    NormalizeReferencePath(path, stage->imageObjects.entries[imageIndex].path,
+                                           sizeof(stage->imageObjects.entries[imageIndex].path));
+            }
+        } else if (sscanf(line, "image %d %d %f %259[^\n]", &row, &column, &imageScale, path) == 4 &&
+                   row >= 0 && row < RPG_STAGE_ROWS && column >= 0 && column < RPG_STAGE_WORLD_COLUMNS) {
+            int imageIndex = RpgImageObjects_Add(&stage->imageObjects, row, column);
+            if (imageIndex >= 0) {
+                stage->imageObjects.entries[imageIndex].scale = Clamp(imageScale, 0.25f, 8.0f);
+                if (strcmp(path, "-") != 0)
+                    NormalizeReferencePath(path, stage->imageObjects.entries[imageIndex].path,
+                                           sizeof(stage->imageObjects.entries[imageIndex].path));
+            }
         } else if (strncmp(line, "areas_begin", 11) == 0) {
             memset(stage->mapActive, 0, sizeof(stage->mapActive));
             memset(stage->mapGridX, 0, sizeof(stage->mapGridX));
@@ -221,13 +339,21 @@ bool RpgStage_Save(const char *filePath, const RpgStage *stage)
 {
     FILE *file = fopen(filePath, "w");
     if (file == NULL) return false;
+    fprintf(file, "grid %d %d %d\n", RPG_STAGE_TILE_SIZE, RPG_STAGE_COLUMNS, RPG_STAGE_ROWS);
     for (int row = 0; row < RPG_STAGE_ROWS; row++) {
         for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) fprintf(file, "%d ", stage->blocks[row][column]);
         fputc('\n', file);
     }
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++)
-        if (stage->blocks[row][column] == RPG_BLOCK_REFERENCE_FILE && stage->referencePaths[row][column][0] != '\0')
+        if (RpgBlockInventory_IsReferenceObject(stage->blocks[row][column]) && stage->referencePaths[row][column][0] != '\0')
             fprintf(file, "reference %d %d %s\n", row, column, stage->referencePaths[row][column]);
+    for (int index = 0; index < stage->imageObjects.count; index++) {
+        const RpgImageObject *object = &stage->imageObjects.entries[index];
+        fprintf(file, "image4 %d %d %d %d %.3f %d %.3f %.3f %s\n", object->row, object->column,
+                (int)object->appearance, (int)object->layer, object->scale, object->hasCustomPosition ? 1 : 0,
+                object->positionX, object->positionY,
+                object->path[0] != '\0' ? object->path : "-");
+    }
     fputs("areas_begin\n", file);
     for (int mapIndex = 0; mapIndex < RPG_STAGE_MAP_COUNT; mapIndex++)
         if (stage->mapActive[mapIndex]) fprintf(file, "area %d %d %d\n", mapIndex,
@@ -251,7 +377,9 @@ bool RpgStage_SetBlockTypeAtPosition(RpgStage *stage, Vector2 position, int bloc
     int row = (int)(position.y / RPG_STAGE_TILE_SIZE);
     if (column < 0 || column >= RPG_STAGE_WORLD_COLUMNS || row < 0 || row >= RPG_STAGE_ROWS) return false;
     stage->blocks[row][column] = blockType;
-    if (blockType != RPG_BLOCK_REFERENCE_FILE) stage->referencePaths[row][column][0] = '\0';
+    if (!RpgBlockInventory_IsReferenceObject(blockType)) {
+        stage->referencePaths[row][column][0] = '\0';
+    }
     return true;
 }
 
@@ -300,7 +428,7 @@ bool RpgStage_SetDoorOpenAtCell(RpgStage *stage, int row, int column, bool isOpe
 bool RpgStage_SetReferencePathAtCell(RpgStage *stage, int row, int column, const char *path)
 {
     if (row < 0 || row >= RPG_STAGE_ROWS || column < 0 || column >= RPG_STAGE_WORLD_COLUMNS ||
-        stage->blocks[row][column] != RPG_BLOCK_REFERENCE_FILE || path == NULL) return false;
+        !RpgBlockInventory_IsReferenceObject(stage->blocks[row][column]) || path == NULL) return false;
     snprintf(stage->referencePaths[row][column], RPG_STAGE_REFERENCE_PATH_LENGTH, "%s", path);
     return true;
 }
@@ -308,7 +436,7 @@ bool RpgStage_SetReferencePathAtCell(RpgStage *stage, int row, int column, const
 const char *RpgStage_GetReferencePathAtCell(const RpgStage *stage, int row, int column)
 {
     if (row < 0 || row >= RPG_STAGE_ROWS || column < 0 || column >= RPG_STAGE_WORLD_COLUMNS ||
-        stage->blocks[row][column] != RPG_BLOCK_REFERENCE_FILE) return "";
+        !RpgBlockInventory_IsReferenceObject(stage->blocks[row][column])) return "";
     return stage->referencePaths[row][column];
 }
 
@@ -318,7 +446,7 @@ bool RpgReferenceObjects_AddDrop(RpgReferenceObjects *objects, Vector2 position,
 {
     if (objects == NULL || path == NULL || path[0] == '\0' || objects->count >= RPG_REFERENCE_OBJECT_MAX_COUNT) return false;
     RpgReferenceObject *object = &objects->entries[objects->count++];
-    *object = (RpgReferenceObject){ .position = position, .isFalling = true };
+    *object = (RpgReferenceObject){ .position = position, .isFalling = true, .drawScale = 1.0f };
     snprintf(object->path, sizeof(object->path), "%s", path);
     return true;
 }
@@ -330,12 +458,87 @@ void RpgReferenceObjects_Update(RpgReferenceObjects *objects, float deltaTime)
         if (!object->isFalling) continue;
         object->fallSpeed += 720.0f * deltaTime;
         object->position.y += object->fallSpeed * deltaTime;
-        if (object->position.y >= 382.0f) {
-            object->position.y = 382.0f;
+        if (object->position.y >= RPG_STAGE_GROUND_TOP - 2.0f) {
+            object->position.y = RPG_STAGE_GROUND_TOP - 2.0f;
             object->fallSpeed = 0.0f;
             object->isFalling = false;
         }
     }
+}
+
+/* 取得済みFileは通常の落下物とは別に、Zipperと同じく主人公の後ろへ補間移動する。 */
+void RpgReferenceObjects_UpdateFollowers(RpgReferenceObjects *objects, Vector2 playerPosition,
+                                         float playerScale, float playerMoveSpeed, float followerScale,
+                                         float deltaTime)
+{
+    int followerIndex = 0;
+    if (objects == NULL) return;
+    for (int index = 0; index < objects->count; index++) {
+        RpgReferenceObject *object = &objects->entries[index];
+        Vector2 target;
+        Vector2 distance;
+        float length;
+        float maximumStep;
+        if (!object->followsPlayer) continue;
+        target = (Vector2){ playerPosition.x - RPG_STAGE_TILE_SIZE * playerScale * (1.0f + followerIndex * 0.70f),
+                            playerPosition.y };
+        distance = Vector2Subtract(target, object->position);
+        length = Vector2Length(distance);
+        maximumStep = fmaxf(playerMoveSpeed, 120.0f) * deltaTime;
+        if (length <= maximumStep) object->position = target;
+        else if (length > 0.001f)
+            object->position = Vector2Add(object->position, Vector2Scale(distance, maximumStep / length));
+        object->drawScale = fmaxf(0.15f, fminf(followerScale, 1.0f));
+        followerIndex++;
+    }
+}
+
+/* 新しい追従対象へ切り替えるときだけ、先行Fileを通常の配置済みFileへ戻す。 */
+static void RpgReferenceObjects_ReleaseFollowers(RpgReferenceObjects *objects)
+{
+    if (objects == NULL) return;
+    for (int index = 0; index < objects->count; index++) {
+        RpgReferenceObject *existingFollower = &objects->entries[index];
+        if (!existingFollower->followsPlayer) continue;
+        existingFollower->followsPlayer = false;
+        existingFollower->drawScale = 1.0f;
+        existingFollower->isFalling = false;
+        existingFollower->fallSpeed = 0.0f;
+    }
+}
+
+bool RpgReferenceObjects_CollectTarget(RpgStage *stage, RpgReferenceObjects *objects,
+                                       RpgReferenceTarget target)
+{
+    RpgReferenceObject collected = { .drawScale = 1.0f, .followsPlayer = true };
+    if (stage == NULL || objects == NULL) return false;
+    if (target.kind == RPG_REFERENCE_TARGET_CELL) {
+        if (target.row < 0 || target.row >= RPG_STAGE_ROWS || target.column < 0 ||
+            target.column >= RPG_STAGE_WORLD_COLUMNS ||
+            stage->blocks[target.row][target.column] != RPG_BLOCK_REFERENCE_FILE ||
+            objects->count >= RPG_REFERENCE_OBJECT_MAX_COUNT) return false;
+        /* 追従枠は一つだけにする。次のFileを取得する直前に、従来の落下物と同じ
+           RpgReferenceObjectへ戻すため、位置・ファイル情報・マウス操作を保ったまま残せる。 */
+        RpgReferenceObjects_ReleaseFollowers(objects);
+        collected.position = (Vector2){ (target.column + 0.5f) * RPG_STAGE_TILE_SIZE,
+                                        (target.row + 0.5f) * RPG_STAGE_TILE_SIZE };
+        snprintf(collected.path, sizeof(collected.path), "%s",
+                 stage->referencePaths[target.row][target.column]);
+        stage->blocks[target.row][target.column] = 0;
+        stage->referencePaths[target.row][target.column][0] = '\0';
+    } else if (target.kind == RPG_REFERENCE_TARGET_DROP && target.dropIndex >= 0 &&
+               target.dropIndex < objects->count) {
+        /* 既に配置済みのFileは同じオブジェクトを追従状態へ切り替える。 */
+        RpgReferenceObjects_ReleaseFollowers(objects);
+        RpgReferenceObject *object = &objects->entries[target.dropIndex];
+        object->isFalling = false;
+        object->fallSpeed = 0.0f;
+        object->drawScale = 1.0f;
+        object->followsPlayer = true;
+        return true;
+    } else return false;
+    objects->entries[objects->count++] = collected;
+    return true;
 }
 
 void RpgReferenceObjects_Draw(const RpgReferenceObjects *objects, Texture2D fileTexture)
@@ -349,8 +552,9 @@ void RpgReferenceObjects_DrawExcept(const RpgReferenceObjects *objects, Texture2
     for (int index = 0; index < objects->count; index++) {
         if (index == excludedIndex) continue;
         const RpgReferenceObject *object = &objects->entries[index];
-        RpgStage_DrawReferenceObject(fileTexture, (Rectangle){ object->position.x - 24.0f,
-                                      object->position.y - 24.0f, 48.0f, 48.0f }, WHITE);
+        float size = 48.0f * (object->drawScale > 0.0f ? object->drawScale : 1.0f);
+        RpgStage_DrawReferenceObject(fileTexture, (Rectangle){ object->position.x - size * 0.5f,
+                                      object->position.y - size * 0.5f, size, size }, WHITE);
     }
 }
 
@@ -359,6 +563,7 @@ int RpgReferenceObjects_FindNearby(const RpgReferenceObjects *objects, Vector2 p
     int closestIndex = -1;
     float closestDistance = distance;
     for (int index = 0; index < objects->count; index++) {
+        if (objects->entries[index].followsPlayer) continue;
         float objectDistance = Vector2Distance(position, objects->entries[index].position);
         if (objectDistance <= closestDistance) { closestDistance = objectDistance; closestIndex = index; }
     }
@@ -372,6 +577,7 @@ bool RpgReferenceObjects_FindNearbyTarget(const RpgStage *stage, const RpgRefere
     *target = (RpgReferenceTarget){ .kind = RPG_REFERENCE_TARGET_NONE, .row = -1, .column = -1, .dropIndex = -1 };
     float closestDistance = distance;
     for (int index = 0; index < objects->count; index++) {
+        if (objects->entries[index].followsPlayer) continue;
         float objectDistance = Vector2Distance(position, objects->entries[index].position);
         if (objectDistance <= closestDistance) {
             closestDistance = objectDistance;
@@ -380,7 +586,7 @@ bool RpgReferenceObjects_FindNearbyTarget(const RpgStage *stage, const RpgRefere
         }
     }
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
-        if (stage->blocks[row][column] != RPG_BLOCK_REFERENCE_FILE) continue;
+        if (!RpgBlockInventory_IsReferenceObject(stage->blocks[row][column])) continue;
         Vector2 objectPosition = { (column + 0.5f) * RPG_STAGE_TILE_SIZE,
                                    (row + 0.5f) * RPG_STAGE_TILE_SIZE };
         float objectDistance = Vector2Distance(position, objectPosition);
@@ -393,6 +599,35 @@ bool RpgReferenceObjects_FindNearbyTarget(const RpgStage *stage, const RpgRefere
     return target->kind != RPG_REFERENCE_TARGET_NONE;
 }
 
+bool RpgReferenceObjects_FindNearbyFolderTarget(const RpgStage *stage, Vector2 position,
+                                                float distance, RpgReferenceTarget *target)
+{
+    float closestDistance = distance;
+    if (stage == NULL || target == NULL) return false;
+    *target = (RpgReferenceTarget){ .kind = RPG_REFERENCE_TARGET_NONE, .row = -1,
+                                    .column = -1, .dropIndex = -1 };
+    for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0;
+         column < RPG_STAGE_WORLD_COLUMNS; column++) {
+        if (!RpgBlockInventory_IsReferenceFolder(stage->blocks[row][column])) continue;
+        Vector2 folderPosition = { (column + 0.5f) * RPG_STAGE_TILE_SIZE,
+                                   (row + 0.5f) * RPG_STAGE_TILE_SIZE };
+        float folderDistance = Vector2Distance(position, folderPosition);
+        if (folderDistance > closestDistance) continue;
+        closestDistance = folderDistance;
+        *target = (RpgReferenceTarget){ .kind = RPG_REFERENCE_TARGET_CELL, .row = row,
+                                        .column = column, .dropIndex = -1 };
+    }
+    return target->kind != RPG_REFERENCE_TARGET_NONE;
+}
+
+int RpgReferenceObjects_FindFollowerIndex(const RpgReferenceObjects *objects)
+{
+    if (objects == NULL) return -1;
+    for (int index = 0; index < objects->count; index++)
+        if (objects->entries[index].followsPlayer) return index;
+    return -1;
+}
+
 bool RpgReferenceObjects_FindTarget(const RpgStage *stage, const RpgReferenceObjects *objects,
                                     Vector2 position, RpgReferenceTarget *target)
 {
@@ -400,7 +635,11 @@ bool RpgReferenceObjects_FindTarget(const RpgStage *stage, const RpgReferenceObj
     *target = (RpgReferenceTarget){ .kind = RPG_REFERENCE_TARGET_NONE, .row = -1, .column = -1, .dropIndex = -1 };
     for (int index = objects->count - 1; index >= 0; index--) {
         const RpgReferenceObject *object = &objects->entries[index];
-        if (CheckCollisionPointRec(position, (Rectangle){ object->position.x - 24.0f, object->position.y - 24.0f, 48.0f, 48.0f })) {
+        float size = 48.0f * (object->drawScale > 0.0f ? object->drawScale : 1.0f);
+        /* 追従中も描画しているFile自身を対象にする。近接取得とは分離し、
+           クリック・ドラッグ・ダブルクリックだけは常に同じFile操作へ流す。 */
+        if (CheckCollisionPointRec(position, (Rectangle){ object->position.x - size * 0.5f,
+            object->position.y - size * 0.5f, size, size })) {
             target->kind = RPG_REFERENCE_TARGET_DROP;
             target->dropIndex = index;
             return true;
@@ -409,7 +648,7 @@ bool RpgReferenceObjects_FindTarget(const RpgStage *stage, const RpgReferenceObj
     int column = (int)(position.x / RPG_STAGE_TILE_SIZE);
     int row = (int)(position.y / RPG_STAGE_TILE_SIZE);
     if (row < 0 || row >= RPG_STAGE_ROWS || column < 0 || column >= RPG_STAGE_WORLD_COLUMNS ||
-        stage->blocks[row][column] != RPG_BLOCK_REFERENCE_FILE) return false;
+        !RpgBlockInventory_IsReferenceObject(stage->blocks[row][column])) return false;
     target->kind = RPG_REFERENCE_TARGET_CELL;
     target->row = row;
     target->column = column;
@@ -450,17 +689,12 @@ bool RpgStage_IsSolidBlock(int blockType)
 
 static bool RpgStage_CheckBlockCollision(Rectangle bounds, Rectangle cell, int blockType)
 {
-    // 穴付きブロックは、半マス幅の穴以外だけを実体のある壁として扱う。
-    if (blockType == RPG_BLOCK_HOLE_VERTICAL) {
-        float sideWidth = RPG_STAGE_TILE_SIZE * 0.25f;
-        return CheckCollisionRecs(bounds, (Rectangle){ cell.x, cell.y, sideWidth, cell.height }) ||
-               CheckCollisionRecs(bounds, (Rectangle){ cell.x + cell.width - sideWidth, cell.y, sideWidth, cell.height });
-    }
-    if (blockType == RPG_BLOCK_HOLE_HORIZONTAL) {
-        float sideHeight = RPG_STAGE_TILE_SIZE * 0.25f;
-        return CheckCollisionRecs(bounds, (Rectangle){ cell.x, cell.y, cell.width, sideHeight }) ||
-               CheckCollisionRecs(bounds, (Rectangle){ cell.x, cell.y + cell.height - sideHeight, cell.width, sideHeight });
-    }
+    Rectangle solidParts[2];
+    int solidPartCount = RpgStage_GetHoleSolidParts(cell, blockType, solidParts);
+    // 描画と同じ中央20pxの空洞以外だけを、壁の実体として判定する。
+    for (int index = 0; index < solidPartCount; index++)
+        if (CheckCollisionRecs(bounds, solidParts[index])) return true;
+    if (solidPartCount > 0) return false;
     return RpgStage_IsSolidBlock(blockType) && CheckCollisionRecs(bounds, cell);
 }
 
@@ -527,18 +761,11 @@ bool RpgStage_FindSolidCircleCollisionCenter(const RpgStage *stage, Vector2 cent
         int blockType = stage->blocks[row][column];
         Rectangle cell = { column * RPG_STAGE_TILE_SIZE, row * RPG_STAGE_TILE_SIZE,
                            RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE };
-        if (blockType == RPG_BLOCK_HOLE_VERTICAL) {
-            float sideWidth = RPG_STAGE_TILE_SIZE * 0.25f;
-            if (CheckCollisionCircleRec(center, radius, (Rectangle){ cell.x, cell.y, sideWidth, cell.height }) ||
-                CheckCollisionCircleRec(center, radius, (Rectangle){ cell.x + cell.width - sideWidth, cell.y, sideWidth, cell.height })) {
-                if (collisionCenter != NULL)
-                    *collisionCenter = (Vector2){ cell.x + cell.width * 0.5f, cell.y + cell.height * 0.5f };
-                return true;
-            }
-        } else if (blockType == RPG_BLOCK_HOLE_HORIZONTAL) {
-            float sideHeight = RPG_STAGE_TILE_SIZE * 0.25f;
-            if (CheckCollisionCircleRec(center, radius, (Rectangle){ cell.x, cell.y, cell.width, sideHeight }) ||
-                CheckCollisionCircleRec(center, radius, (Rectangle){ cell.x, cell.y + cell.height - sideHeight, cell.width, sideHeight })) {
+        Rectangle solidParts[2];
+        int solidPartCount = RpgStage_GetHoleSolidParts(cell, blockType, solidParts);
+        if (solidPartCount > 0) {
+            for (int partIndex = 0; partIndex < solidPartCount; partIndex++) {
+                if (!CheckCollisionCircleRec(center, radius, solidParts[partIndex])) continue;
                 if (collisionCenter != NULL)
                     *collisionCenter = (Vector2){ cell.x + cell.width * 0.5f, cell.y + cell.height * 0.5f };
                 return true;
@@ -576,86 +803,127 @@ Color RpgStage_GetBlockColor(int blockType)
            blockType == RPG_BLOCK_EFFECT_BUTTON ? (Color){ 72, 84, 104, 255 } : colors[1];
 }
 
-static void DrawEffectSymbol(Rectangle cell, int blockType)
+void RpgStage_DrawEffectSymbol(Rectangle cell, int blockType)
 {
-    if (blockType == RPG_BLOCK_EFFECT_BOUNCE) DrawCircle((int)(cell.x + 24.0f), (int)(cell.y + 24.0f), 12.0f, RAYWHITE);
-    if (blockType == RPG_BLOCK_EFFECT_SLOW) DrawTriangle((Vector2){ cell.x + 13.0f, cell.y + 32.0f },
-                                                         (Vector2){ cell.x + 35.0f, cell.y + 24.0f },
-                                                         (Vector2){ cell.x + 13.0f, cell.y + 16.0f }, RAYWHITE);
+    const float center = RPG_STAGE_TILE_SIZE * 0.5f;
+    if (blockType == RPG_BLOCK_EFFECT_BOUNCE)
+        DrawCircle((int)(cell.x + center), (int)(cell.y + center), 8.0f, RAYWHITE);
+    if (blockType == RPG_BLOCK_EFFECT_SLOW)
+        DrawTriangle((Vector2){ cell.x + 8.0f, cell.y + 24.0f },
+                     (Vector2){ cell.x + 24.0f, cell.y + 16.0f },
+                     (Vector2){ cell.x + 8.0f, cell.y + 8.0f }, RAYWHITE);
     if (blockType == RPG_BLOCK_EFFECT_WIDE_BOUNCE) {
-        DrawRectangleRec((Rectangle){ cell.x + 8.0f, cell.y + 17.0f, RPG_STAGE_TILE_SIZE + 32.0f, 14.0f }, RAYWHITE);
-        DrawCircle((int)(cell.x + 24.0f), (int)(cell.y + 24.0f), 9.0f, ORANGE);
-        DrawCircle((int)(cell.x + 56.0f), (int)(cell.y + 24.0f), 9.0f, ORANGE);
+        DrawRectangleRec((Rectangle){ cell.x + 4.0f, cell.y + 12.0f,
+                                      RPG_STAGE_TILE_SIZE * 2.0f - 8.0f, 9.0f }, RAYWHITE);
+        DrawCircle((int)(cell.x + 12.0f), (int)(cell.y + center), 5.0f, ORANGE);
+        DrawCircle((int)(cell.x + RPG_STAGE_TILE_SIZE * 2.0f - 12.0f),
+                   (int)(cell.y + center), 5.0f, ORANGE);
     }
     if (blockType == RPG_BLOCK_EFFECT_CORNER_BOUNCE) {
-        DrawLineEx((Vector2){ cell.x + 12.0f, cell.y + 15.0f }, (Vector2){ cell.x + 58.0f, cell.y + 15.0f }, 5.0f, RAYWHITE);
-        DrawLineEx((Vector2){ cell.x + 12.0f, cell.y + 15.0f }, (Vector2){ cell.x + 12.0f, cell.y + 58.0f }, 5.0f, RAYWHITE);
+        DrawLineEx((Vector2){ cell.x + 7.0f, cell.y + 8.0f },
+                   (Vector2){ cell.x + RPG_STAGE_TILE_SIZE * 2.0f - 7.0f, cell.y + 8.0f }, 3.0f, RAYWHITE);
+        DrawLineEx((Vector2){ cell.x + 7.0f, cell.y + 8.0f },
+                   (Vector2){ cell.x + 7.0f, cell.y + RPG_STAGE_TILE_SIZE * 2.0f - 7.0f }, 3.0f, RAYWHITE);
     }
     if (blockType == RPG_BLOCK_DOOR_CLOSED_TOP) {
-        DrawRectangleLinesEx((Rectangle){ cell.x + 8.0f, cell.y + 7.0f, 32.0f, RPG_STAGE_TILE_SIZE * 3.0f - 14.0f }, 3.0f, GOLD);
+        DrawRectangleLinesEx((Rectangle){ cell.x + 10.0f, cell.y + 4.0f, 12.0f,
+                                           RPG_STAGE_TILE_SIZE * 3.0f - 8.0f }, 2.0f, GOLD);
     }
     if (blockType == RPG_BLOCK_DOOR_OPEN_TOP) {
-        DrawCircleV((Vector2){ cell.x + 24.0f, cell.y + 12.0f }, 14.0f, Fade(YELLOW, 0.35f));
-        DrawCircleV((Vector2){ cell.x + 24.0f, cell.y + 12.0f }, 7.0f, YELLOW);
-        DrawLineEx((Vector2){ cell.x + 8.0f, cell.y + 12.0f }, (Vector2){ cell.x + 40.0f, cell.y + 12.0f }, 2.0f, RAYWHITE);
+        DrawCircleV((Vector2){ cell.x + center, cell.y + 9.0f }, 9.0f, Fade(YELLOW, 0.35f));
+        DrawCircleV((Vector2){ cell.x + center, cell.y + 9.0f }, 4.0f, YELLOW);
+        DrawLineEx((Vector2){ cell.x + 5.0f, cell.y + 9.0f },
+                   (Vector2){ cell.x + RPG_STAGE_TILE_SIZE - 5.0f, cell.y + 9.0f }, 2.0f, RAYWHITE);
     }
     if (blockType == RPG_BLOCK_EFFECT_BUTTON) {
-        DrawRectangleRec((Rectangle){ cell.x + 7.0f, cell.y + 29.0f, 34.0f, 10.0f }, DARKGRAY);
-        DrawRectangleLinesEx((Rectangle){ cell.x + 7.0f, cell.y + 29.0f, 34.0f, 10.0f }, 2.0f, RAYWHITE);
-        DrawCircle((int)cell.x + 24, (int)cell.y + 28, 7.0f, RED);
+        DrawRectangleRec((Rectangle){ cell.x + 5.0f, cell.y + 20.0f, 22.0f, 8.0f }, DARKGRAY);
+        DrawRectangleLinesEx((Rectangle){ cell.x + 5.0f, cell.y + 20.0f, 22.0f, 8.0f }, 2.0f, RAYWHITE);
+        DrawCircle((int)(cell.x + center), (int)(cell.y + 19.0f), 5.0f, RED);
     }
     // 伸縮後にも残る根元マスを、紫のアンカー記号で明確に示す。
     if (blockType == RPG_BLOCK_SIGNAL_SHRINK_ROOT_HORIZONTAL ||
         blockType == RPG_BLOCK_SIGNAL_SHRINK_ROOT_VERTICAL ||
         blockType == RPG_BLOCK_SIGNAL_SHRINK_ROOT_LEFT ||
         blockType == RPG_BLOCK_SIGNAL_SHRINK_ROOT_UP) {
-        DrawCircle((int)cell.x + 24, (int)cell.y + 24, 12.0f, Fade(PURPLE, 0.55f));
-        DrawCircleLines((int)cell.x + 24, (int)cell.y + 24, 12.0f, RAYWHITE);
+        Vector2 root = { cell.x + center, cell.y + center };
+        DrawCircle((int)root.x, (int)root.y, 8.0f, Fade(PURPLE, 0.55f));
+        DrawCircleLines((int)root.x, (int)root.y, 8.0f, RAYWHITE);
         Vector2 end = blockType == RPG_BLOCK_SIGNAL_SHRINK_ROOT_VERTICAL ?
-            (Vector2){ cell.x + 24.0f, cell.y + 39.0f } :
-            blockType == RPG_BLOCK_SIGNAL_SHRINK_ROOT_LEFT ? (Vector2){ cell.x + 9.0f, cell.y + 24.0f } :
-            blockType == RPG_BLOCK_SIGNAL_SHRINK_ROOT_UP ? (Vector2){ cell.x + 24.0f, cell.y + 9.0f } :
-            (Vector2){ cell.x + 39.0f, cell.y + 24.0f };
-        DrawLineEx((Vector2){ cell.x + 24.0f, cell.y + 24.0f }, end, 3.0f, GOLD);
+            (Vector2){ root.x, cell.y + RPG_STAGE_TILE_SIZE - 5.0f } :
+            blockType == RPG_BLOCK_SIGNAL_SHRINK_ROOT_LEFT ? (Vector2){ cell.x + 5.0f, root.y } :
+            blockType == RPG_BLOCK_SIGNAL_SHRINK_ROOT_UP ? (Vector2){ root.x, cell.y + 5.0f } :
+            (Vector2){ cell.x + RPG_STAGE_TILE_SIZE - 5.0f, root.y };
+        DrawLineEx(root, end, 3.0f, GOLD);
     }
 }
 
-static void DrawBlockCell(Rectangle cell, int blockType)
+/* ブロックは常に不透明に保ち、RGB成分だけを明るさ倍率で補正する。 */
+static Color ApplyBlockBrightness(Color color, float brightness)
 {
-    Color color = RpgStage_GetBlockColor(blockType);
-    // 半マス幅の穴を塗らずに残し、見た目と当たり判定の通路を一致させる。
+    color.r = (unsigned char)((float)color.r * brightness + 0.5f);
+    color.g = (unsigned char)((float)color.g * brightness + 0.5f);
+    color.b = (unsigned char)((float)color.b * brightness + 0.5f);
+    return color;
+}
+
+int RpgStage_GetHoleSolidParts(Rectangle cell, int blockType, Rectangle solidParts[2])
+{
+    // 穴は縦・横とも中央20px。余白側の6pxずつだけを描画・衝突判定に使う。
+    const float holeSize = 20.0f;
+    if (solidParts == NULL) return 0;
     if (blockType == RPG_BLOCK_HOLE_VERTICAL) {
-        DrawRectangleRec((Rectangle){ cell.x, cell.y, cell.width * 0.25f, cell.height }, color);
-        DrawRectangleRec((Rectangle){ cell.x + cell.width * 0.75f, cell.y, cell.width * 0.25f, cell.height }, color);
-    } else if (blockType == RPG_BLOCK_HOLE_HORIZONTAL) {
-        DrawRectangleRec((Rectangle){ cell.x, cell.y, cell.width, cell.height * 0.25f }, color);
-        DrawRectangleRec((Rectangle){ cell.x, cell.y + cell.height * 0.75f, cell.width, cell.height * 0.25f }, color);
+        float sideWidth = (cell.width - holeSize) * 0.5f;
+        solidParts[0] = (Rectangle){ cell.x, cell.y, sideWidth, cell.height };
+        solidParts[1] = (Rectangle){ cell.x + sideWidth + holeSize, cell.y, sideWidth, cell.height };
+        return 2;
+    }
+    if (blockType == RPG_BLOCK_HOLE_HORIZONTAL) {
+        float sideHeight = (cell.height - holeSize) * 0.5f;
+        solidParts[0] = (Rectangle){ cell.x, cell.y, cell.width, sideHeight };
+        solidParts[1] = (Rectangle){ cell.x, cell.y + sideHeight + holeSize, cell.width, sideHeight };
+        return 2;
+    }
+    return 0;
+}
+
+void RpgStage_DrawBlockCell(Rectangle cell, int blockType, float brightness)
+{
+    Color color = ApplyBlockBrightness(RpgStage_GetBlockColor(blockType), brightness);
+    Rectangle solidParts[2];
+    int solidPartCount = RpgStage_GetHoleSolidParts(cell, blockType, solidParts);
+    // 穴ブロックは、衝突判定と同じ実体部分だけを描画する。
+    if (solidPartCount > 0) {
+        for (int index = 0; index < solidPartCount; index++) DrawRectangleRec(solidParts[index], color);
     } else if (RpgStage_IsSolidBlock(blockType)) {
         DrawRectangleRec(cell, color);
     }
 }
 
-void RpgStage_Draw(const RpgStage *stage, bool showGrid)
+void RpgStage_Draw(const RpgStage *stage, bool showGrid, float brightness)
 {
+    if (brightness < 0.15f) brightness = 0.15f;
+    if (brightness > 1.0f) brightness = 1.0f;
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
         Rectangle cell = { column * RPG_STAGE_TILE_SIZE, row * RPG_STAGE_TILE_SIZE,
                            RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE };
         int blockType = stage->blocks[row][column];
         // 開いたドアの下2マスは空白、穴付きブロックは穴の外側だけを描画する。
-        DrawBlockCell(cell, blockType);
+        RpgStage_DrawBlockCell(cell, blockType, brightness);
         if (showGrid) DrawRectangleLinesEx(cell, 1.0f, Fade(DARKGRAY, 0.45f));
     }
 }
 
-void RpgStage_DrawMap(const RpgStage *stage, int mapIndex, bool showGrid)
+void RpgStage_DrawMap(const RpgStage *stage, int mapIndex, bool showGrid, float brightness)
 {
+    if (brightness < 0.15f) brightness = 0.15f;
+    if (brightness > 1.0f) brightness = 1.0f;
     int startColumn = mapIndex * RPG_STAGE_COLUMNS;
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_COLUMNS; column++) {
         Rectangle cell = { column * RPG_STAGE_TILE_SIZE, row * RPG_STAGE_TILE_SIZE,
                            RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE };
         int blockType = stage->blocks[row][startColumn + column];
         // マップ表示もゲーム本編と同じ壁形状を描画する。
-        DrawBlockCell(cell, blockType);
+        RpgStage_DrawBlockCell(cell, blockType, brightness);
         if (showGrid) DrawRectangleLinesEx(cell, 1.0f, Fade(DARKGRAY, 0.45f));
     }
 }
@@ -669,6 +937,16 @@ void RpgStage_DrawReferenceObject(Texture2D fileTexture, Rectangle cell, Color t
                    (Vector2){ 0.0f, 0.0f }, 0.0f, tint);
 }
 
+void RpgStage_DrawReferenceFolder(Rectangle cell, Color tint)
+{
+    /* Windowsの標準フォルダを参考にした軽量なベクター表示。画像資産を増やさない。 */
+    Color folder = ColorAlpha((Color){ 244, 183, 55, 255 }, tint.a / 255.0f);
+    DrawRectangleRec((Rectangle){ cell.x + 4.0f, cell.y + 11.0f, cell.width - 8.0f, cell.height - 16.0f }, folder);
+    DrawRectangleRec((Rectangle){ cell.x + 6.0f, cell.y + 7.0f, cell.width * 0.43f, 7.0f }, folder);
+    DrawRectangleLinesEx((Rectangle){ cell.x + 4.0f, cell.y + 11.0f, cell.width - 8.0f, cell.height - 16.0f }, 1.0f, Fade(BROWN, 0.70f));
+}
+
+/* 同じPNGを毎フレーム読み込まないため、Folder配置物だけの小さなTextureキャッシュを保持する。 */
 void RpgStage_DrawReferenceObjects(const RpgStage *stage, Texture2D fileTexture)
 {
     RpgStage_DrawReferenceObjectsExcept(stage, fileTexture, -1, -1);
@@ -677,11 +955,15 @@ void RpgStage_DrawReferenceObjects(const RpgStage *stage, Texture2D fileTexture)
 void RpgStage_DrawReferenceObjectsExcept(const RpgStage *stage, Texture2D fileTexture,
                                          int excludedRow, int excludedColumn)
 {
-    for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++)
-        if (row != excludedRow || column != excludedColumn)
+    for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
+        if (row == excludedRow && column == excludedColumn) continue;
         if (stage->blocks[row][column] == RPG_BLOCK_REFERENCE_FILE)
             RpgStage_DrawReferenceObject(fileTexture, (Rectangle){ column * RPG_STAGE_TILE_SIZE, row * RPG_STAGE_TILE_SIZE,
                                                                      RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE }, WHITE);
+        else if (stage->blocks[row][column] == RPG_BLOCK_REFERENCE_FOLDER)
+            RpgStage_DrawReferenceFolder((Rectangle){ column * RPG_STAGE_TILE_SIZE, row * RPG_STAGE_TILE_SIZE,
+                                                       RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE }, WHITE);
+    }
 }
 
 void RpgStage_DrawMapReferenceObjects(const RpgStage *stage, int mapIndex, Texture2D fileTexture)
@@ -691,6 +973,9 @@ void RpgStage_DrawMapReferenceObjects(const RpgStage *stage, int mapIndex, Textu
         if (stage->blocks[row][startColumn + column] == RPG_BLOCK_REFERENCE_FILE)
             RpgStage_DrawReferenceObject(fileTexture, (Rectangle){ column * RPG_STAGE_TILE_SIZE, row * RPG_STAGE_TILE_SIZE,
                                                                      RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE }, WHITE);
+        else if (stage->blocks[row][startColumn + column] == RPG_BLOCK_REFERENCE_FOLDER)
+            RpgStage_DrawReferenceFolder((Rectangle){ column * RPG_STAGE_TILE_SIZE, row * RPG_STAGE_TILE_SIZE,
+                                                       RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE }, WHITE);
 }
 
 // 地面や前景を描いた後にも特殊効果の記号だけを前面へ出せるようにする。
@@ -699,7 +984,7 @@ void RpgStage_DrawEffects(const RpgStage *stage)
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
         Rectangle cell = { column * RPG_STAGE_TILE_SIZE, row * RPG_STAGE_TILE_SIZE,
                            RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE };
-        DrawEffectSymbol(cell, stage->blocks[row][column]);
+        RpgStage_DrawEffectSymbol(cell, stage->blocks[row][column]);
     }
 }
 
@@ -709,7 +994,7 @@ void RpgStage_DrawMapEffects(const RpgStage *stage, int mapIndex)
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_COLUMNS; column++) {
         Rectangle cell = { column * RPG_STAGE_TILE_SIZE, row * RPG_STAGE_TILE_SIZE,
                            RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE };
-        DrawEffectSymbol(cell, stage->blocks[row][startColumn + column]);
+        RpgStage_DrawEffectSymbol(cell, stage->blocks[row][startColumn + column]);
     }
 }
 // 役割: RPG ステージのグリッド、地形判定、特殊ブロック、描画を管理する。

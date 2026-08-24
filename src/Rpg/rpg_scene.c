@@ -1,17 +1,19 @@
 // 依存する自プロジェクト内ファイル: rpg_scene.h, ../Shered/game_font.h。
 // 役割: タイトルと設定画面を描画し、ゲーム本体とは独立してシーン遷移を処理する。
+// 依存関係を更新: rpg_viewport.h を追加した。
 #include "rpg_scene.h"
 
 #include <stddef.h>
 #include <stdio.h>
 
 #include "game_font.h"
+#include "rpg_viewport.h"
 
 static const Rectangle startButton = { 360.0f, 238.0f, 240.0f, 44.0f };
 static const Rectangle settingsButton = { 360.0f, 298.0f, 240.0f, 44.0f };
 static const Rectangle newGameButton = { 360.0f, 238.0f, 240.0f, 44.0f };
 static const Rectangle continueButton = { 360.0f, 298.0f, 240.0f, 44.0f };
-static const Rectangle gameSettingsButton = { 842.0f, 10.0f, 94.0f, 26.0f };
+static const Rectangle gameSettingsButton = { 842.0f, 506.0f, 94.0f, 26.0f };
 static const Rectangle returnToGameButton = { 340.0f, 292.0f, 280.0f, 40.0f };
 static const Rectangle returnToTitleButton = { 340.0f, 344.0f, 280.0f, 40.0f };
 
@@ -97,7 +99,7 @@ bool RpgScene_IsGameSettings(const RpgSceneState *scene)
 bool RpgScene_TryOpenGameSettings(RpgSceneState *scene)
 {
     if (scene == NULL || scene->kind != RPG_SCENE_GAME || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT) ||
-        !CheckCollisionPointRec(GetMousePosition(), gameSettingsButton)) return false;
+        !CheckCollisionPointRec(RpgViewport_GetMousePosition(), gameSettingsButton)) return false;
     // 更新停止中も直前のゲーム状態を確認できるよう、画面を一枚だけ保存する。
     RpgScene_Release(scene);
     Image screenshot = LoadImageFromScreen();
@@ -119,7 +121,7 @@ bool RpgScene_UpdateGameSettings(RpgSceneState *scene)
         return true;
     }
     if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return false;
-    Vector2 pointer = GetMousePosition();
+    Vector2 pointer = RpgViewport_GetMousePosition();
     if (CheckCollisionPointRec(pointer, returnToGameButton)) {
         scene->kind = RPG_SCENE_GAME;
         RpgScene_Release(scene);
@@ -135,14 +137,14 @@ void RpgScene_DrawGameSettingsButton(void)
 {
     DrawRectangleRec(gameSettingsButton, Fade(DARKBLUE, 0.90f));
     DrawRectangleLinesEx(gameSettingsButton, 1.0f, RAYWHITE);
-    GameFont_Draw("設定", 868.0f, 14.0f, 18.0f, RAYWHITE);
+    GameFont_Draw("設定", 868.0f, 510.0f, 18.0f, RAYWHITE);
 }
 
 void RpgScene_DrawGameSettingsOverlay(const RpgSceneState *scene)
 {
     if (!RpgScene_IsGameSettings(scene)) return;
     // 背面の状態を視認できる濃さに限定した、設定用の半透明マスク。
-    DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Fade(BLACK, 0.42f));
+    DrawRectangle(0, 0, RpgViewport_GetWidth(), RpgViewport_GetHeight(), Fade(BLACK, 0.42f));
     GameFont_Draw("設定", 430.0f, 220.0f, 32.0f, RAYWHITE);
     DrawButton(returnToGameButton, "戻る", true);
     if (scene->allowsTitleReturn) DrawButton(returnToTitleButton, "タイトルへ", false);
@@ -157,7 +159,7 @@ static void DrawBackground(void)
 
 static void DrawButton(Rectangle bounds, const char *label, bool emphasized)
 {
-    bool hovered = CheckCollisionPointRec(GetMousePosition(), bounds);
+    bool hovered = CheckCollisionPointRec(RpgViewport_GetMousePosition(), bounds);
     Color color = emphasized ? DARKBLUE : DARKGRAY;
     if (hovered) color = BLUE;
     DrawRectangleRec(bounds, color);
@@ -186,15 +188,15 @@ static void DrawTitleScene(RpgSceneState *scene)
         DrawButton(startButton, "始める", true);
         DrawButton(settingsButton, "設定", false);
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-            if (CheckCollisionPointRec(GetMousePosition(), startButton)) scene->kind = RPG_SCENE_TITLE_START_MENU;
-            else if (CheckCollisionPointRec(GetMousePosition(), settingsButton)) scene->kind = RPG_SCENE_TITLE_SETTINGS;
+            if (CheckCollisionPointRec(RpgViewport_GetMousePosition(), startButton)) scene->kind = RPG_SCENE_TITLE_START_MENU;
+            else if (CheckCollisionPointRec(RpgViewport_GetMousePosition(), settingsButton)) scene->kind = RPG_SCENE_TITLE_SETTINGS;
         }
     } else if (scene->kind == RPG_SCENE_TITLE_START_MENU) {
         DrawButton(newGameButton, "初めから", true);
         DrawButton(continueButton, "続きから", false);
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), newGameButton))
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(RpgViewport_GetMousePosition(), newGameButton))
             scene->kind = RPG_SCENE_TITLE_STAGE_BUILD;
-        else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), continueButton)) {
+        else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(RpgViewport_GetMousePosition(), continueButton)) {
             scene->requiresContinueLoad = true;
             scene->requiresGameReset = true;
             scene->kind = RPG_SCENE_GAME;
@@ -203,7 +205,7 @@ static void DrawTitleScene(RpgSceneState *scene)
     } else if (scene->kind == RPG_SCENE_TITLE_STAGE_BUILD) {
         const int visibleButtonCount = 8;
         int maxScroll = scene->stageCount > visibleButtonCount ? scene->stageCount - visibleButtonCount : 0;
-        if (CheckCollisionPointRec(GetMousePosition(), (Rectangle){ 232.0f, 154.0f, 496.0f, 280.0f })) {
+        if (CheckCollisionPointRec(RpgViewport_GetMousePosition(), (Rectangle){ 232.0f, 154.0f, 496.0f, 280.0f })) {
             scene->stageButtonScroll -= (int)GetMouseWheelMove() * 2;
             if (scene->stageButtonScroll < 0) scene->stageButtonScroll = 0;
             if (scene->stageButtonScroll > maxScroll) scene->stageButtonScroll = maxScroll;
@@ -216,7 +218,7 @@ static void DrawTitleScene(RpgSceneState *scene)
             Rectangle button = GetBuildStageButton(visibleIndex);
             snprintf(label, sizeof(label), "[Stage%d]をビルドする", scene->stageNumbers[stageIndex]);
             DrawButton(button, label, true);
-            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), button)) {
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(RpgViewport_GetMousePosition(), button)) {
                 scene->selectedStageNumber = scene->stageNumbers[stageIndex];
                 scene->requiresGameReset = true;
                 scene->kind = RPG_SCENE_GAME;
@@ -240,7 +242,7 @@ static void DrawGameSettingsScene(RpgSceneState *scene)
     if (scene->hasFrozenBackdrop)
         DrawTexturePro(scene->frozenBackdrop,
                        (Rectangle){ 0.0f, 0.0f, (float)scene->frozenBackdrop.width, (float)scene->frozenBackdrop.height },
-                       (Rectangle){ 0.0f, 0.0f, (float)GetScreenWidth(), (float)GetScreenHeight() },
+                       (Rectangle){ 0.0f, 0.0f, (float)RpgViewport_GetWidth(), (float)RpgViewport_GetHeight() },
                        (Vector2){ 0.0f, 0.0f }, 0.0f, WHITE);
     else DrawBackground();
     RpgScene_DrawGameSettingsOverlay(scene);
@@ -249,11 +251,11 @@ static void DrawGameSettingsScene(RpgSceneState *scene)
 void RpgScene_UpdateAndDraw(RpgSceneState *scene)
 {
     if (scene == NULL) return;
-    BeginDrawing();
+    RpgViewport_BeginFrame();
     if (scene->kind == RPG_SCENE_GAME_SETTINGS) DrawGameSettingsScene(scene);
     else {
         DrawBackground();
         DrawTitleScene(scene);
     }
-    EndDrawing();
+    RpgViewport_EndFrame();
 }

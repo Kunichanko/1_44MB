@@ -12,6 +12,9 @@ typedef enum RpgExplorerMode {
 
 RpgExplorerMode RpgExplorerLauncher_LoadMode(void);
 bool RpgExplorerLauncher_SaveMode(RpgExplorerMode mode);
+/* 実行中の Zipper 構造体のルートを指定する。NULL で既定の設定フォルダへ戻す。 */
+void RpgExplorerLauncher_SetZipperDirectory(const char *path);
 bool RpgExplorerLauncher_OpenZipperDirectory(void);
+bool RpgExplorerLauncher_OpenDirectory(const char *path);
 
 #endif

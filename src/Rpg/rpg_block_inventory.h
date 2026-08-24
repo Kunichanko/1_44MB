@@ -32,12 +32,17 @@ enum {
     RPG_BLOCK_SIGNAL_SHRINK_PART_LEFT = 33,
     RPG_BLOCK_SIGNAL_SHRINK_ROOT_UP = 34,
     RPG_BLOCK_SIGNAL_SHRINK_PART_UP = 35,
+    RPG_BLOCK_REFERENCE_FOLDER = 36,
+    /* 見た目専用PNGを独立オブジェクトとして配置するためのパレット項目。 */
+    RPG_BLOCK_IMAGE_OBJECT = 37,
     RPG_BLOCK_ATTACHMENT_RADIO_EMITTER = 200,
     RPG_BLOCK_ATTACHMENT_DATA_BUTTON = 201,
     RPG_BLOCK_ATTACHMENT_SAVE_FLAG = 202,
     RPG_BLOCK_PROPERTY_ITEM = 100,
     RPG_BLOCK_PROPERTY_WIRE = 101,
     RPG_BLOCK_PROPERTY_RECEIVER = 102,
+    /* 通常イベントはブロックモードのパレットから、マスに沿って配置する。 */
+    RPG_BLOCK_PROPERTY_MAP_EVENT = 103,
     /* ビルド出力から対応フォルダが失われたマスを表す、実行時専用の壁。 */
     RPG_BLOCK_BUILD_MISSING = 300
 };
@@ -53,11 +58,13 @@ bool RpgBlockInventory_IsBounceEffect(int blockType);
 bool RpgBlockInventory_IsButtonEffect(int blockType);
 bool RpgBlockInventory_IsHoleBlock(int blockType);
 bool RpgBlockInventory_IsReferenceObject(int blockType);
+bool RpgBlockInventory_IsReferenceFolder(int blockType);
 bool RpgBlockInventory_IsDoorBlock(int blockType);
 bool RpgBlockInventory_IsDoorOpen(int blockType);
 bool RpgBlockInventory_IsSignalShrinkBlock(int blockType);
 bool RpgBlockInventory_IsAttachment(int blockType);
 bool RpgBlockInventory_IsCellAttachment(int blockType);
+bool RpgBlockInventory_IsMapEventProperty(int blockType);
 bool RpgBlockInventory_IsOrdinaryBlock(int blockType);
 int RpgBlockInventory_GetEffectRootType(int blockType);
 const RpgEffectShape *RpgBlockInventory_GetEffectShape(int blockType);

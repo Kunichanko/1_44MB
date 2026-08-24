@@ -14,6 +14,9 @@ bool RpgStageBuild_CreateEditorPreview(int stageNumber, RpgStage *stage, const R
                                        Vector2 playerStartPosition);
 /* 非同期通知を処理し、削除されたセルを赤い実行時壁へ反映する。 */
 void RpgStageBuild_Update(RpgStage *stage);
+/* Folder内のzipper.cmdが作った要求を一度だけ取り出す。別エリアの要求は消費して無視する。 */
+bool RpgStageBuild_ConsumeReferenceFolderZipperRequest(const RpgStage *stage, int playerMapIndex,
+                                                        RpgGridCell *folderCell);
 void RpgStageBuild_Close(void);
 
 #endif

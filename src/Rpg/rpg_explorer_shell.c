@@ -91,6 +91,17 @@ Texture2D RpgExplorerShell_LoadFolderIconTexture(void)
     return texture;
 }
 
+Texture2D RpgExplorerShell_LoadFileIconTexture(void)
+{
+    SHFILEINFOW information = { 0 };
+    Texture2D texture = { 0 };
+    if (SHGetFileInfoW(L"file.txt", FILE_ATTRIBUTE_NORMAL, &information, sizeof(information),
+                       SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES) == 0) return texture;
+    texture = ConvertIconToTexture(information.hIcon);
+    DestroyIcon(information.hIcon);
+    return texture;
+}
+
 static int FindOrAddIcon(RpgExplorerShellCache *cache, const RpgExplorerEntry *entry)
 {
     char key[RPG_EXPLORER_TYPE_LENGTH];
@@ -155,5 +166,6 @@ Texture2D RpgExplorerShell_GetTexture(const RpgExplorerShellCache *cache, int sl
 Texture2D RpgExplorerShell_GetFolderTexture(const RpgExplorerShellCache *cache)
 { (void)cache; return (Texture2D){ 0 }; }
 Texture2D RpgExplorerShell_LoadFolderIconTexture(void) { return (Texture2D){ 0 }; }
+Texture2D RpgExplorerShell_LoadFileIconTexture(void) { return (Texture2D){ 0 }; }
 void RpgExplorerShell_Unload(RpgExplorerShellCache *cache) { (void)cache; }
 #endif

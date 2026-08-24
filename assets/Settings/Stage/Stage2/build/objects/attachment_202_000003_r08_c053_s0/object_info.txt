@@ -1,5 +1,0 @@
-kind=attachment
-type=202
-id=3
-world_x=2568.0
-world_y=378.0

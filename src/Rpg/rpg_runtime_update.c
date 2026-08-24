@@ -21,7 +21,7 @@ void RpgRuntime_UpdateWorld(RpgRuntimeUpdateContext *context, float deltaTime)
     if (context->acceptsPlayerInput) {
         float maximumX = RpgStage_GetMapCount(context->stage) * RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE - 32.0f;
         RpgCharacter_UpdatePlayerWithStage(player, deltaTime, context->stage, 32.0f, maximumX);
-    }
+    } else player->isMoving = false;
     player->moveSpeed = savedMoveSpeed;
     if (RpgBlockInventory_IsBounceEffect(standingBlockType) && player->isGrounded) {
         player->verticalSpeed = -620.0f;

@@ -19,7 +19,12 @@ void RpgDataShot_SetFileProperties(RpgDataShot *shot, const RpgAttachment *attac
     if (shot == NULL || attachment == NULL) return;
     shot->fileCount = fileCount;
     shot->totalBytes = totalBytes;
-    shot->size = (fileCount - 1) * attachment->sizePerFile;
+    // 保存データが古くても、実弾の増分は必ず8px（1マスの1/4）刻みにそろえる。
+    const float sizeStep = RPG_STAGE_TILE_SIZE * 0.25f;
+    int stepCount = (int)(attachment->sizePerFile / sizeStep + 0.5f);
+    if (stepCount < 1) stepCount = 1;
+    if (stepCount > 8) stepCount = 8;
+    shot->size = (fileCount - 1) * sizeStep * (float)stepCount;
     if (shot->size < 1.0f) shot->size = 1.0f;
     // 100B時の基準速度を容量の100B単位数で割る。容量が大きいほど必ず遅くなる。
     float capacityUnits = (float)totalBytes / RPG_DATA_SPEED_BASE_BYTES;
@@ -229,19 +234,20 @@ void RpgDataShots_Draw(const RpgDataShots *shots)
     for (int index = 0; index < RPG_DATA_SHOT_MAX_COUNT; index++) {
         const RpgDataShot *shot = &shots->entries[index];
         if (!shot->active || shot->isZipperHeld) continue;
+        Vector2 drawPosition = RpgStage_SnapRenderPoint(shot->position);
         if (shot->isElectric) {
-            DrawCircleV(shot->position, 12.0f, Fade(YELLOW, 0.20f));
-            DrawCircleV(shot->position, 5.0f, GOLD);
-            DrawCircleLines((int)shot->position.x, (int)shot->position.y, 5.0f, RAYWHITE);
+            DrawCircleV(drawPosition, 12.0f, Fade(YELLOW, 0.20f));
+            DrawCircleV(drawPosition, 5.0f, GOLD);
+            DrawCircleLines((int)drawPosition.x, (int)drawPosition.y, 5.0f, RAYWHITE);
             continue;
         }
-        DrawCircleV(shot->position, shot->size, Fade(SKYBLUE, 0.3f));
-        DrawCircleV(shot->position, shot->size * 0.62f, YELLOW);
-        DrawCircleLines((int)shot->position.x, (int)shot->position.y, shot->size, RAYWHITE);
+        DrawCircleV(drawPosition, shot->size, Fade(SKYBLUE, 0.3f));
+        DrawCircleV(drawPosition, shot->size * 0.62f, YELLOW);
+        DrawCircleLines((int)drawPosition.x, (int)drawPosition.y, shot->size, RAYWHITE);
         // 数字だけを上に表示し、フォルダのファイル数と合計容量をその場で確認できるようにする。
         // 表記はファイル数とバイト数に統一する。100Bなら100と表示する。
         DrawText(TextFormat("%d %llu", shot->fileCount, shot->totalBytes),
-                 (int)(shot->position.x - 20.0f), (int)(shot->position.y - shot->size - 18.0f),
+                 (int)(drawPosition.x - 20.0f), (int)(drawPosition.y - shot->size - 18.0f),
                  12, RAYWHITE);
     }
 }
@@ -253,7 +259,8 @@ void RpgDataShots_DrawMap(const RpgDataShots *shots, int mapIndex)
     for (int index = 0; index < RPG_DATA_SHOT_MAX_COUNT; index++) {
         const RpgDataShot *shot = &shots->entries[index];
         if (!shot->active || shot->isZipperHeld || shot->position.x < mapStartX || shot->position.x >= mapEndX) continue;
-        Vector2 localPosition = { shot->position.x - mapStartX, shot->position.y };
+        Vector2 localPosition = RpgStage_SnapRenderPoint(
+            (Vector2){ shot->position.x - mapStartX, shot->position.y });
         if (shot->isElectric) {
             DrawCircleV(localPosition, 12.0f, Fade(YELLOW, 0.20f));
             DrawCircleV(localPosition, 5.0f, GOLD);

@@ -9,12 +9,13 @@ static const RpgBlockInventory inventories[] = {
     { "Effect", { RPG_BLOCK_EFFECT_BOUNCE, RPG_BLOCK_EFFECT_SLOW, RPG_BLOCK_EFFECT_WIDE_BOUNCE,
                     RPG_BLOCK_EFFECT_CORNER_BOUNCE, RPG_BLOCK_DOOR_CLOSED_TOP,
                     RPG_BLOCK_SIGNAL_SHRINK_ROOT_HORIZONTAL }, 6, false, false },
-    { "Item Property", { RPG_BLOCK_PROPERTY_ITEM, RPG_BLOCK_PROPERTY_WIRE }, 2, true, false },
+    { "Item Property", { RPG_BLOCK_PROPERTY_ITEM, RPG_BLOCK_PROPERTY_WIRE,
+                           RPG_BLOCK_PROPERTY_MAP_EVENT }, 3, true, false },
     { "Attachment Edge", { RPG_BLOCK_ATTACHMENT_DATA_BUTTON,
                              RPG_BLOCK_PROPERTY_RECEIVER }, 2, false, true },
     { "Attachment Object", { RPG_BLOCK_ATTACHMENT_RADIO_EMITTER,
                                RPG_BLOCK_ATTACHMENT_SAVE_FLAG }, 2, false, true },
-    { "Reference Object", { RPG_BLOCK_REFERENCE_FILE }, 1, false, false }
+    { "Reference Object", { RPG_BLOCK_REFERENCE_FILE, RPG_BLOCK_REFERENCE_FOLDER, RPG_BLOCK_IMAGE_OBJECT }, 3, false, false }
 };
 
 // 各特殊ブロックは先頭マスからの相対座標で占有形状を定義する。
@@ -88,7 +89,12 @@ bool RpgBlockInventory_IsHoleBlock(int blockType)
 
 bool RpgBlockInventory_IsReferenceObject(int blockType)
 {
-    return blockType == RPG_BLOCK_REFERENCE_FILE;
+    return blockType == RPG_BLOCK_REFERENCE_FILE || blockType == RPG_BLOCK_REFERENCE_FOLDER;
+}
+
+bool RpgBlockInventory_IsReferenceFolder(int blockType)
+{
+    return blockType == RPG_BLOCK_REFERENCE_FOLDER;
 }
 
 bool RpgBlockInventory_IsDoorBlock(int blockType)
@@ -122,6 +128,11 @@ bool RpgBlockInventory_IsCellAttachment(int blockType)
 {
     return blockType == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER ||
            blockType == RPG_BLOCK_ATTACHMENT_SAVE_FLAG;
+}
+
+bool RpgBlockInventory_IsMapEventProperty(int blockType)
+{
+    return blockType == RPG_BLOCK_PROPERTY_MAP_EVENT;
 }
 
 bool RpgBlockInventory_IsOrdinaryBlock(int blockType)

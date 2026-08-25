@@ -1,0 +1,9 @@
+kind=reference_folder
+type=36
+id=2329
+world_x=784.0
+world_y=208.0
+stage=1
+cell_row=6
+cell_column=24
+zipper_command=zipper.cmd

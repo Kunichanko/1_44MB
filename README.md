@@ -1,5 +1,13 @@
 # 1_44MB
 
+## Source layout
+
+- `src/Play`: 本編とExplorer補助実行形式の入口。
+- `src/Editor`: エディター専用の入力・プレイ制御・ファイル選択。
+- `src/Shered`: 本編とエディターで再利用するRPG、Explorer、フォントの共通実装。
+
+ゲーム本編の進行状態は `build/Stage/game/StageN` の `runtime_state` とオブジェクトフォルダに保持します。エディターの Settings はビルド時だけ使う静的な編集データです。
+
 ## Stage storage
 
 - `assets/Settings/Stage/StageN` keeps editor-only static stage definitions.
@@ -36,6 +44,7 @@ raylibで作成した2D横スクロールゲームと、そのRPG版エディタ
 - エディターの `Settings` で Zipper のダブルクリック時に開く Explorer を `Virtual` または `Windows` から選べます。選択は全体設定として保存されます。
 - `Windows` を選んだ場合、実Explorerで開いた `Inbox` はゲームによる追加・移動・削除をその場で更新します。
 - `Stage` 設定の左右矢印、または `Shift`+`←`／`→`（`↑`／`↓`も可）で編集対象ステージを切り替えます。ステージの選択位置は保存・`Revert saved` の対象外です。`Add stage`／`Delete stage` は `S` で保存し、`Revert saved` で保存状態へ戻せます。ステージ背景は同じ `Stage` 設定で PNG と背景・ブロックの明るさを設定でき、エディターとゲーム画面の各エリアを16×8マスに合わせて拡大描画します。未設定の場合、背景は描画しません。
+- `Stage` 設定の `Zipper capacity` はステージごとの上限を1KB（1000B）単位で入力し、`Enter` で確定します。ゲーム画面左上の ZIPPER ストレージ表示は、`Q`で開く実Zipperフォルダ全体の更新を反映し、上限を超えても数値は表示したままバーだけを100%で止めます。
 - マップ内のキャラクター、Zipper、アイテム、設置物、データ弾は、背景・ブロックと同じ表示ピクセルへそろえて描画します。
 - `Stage` 設定では、ビルド後にそのステージへ入った時に一度だけ発動するイベントを設定できます。`Area` 設定では、選択中エリアへ初めて入った時に一度だけ発動するイベントを設定できます。どちらも有効／無効と共通のFunction列（Dialogue／Move）を編集し、`S` で保存、`Revert saved` で保存状態へ戻せます。
 
@@ -72,6 +81,7 @@ raylibで作成した2D横スクロールゲームと、そのRPG版エディタ
 - 共通ドラッグ: 設置物・特殊ブロック・キャラクター・`FILE.png` は、同じ移動しきい値でドラッグを開始し、ドラッグ中はインスペクターを閉じます。
 - エディター内プレイ: 左上の `Play` で、選択中ステージを簡易ビルドして現在のプレイヤー位置から動作確認を開始します。`Stop` でプレイ中の変化を破棄して、開始前の編集状態へ戻ります。開始時に各種プレビューはリセットされ、停止後には復元されません。`All folders` 設定でも開始エリアだけをフォルダ化します。
 - エディター内プレイの操作: `E` でNPC会話を進め、`I` でNPCまたはZipperを調べます。Zipperの調べるFunction完了後は追従し、ダブルクリックで本編と同じZipperフォルダを開きます。
+- エディター内プレイ中のみ、`Q`で現在接続しているZipperフォルダを開けます。
 - 各キャラクターのインスペクター: `Save`でそのキャラクターの位置・大きさだけを保存。隣の`Revert`でその保存状態へ戻す
 - Zipper設定: 位置・大きさ・調べるFunctionをZipper専用設定として管理
 - Zipperを調べる: 設定したFunction列が完了すると主人公へ追従
@@ -140,7 +150,7 @@ RPGのステージ・会話・配置物・履歴は `assets/Settings/Stage`、Zi
 
 ## エディター
 
-`build/side_scroller_editor.exe` を起動すると、主人公の見た目を確認・変更できます。
+`build/rpg_editor.exe` を起動すると、ステージを確認・編集できます。
 
 - 主人公を左クリックするとインスペクターを表示します。
 - インスペクターの「PNG を選択」から PNG ファイルを指定すると、その場で見た目に反映されます。
@@ -163,20 +173,6 @@ MSYS2 MinGW64 シェルで、プロジェクト直下から次を実行します
 設置物とデータ弾は固有の実フォルダを持ち、Zipper のアニメーション中はそのフォルダ本体を `Settings/Zipper/Inbox` へ移動します。データ弾は取り込み中に停止・非表示となり、返却時には`object_info.txt`へ統合したマス位置と親装置の軌道位置から復帰します。データ弾が消える際には、発射後に追加されたファイルだけを File.png として地面へ落として保持します。
 
 電波発生装置が出すデータ弾は、弾フォルダ内のファイル数から1を引いた値で大きさ、合計容量で速度を決めます。発射時には装置側のメタデータ・ファイルを弾フォルダの `parent` へ複製し、弾自身のメタデータは弾フォルダ直下に保持します。
-
-```sh
-gcc -std=c11 -Wall -Wextra -Wpedantic -Isrc/Shered \
-  src/Play/main.c src/Shered/player.c src/Shered/stage.c \
-  src/Shered/enemy.c src/Shered/enemy_group.c src/Shered/enemy_settings.c src/Shered/game_font.c \
-  -o build/side_scroller.exe -lraylib -lopengl32 -lgdi32 -lwinmm
-
-gcc -std=c11 -Wall -Wextra -Wpedantic -Isrc/Editor -Isrc/Shered \
-  src/Editor/main.c src/Editor/editor_ui.c src/Editor/file_dialog.c \
-  src/Shered/enemy.c src/Shered/enemy_group.c src/Shered/enemy_settings.c \
-  src/Shered/game_font.c src/Shered/player.c src/Shered/stage.c \
-  -o build/side_scroller_editor.exe \
-  -lraylib -lcomdlg32 -lopengl32 -lgdi32 -lwinmm
-```
 
 実行ファイルと必要な DLL は `build` にまとめます。ゲーム本体を起動するには、`build` と同じ階層に `assets` フォルダが必要です。
 ## エリア管理

@@ -43,6 +43,7 @@ void RpgScene_SetStageList(RpgSceneState *scene, const int *stageNumbers, int st
 bool RpgScene_ConsumeGameReset(RpgSceneState *scene);
 bool RpgScene_ConsumeContinueLoad(RpgSceneState *scene);
 bool RpgScene_IsGameSettings(const RpgSceneState *scene);
+void RpgScene_SetGameSettingsButtonBounds(Rectangle bounds);
 bool RpgScene_TryOpenGameSettings(RpgSceneState *scene);
 bool RpgScene_UpdateGameSettings(RpgSceneState *scene);
 void RpgScene_DrawGameSettingsButton(void);

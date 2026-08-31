@@ -21,6 +21,8 @@ typedef struct RpgLayout {
     /* ステージ単位の Zipper 容量上限。KB は 1000 byte として扱う。 */
     unsigned int zipperMaxCapacityKB;
     float electricCellDelay;
+    /* 起動中の磁石が金属を1マス移動させる速さ。 */
+    float magnetMetalSpeed;
     /* Zipper が返却フォルダを元位置へ運ぶ演出の秒数。全ステージ共有のRuntime設定として保存する。 */
     float zipperFolderReturnDuration;
     /* 返却フォルダを待機場所へ移してから、返却演出を開始するまでの全体共有の待機秒数。 */

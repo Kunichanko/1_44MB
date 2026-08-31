@@ -7,10 +7,11 @@
 
 typedef struct RpgButtonEvent {
     unsigned int sequence;
+    int sourceMapIndex;
 } RpgButtonEvent;
 
 RpgButtonEvent RpgButtonEvent_Default(void);
-void RpgButtonEvent_Publish(RpgButtonEvent *event);
+void RpgButtonEvent_Publish(RpgButtonEvent *event, int sourceMapIndex);
 bool RpgButtonEvent_Consume(const RpgButtonEvent *event, unsigned int *lastConsumedSequence);
 
 #endif

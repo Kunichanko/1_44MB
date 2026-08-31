@@ -4,9 +4,11 @@
 #include <stddef.h>
 
 static const RpgBlockInventory inventories[] = {
-    { "Earth", { 1, 2, 3, 4, 5, RPG_BLOCK_HOLE_VERTICAL, RPG_BLOCK_HOLE_HORIZONTAL }, 7, false, false },
+    { "Earth", { 1, 2, 3, 4, 5, RPG_BLOCK_HOLE_VERTICAL, RPG_BLOCK_HOLE_HORIZONTAL,
+                   RPG_BLOCK_ONE_WAY_PLATFORM, RPG_BLOCK_METAL, RPG_BLOCK_PUSH_BLOCK }, 10, false, false },
     /* 既存ステージとの互換性を保つため定義は残し、選択パレットだけを必要な効果へ絞る。 */
-    { "Effect", { RPG_BLOCK_DOOR_CLOSED_TOP, RPG_BLOCK_SIGNAL_SHRINK_ROOT_HORIZONTAL }, 2, false, false },
+    { "Effect", { RPG_BLOCK_DOOR_CLOSED_TOP, RPG_BLOCK_KEY_DOOR_CLOSED_TOP,
+                    RPG_BLOCK_SIGNAL_SHRINK_ROOT_HORIZONTAL, RPG_BLOCK_EFFECT_MAGNET_OFF }, 4, false, false },
     { "Item Property", { RPG_BLOCK_PROPERTY_ITEM, RPG_BLOCK_PROPERTY_WIRE,
                            RPG_BLOCK_PROPERTY_MAP_EVENT }, 3, true, false },
     { "Attachment Edge", { RPG_BLOCK_ATTACHMENT_DATA_BUTTON,
@@ -35,7 +37,17 @@ static const RpgEffectShape effectShapes[] = {
         { 0, 0, RPG_BLOCK_DOOR_OPEN_TOP }, { 0, 1, RPG_BLOCK_DOOR_OPEN_MIDDLE },
         { 0, 2, RPG_BLOCK_DOOR_OPEN_BOTTOM }
     }, 3 },
-    { RPG_BLOCK_EFFECT_BUTTON, { { 0, 0, RPG_BLOCK_EFFECT_BUTTON } }, 1 }
+    { RPG_BLOCK_KEY_DOOR_CLOSED_TOP, {
+        { 0, 0, RPG_BLOCK_KEY_DOOR_CLOSED_TOP }, { 0, 1, RPG_BLOCK_KEY_DOOR_CLOSED_MIDDLE },
+        { 0, 2, RPG_BLOCK_KEY_DOOR_CLOSED_BOTTOM }
+    }, 3 },
+    { RPG_BLOCK_KEY_DOOR_OPEN_TOP, {
+        { 0, 0, RPG_BLOCK_KEY_DOOR_OPEN_TOP }, { 0, 1, RPG_BLOCK_KEY_DOOR_OPEN_MIDDLE },
+        { 0, 2, RPG_BLOCK_KEY_DOOR_OPEN_BOTTOM }
+    }, 3 },
+    { RPG_BLOCK_EFFECT_BUTTON, { { 0, 0, RPG_BLOCK_EFFECT_BUTTON } }, 1 },
+    { RPG_BLOCK_EFFECT_MAGNET_OFF, { { 0, 0, RPG_BLOCK_EFFECT_MAGNET_OFF } }, 1 },
+    { RPG_BLOCK_EFFECT_MAGNET_ON, { { 0, 0, RPG_BLOCK_EFFECT_MAGNET_ON } }, 1 }
     , { RPG_BLOCK_SIGNAL_SHRINK_ROOT_HORIZONTAL, {
         { 0, 0, RPG_BLOCK_SIGNAL_SHRINK_ROOT_HORIZONTAL }, { 1, 0, RPG_BLOCK_SIGNAL_SHRINK_PART_HORIZONTAL }
     }, 2 }
@@ -99,12 +111,26 @@ bool RpgBlockInventory_IsDoorBlock(int blockType)
 {
     const RpgEffectShape *shape = RpgBlockInventory_GetEffectShape(blockType);
     return shape != NULL && (shape->rootType == RPG_BLOCK_DOOR_CLOSED_TOP ||
-                             shape->rootType == RPG_BLOCK_DOOR_OPEN_TOP);
+                             shape->rootType == RPG_BLOCK_DOOR_OPEN_TOP ||
+                             shape->rootType == RPG_BLOCK_KEY_DOOR_CLOSED_TOP ||
+                             shape->rootType == RPG_BLOCK_KEY_DOOR_OPEN_TOP);
 }
 
 bool RpgBlockInventory_IsDoorOpen(int blockType)
 {
-    return RpgBlockInventory_GetEffectRootType(blockType) == RPG_BLOCK_DOOR_OPEN_TOP;
+    int rootType = RpgBlockInventory_GetEffectRootType(blockType);
+    return rootType == RPG_BLOCK_DOOR_OPEN_TOP || rootType == RPG_BLOCK_KEY_DOOR_OPEN_TOP;
+}
+
+bool RpgBlockInventory_IsKeyDoorBlock(int blockType)
+{
+    int rootType = RpgBlockInventory_GetEffectRootType(blockType);
+    return rootType == RPG_BLOCK_KEY_DOOR_CLOSED_TOP || rootType == RPG_BLOCK_KEY_DOOR_OPEN_TOP;
+}
+
+bool RpgBlockInventory_IsKeyDoorOpen(int blockType)
+{
+    return RpgBlockInventory_GetEffectRootType(blockType) == RPG_BLOCK_KEY_DOOR_OPEN_TOP;
 }
 
 bool RpgBlockInventory_IsSignalShrinkBlock(int blockType)
@@ -133,10 +159,38 @@ bool RpgBlockInventory_IsMapEventProperty(int blockType)
     return blockType == RPG_BLOCK_PROPERTY_MAP_EVENT;
 }
 
+bool RpgBlockInventory_IsOneWayPlatform(int blockType)
+{
+    return blockType == RPG_BLOCK_ONE_WAY_PLATFORM;
+}
+
+bool RpgBlockInventory_IsMagnetBlock(int blockType)
+{
+    int rootType = RpgBlockInventory_GetEffectRootType(blockType);
+    return rootType == RPG_BLOCK_EFFECT_MAGNET_OFF || rootType == RPG_BLOCK_EFFECT_MAGNET_ON;
+}
+
+bool RpgBlockInventory_IsMagnetActive(int blockType)
+{
+    return RpgBlockInventory_GetEffectRootType(blockType) == RPG_BLOCK_EFFECT_MAGNET_ON;
+}
+
+bool RpgBlockInventory_IsMetalBlock(int blockType)
+{
+    return blockType == RPG_BLOCK_METAL;
+}
+
+bool RpgBlockInventory_IsPushBlock(int blockType)
+{
+    return blockType == RPG_BLOCK_PUSH_BLOCK;
+}
+
 bool RpgBlockInventory_IsOrdinaryBlock(int blockType)
 {
     return (blockType >= 1 && blockType <= 10) ||
-           blockType == RPG_BLOCK_HOLE_VERTICAL || blockType == RPG_BLOCK_HOLE_HORIZONTAL;
+           blockType == RPG_BLOCK_HOLE_VERTICAL || blockType == RPG_BLOCK_HOLE_HORIZONTAL ||
+           RpgBlockInventory_IsOneWayPlatform(blockType) || RpgBlockInventory_IsMetalBlock(blockType) ||
+           RpgBlockInventory_IsPushBlock(blockType);
 }
 
 int RpgBlockInventory_GetEffectRootType(int blockType)
@@ -156,5 +210,11 @@ const RpgEffectShape *RpgBlockInventory_GetEffectShape(int blockType)
 const RpgEffectShape *RpgBlockInventory_GetDoorShape(bool isOpen)
 {
     return RpgBlockInventory_GetEffectShape(isOpen ? RPG_BLOCK_DOOR_OPEN_TOP : RPG_BLOCK_DOOR_CLOSED_TOP);
+}
+
+const RpgEffectShape *RpgBlockInventory_GetKeyDoorShape(bool isOpen)
+{
+    return RpgBlockInventory_GetEffectShape(isOpen ? RPG_BLOCK_KEY_DOOR_OPEN_TOP :
+                                                    RPG_BLOCK_KEY_DOOR_CLOSED_TOP);
 }
 // 役割: ブロックパレット、特殊ブロックの分類、形状定義を提供する。

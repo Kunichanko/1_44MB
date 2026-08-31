@@ -417,6 +417,13 @@ static bool BlockPath(const RpgObjectFolder *folder, int blockType, bool inInbox
     return snprintf(path, size, "%s\\%s", parent, name) > 0;
 }
 
+bool RpgObjectFolder_GetBlockDirectory(const RpgObjectFolder *folder, int blockType,
+                                       char *path, size_t pathSize)
+{
+    if (!BlockPath(folder, blockType, false, path, pathSize)) return false;
+    return CreateFolderUtf8(path);
+}
+
 static void RemoveTree(const char *directory)
 {
     char search[1200];
@@ -762,14 +769,18 @@ static void PrepareRuntimeReferenceFiles(RpgStage *stage)
         name = name == NULL ? sourcePath : name + 1;
         if (name[0] == '\0' || snprintf(folderPath, sizeof(folderPath), "%s\\reference_r%02d_c%03d",
                                            referenceRoot, row, column) <= 0 ||
-            snprintf(targetPath, sizeof(targetPath), "%s\\%s", folderPath, name) <= 0 ||
-            !CreateFolderUtf8(folderPath) || !ToWide(sourcePath, wideSource, 1200) ||
+            snprintf(targetPath, sizeof(targetPath), "%s\\%s", folderPath, name) <= 0) goto unavailable;
+        if (_stricmp(sourcePath, targetPath) == 0) continue;
+        if (!CreateFolderUtf8(folderPath) || !ToWide(sourcePath, wideSource, 1200) ||
             !ToWide(targetPath, wideTarget, 1200) || CopyFileW(wideSource, wideTarget, FALSE) == 0 ||
             !RpgStage_SetReferencePathAtCell(stage, row, column, targetPath)) goto unavailable;
         continue;
 unavailable:
-        stage->blocks[row][column] = 0;
-        stage->referencePaths[row][column][0] = '\0';
+        /* A missing source can be transient: the static package may have just
+           been extracted, or a reference copy may be repaired on the next
+           build.  Never turn that temporary lookup failure into a deletion of
+           the stage object (and then persist it into runtime_state). */
+        continue;
     }
 #else
     (void)stage;
@@ -1697,6 +1708,8 @@ bool RpgObjectFolders_ResumeStageBuild(int stageNumber, RpgStage *stage, char *b
     activeZipperPath[0] = '\0';
     RpgExplorerLauncher_SetZipperDirectory(NULL);
     /* データ弾など、マスに定着しない実行時オブジェクトは再開時に持ち越さない。 */
+    (void)RpgStageStorage_RepairReferenceFileCopies(stageNumber, stage);
+    PrepareRuntimeReferenceFiles(stage);
     RemoveTransientDataShotFolders();
     if (snprintf(zipperPath, sizeof(zipperPath), "%s\\folders\\Zipper", activeBuildPath) > 0 &&
         FolderExistsUtf8(zipperPath)) (void)SetActiveZipperPath(zipperPath);

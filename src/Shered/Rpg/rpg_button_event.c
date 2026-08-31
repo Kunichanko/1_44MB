@@ -4,14 +4,18 @@
 
 #include <stddef.h>
 
-RpgButtonEvent RpgButtonEvent_Default(void) { return (RpgButtonEvent){ 0 }; }
+RpgButtonEvent RpgButtonEvent_Default(void)
+{
+    return (RpgButtonEvent){ .sequence = 0, .sourceMapIndex = -1 };
+}
 
-void RpgButtonEvent_Publish(RpgButtonEvent *event)
+void RpgButtonEvent_Publish(RpgButtonEvent *event, int sourceMapIndex)
 {
     if (event == NULL) return;
     event->sequence++;
     // 連番のゼロは未受信状態に使うため、周回時も通知として扱える値を維持する。
     if (event->sequence == 0) event->sequence = 1;
+    event->sourceMapIndex = sourceMapIndex;
 }
 
 bool RpgButtonEvent_Consume(const RpgButtonEvent *event, unsigned int *lastConsumedSequence)

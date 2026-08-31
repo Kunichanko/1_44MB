@@ -32,6 +32,7 @@ typedef struct RpgStageBuildWatcher {
     /* ReadDirectoryChangesWで受けたFolder→Zipper要求。描画とは分離して一度だけ消費する。 */
     bool hasReferenceFolderZipperRequest;
     RpgGridCell referenceFolderZipperCell;
+    char buildPath[1200];
     bool isWatching;
 } RpgStageBuildWatcher;
 
@@ -72,6 +73,7 @@ static bool StartWatcher(const char *buildPath)
 {
     wchar_t wideBuildPath[1200];
     if (!ToWide(buildPath, wideBuildPath, 1200)) return false;
+    snprintf(watcher.buildPath, sizeof(watcher.buildPath), "%s", buildPath);
     watcher.directory = CreateFileW(wideBuildPath, FILE_LIST_DIRECTORY,
                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
                                     FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, NULL);
@@ -143,36 +145,38 @@ static void ApplyCellChange(RpgStage *stage, DWORD action, const wchar_t *relati
     }
 }
 
-/* build直下のFolder名とステージ上のFolderパスを照合し、CMD要求の発行元マスを記録する。 */
+/* Resolve the actual folder identity from its own metadata.  Folder names are
+   user-editable and therefore must never be used as an area/object identity. */
 static void QueueReferenceFolderZipperRequest(const RpgStage *stage, DWORD action,
                                               const wchar_t *relativePath)
 {
     char relativeUtf8[1024];
     char *separator;
-    const char *folderLeaf;
+    char infoPath[1200];
+    wchar_t wideInfoPath[1200];
+    FILE *info;
+    int row = -1;
+    int column = -1;
+    char line[256];
     if (stage == NULL || relativePath == NULL || action == FILE_ACTION_REMOVED ||
         WideCharToMultiByte(CP_UTF8, 0, relativePath, -1, relativeUtf8,
                             (int)sizeof(relativeUtf8), NULL, NULL) <= 0) return;
     separator = strrchr(relativeUtf8, '\\');
     if (separator == NULL || _stricmp(separator + 1, "zipper.request") != 0) return;
     *separator = '\0';
-    /* 監視通知は folders\\名前\\... の相対パスなので、配置済み Folder の葉名だけと比較する。 */
-    folderLeaf = strrchr(relativeUtf8, '\\');
-    folderLeaf = folderLeaf == NULL ? relativeUtf8 : folderLeaf + 1;
-    for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0;
-         column < RPG_STAGE_WORLD_COLUMNS; column++) {
-        const char *folderPath;
-        const char *folderName;
-        if (!RpgBlockInventory_IsReferenceFolder(stage->blocks[row][column])) continue;
-        folderPath = RpgStage_GetReferencePathAtCell(stage, row, column);
-        folderName = strrchr(folderPath, '\\');
-        if (folderName == NULL) folderName = strrchr(folderPath, '/');
-        folderName = folderName == NULL ? folderPath : folderName + 1;
-        if (_stricmp(folderName, folderLeaf) != 0) continue;
-        watcher.referenceFolderZipperCell = (RpgGridCell){ row, column };
-        watcher.hasReferenceFolderZipperRequest = true;
-        return;
+    if (snprintf(infoPath, sizeof(infoPath), "%s\\%s\\object_info.txt", watcher.buildPath,
+                 relativeUtf8) <= 0 ||
+        !ToWide(infoPath, wideInfoPath, (int)(sizeof(wideInfoPath) / sizeof(wideInfoPath[0]))) ||
+        (info = _wfopen(wideInfoPath, L"rb")) == NULL) return;
+    while (fgets(line, sizeof(line), info) != NULL) {
+        (void)sscanf(line, "cell_row=%d", &row);
+        (void)sscanf(line, "cell_column=%d", &column);
     }
+    fclose(info);
+    if (row < 0 || row >= RPG_STAGE_ROWS || column < 0 || column >= RPG_STAGE_WORLD_COLUMNS ||
+        !RpgBlockInventory_IsReferenceFolder(stage->blocks[row][column])) return;
+    watcher.referenceFolderZipperCell = (RpgGridCell){ row, column };
+    watcher.hasReferenceFolderZipperRequest = true;
 }
 
 /* ReadDirectoryChangesW の通知が Shell / cmd の連続操作でまとまった場合にも、残った要求ファイルを拾う。 */
@@ -294,33 +298,36 @@ void RpgStageBuild_Update(RpgStage *stage)
 #endif
 }
 
-bool RpgStageBuild_ConsumeReferenceFolderZipperRequest(const RpgStage *stage, int playerMapIndex,
+bool RpgStageBuild_ConsumeReferenceFolderZipperRequest(const RpgStage *stage, Vector2 playerPosition,
                                                         RpgGridCell *folderCell)
 {
 #ifdef _WIN32
     RpgGridCell requestedCell;
     char requestPath[1200];
     wchar_t wideRequestPath[1200];
-    bool isPlayerArea;
+    int playerMapIndex;
+    int requestMapIndex;
     PollReferenceFolderZipperRequest(stage);
     if (!watcher.hasReferenceFolderZipperRequest || stage == NULL) return false;
     requestedCell = watcher.referenceFolderZipperCell;
-    watcher.hasReferenceFolderZipperRequest = false;
     if (requestedCell.row < 0 || requestedCell.row >= RPG_STAGE_ROWS || requestedCell.column < 0 ||
         requestedCell.column >= RPG_STAGE_WORLD_COLUMNS ||
         !RpgBlockInventory_IsReferenceFolder(stage->blocks[requestedCell.row][requestedCell.column])) return false;
-    /* 実行済み要求は必ず消し、プレイヤーのいるエリア以外では副作用を起こさない。 */
+    playerMapIndex = RpgStage_GetMapAtWorldPosition(stage, playerPosition);
+    requestMapIndex = requestedCell.column / RPG_STAGE_COLUMNS;
+    /* Do not consume a request from another area.  It must remain pending until
+       the player actually enters that same connected-world area. */
+    if (playerMapIndex < 0 || playerMapIndex != requestMapIndex) return false;
+    watcher.hasReferenceFolderZipperRequest = false;
+    /* The request is now consumed by its owning area. */
     if (snprintf(requestPath, sizeof(requestPath), "%s\\zipper.request",
                  RpgStage_GetReferencePathAtCell(stage, requestedCell.row, requestedCell.column)) > 0 &&
         ToWide(requestPath, wideRequestPath, (int)(sizeof(wideRequestPath) / sizeof(wideRequestPath[0]))))
         (void)DeleteFileW(wideRequestPath);
-    isPlayerArea = playerMapIndex >= 0 && playerMapIndex < RPG_STAGE_MAP_COUNT &&
-                   requestedCell.column / RPG_STAGE_COLUMNS == playerMapIndex;
-    if (!isPlayerArea) return false;
     if (folderCell != NULL) *folderCell = requestedCell;
     return true;
 #else
-    (void)stage; (void)playerMapIndex; (void)folderCell;
+    (void)stage; (void)playerPosition; (void)folderCell;
     return false;
 #endif
 }

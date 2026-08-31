@@ -1,4 +1,4 @@
-// 依存する自プロジェクト内ファイル: rpg_attachment.h, rpg_character.h, rpg_block_inventory.h, rpg_data_shot.h, rpg_map_event.h, rpg_object_folder.h, rpg_receiver.h, rpg_wire.h
+// 依存する自プロジェクト内ファイル: rpg_attachment.h, rpg_character.h, rpg_block_inventory.h, rpg_data_shot.h, rpg_magnet.h, rpg_map_event.h, rpg_object_folder.h, rpg_receiver.h, rpg_wire.h
 // ステージ番号別の設定ロード: rpg_stage_storage.h
 // 依存関係を更新: game_font.h, rpg_dialogue.h を追加した。
 // 依存関係を更新: rpg_stage3_event.h を追加した。
@@ -28,8 +28,10 @@
 #include "rpg_game_save.h"
 #include "rpg_dialogue.h"
 #include "rpg_layout.h"
+#include "rpg_magnet.h"
 #include "rpg_stage_background.h"
 #include "rpg_viewport.h"
+#include "rpg_game_window.h"
 #include "rpg_inspect.h"
 #include "rpg_item.h"
 #include "rpg_map_event.h"
@@ -50,10 +52,19 @@
 
 // 依存関係: 本編起動時に build の通常マス保存方式を読み込み、ビルド時に使用する。
 
-enum { RPG_SCREEN_WIDTH = 960, RPG_SCREEN_HEIGHT = 540, RPG_PLAY_AREA_HEIGHT = 480 };
+enum { RPG_SCREEN_WIDTH = 640, RPG_SCREEN_HEIGHT = 384, RPG_PLAY_AREA_HEIGHT = 384 };
 
 static const char *npcTalkPrompt = u8"[E] \u8a71\u3057\u304b\u3051\u308b";
 static const char *zipperInspectPrompt = u8"[I] \u8abf\u3079\u308b";
+
+/* Runtime snapshots are valid only while the static area grid has not changed. */
+static bool HasMatchingAreaTopology(const RpgStage *left, const RpgStage *right)
+{
+    return left != NULL && right != NULL &&
+           memcmp(left->mapActive, right->mapActive, sizeof(left->mapActive)) == 0 &&
+           memcmp(left->mapGridX, right->mapGridX, sizeof(left->mapGridX)) == 0 &&
+           memcmp(left->mapGridY, right->mapGridY, sizeof(left->mapGridY)) == 0;
+}
 static const Rectangle referenceTextCloseButton = { 648.0f, 262.0f, 144.0f, 26.0f };
 
 static bool LoadReferenceText(const char *filePath, char *text, size_t textSize)
@@ -599,6 +610,11 @@ int main(void)
     ClearWindowState(FLAG_FULLSCREEN_MODE | FLAG_BORDERLESS_WINDOWED_MODE | FLAG_WINDOW_MAXIMIZED);
     SetWindowSize(RPG_SCREEN_WIDTH, RPG_SCREEN_HEIGHT);
     SetWindowPosition(80, 80);
+    /* 通常の non-client title bar はゲーム領域として利用し、上端へ近付いた時だけ
+       同じ場所に本編用の操作バーを表示する。 */
+    (void)RpgGameWindow_Install(GetWindowHandle(), 40.0f);
+    // 本編だけは32px x 24 x 14のマスを等倍で全面に表示する。
+    RpgViewport_SetSize(RPG_SCREEN_WIDTH, RPG_SCREEN_HEIGHT);
     RpgViewport_Initialize();
     RpgBuildCellStorage_LoadMode();
     SetTargetFPS(60);
@@ -629,7 +645,8 @@ int main(void)
     RpgLayout layout = stageData.layout;
     RpgStageBackground stageBackground = RpgStageBackground_Default();
     RpgStageBackground_Load(&stageBackground, layout.backgroundPath);
-    RpgStage stage = stageData.stage;
+    static RpgStage stage;
+    stage = stageData.stage;
     // 保存済みの日本語ファイル名を描画より先にフォントへ登録し、? 表示を防ぐ。
     RegisterReferenceFileNames(&stage);
     RpgItems items = stageData.items;
@@ -639,6 +656,7 @@ int main(void)
     RpgAttachments attachments = stageData.attachments;
     RpgSignalBlocks signalBlocks = stageData.signalBlocks;
     RpgDataShots dataShots = RpgDataShots_Default();
+    RpgMagnetRuntime magnetRuntime = RpgMagnetRuntime_Default();
     RpgButtonEvent buttonEvent = RpgButtonEvent_Default();
     // 前回が異常終了しても、プレイ中だけ使う実フォルダとInboxを残さない。
     RpgObjectFolders_ClearSessionStorage();
@@ -683,6 +701,7 @@ int main(void)
         }
     }
     RpgCharacter player = RpgCharacter_Create(layout.playerPosition, BLUE, BROWN);
+    RpgCharacter_SetUsesPlayerSpriteCollision(&player, true);
     RpgCharacter npc = RpgCharacter_Create(layout.npcPosition, PURPLE, DARKBROWN);
     npc.position = (Vector2){ -RPG_STAGE_WORLD_COLUMNS * RPG_STAGE_TILE_SIZE, -RPG_STAGE_TILE_SIZE };
     player.moveSpeed = layout.playerMoveSpeed;
@@ -736,7 +755,9 @@ int main(void)
     bool isZipperConnected = false;
     int activeSaveFlagId = 0;
     bool wasDataButtonPressed = false;
-    int previousMap = (int)(player.position.x / (RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE)) + 1;
+    int previousMap = RpgStage_FindNearestActiveMap(
+        &stage, (int)(player.position.x / (RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE)));
+    bool runtimeWorldCoordinatesInitialized = false;
     bool cameraFollowsPlayer = false;
     char itemMessage[96] = { 0 };
     float itemMessageTimer = 0.0f;
@@ -748,9 +769,9 @@ int main(void)
                                     RPG_STAGE_WORLD_HEIGHT / 2.0f },
                         .zoom = RPG_SCREEN_WIDTH / (float)(RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE) };
     RpgRuntimeContext runtime = {
-        .layout=&layout, .stageBackground=&stageBackground, .stage=&stage, .items=&items, .referenceDrops=&referenceDrops, .wires=&wires, .receivers=&receivers, .attachments=&attachments, .signalBlocks=&signalBlocks, .dataShots=&dataShots, .buttonEvent=&buttonEvent, .events=&events, .dialogue=&dialogue, .stage3Event=&stage3Event, .areaEntryEvents=&areaEntryEvents, .zipper=&zipper, .inspect=&inspect, .player=&player, .npc=&npc,
+        .layout=&layout, .stageBackground=&stageBackground, .stage=&stage, .items=&items, .referenceDrops=&referenceDrops, .wires=&wires, .receivers=&receivers, .attachments=&attachments, .signalBlocks=&signalBlocks, .dataShots=&dataShots, .buttonEvent=&buttonEvent, .events=&events, .dialogue=&dialogue, .stage3Event=&stage3Event, .areaEntryEvents=&areaEntryEvents, .zipper=&zipper, .inspect=&inspect, .player=&player, .npc=&npc, .magnetRuntime=&magnetRuntime,
         .dialogueIndex=&dialogueIndex, .stage3IntroIndex=&stage3IntroIndex, .inspectFunctionIndex=&inspectFunctionIndex, .inspectLineIndex=&inspectLineIndex, .inspectTarget=&inspectTarget, .isInspectMoveRunning=&isInspectMoveRunning, .inspectMoveElapsed=&inspectMoveElapsed, .inspectMoveStartX=&inspectMoveStartX, .inspectMoveStartY=&inspectMoveStartY, .activeInspectMove=&activeInspectMove, .inspectMoveTransitionElapsed=&inspectMoveTransitionElapsed, .activeWaitFunctionIndex=&activeWaitFunctionIndex, .inspectWaitElapsed=&inspectWaitElapsed, .stage3IntroShown=&stage3IntroShown, .areaEntryShown=areaEntryShown, .activeEntryEvent=&activeEntryEvent, .zipperFollowsPlayer=&zipperFollowsPlayer, .isZipperLaunched=&isZipperLaunched, .zipperLaunchVelocity=&zipperLaunchVelocity, .attachedDataShotIndex=&attachedDataShotIndex, .attachedAttachmentIndex=&attachedAttachmentIndex, .attachedDataShotOffset=&attachedDataShotOffset, .isZipperAttachedToBlock=&isZipperAttachedToBlock, .zipperAttachedBlockCell=&zipperAttachedBlockCell,
-        .zipperPointerSelected=&zipperPointerSelected, .isZipperPointerFeedbackSuppressed=&isZipperPointerFeedbackSuppressed, .lastZipperPointerClickTime=&lastZipperPointerClickTime, .selectedReferencePointerTarget=&selectedReferencePointerTarget, .isReferencePointerFeedbackSuppressed=&isReferencePointerFeedbackSuppressed, .isReferencePointerPressed=&isReferencePointerPressed, .pressedReferenceTarget=&pressedReferenceTarget, .referencePressPosition=&referencePressPosition, .isReferenceDragActive=&isReferenceDragActive, .draggedReferenceTarget=&draggedReferenceTarget, .referenceDragPosition=&referenceDragPosition, .lastReferencePointerClickTime=&lastReferencePointerClickTime, .zipperAnimationElapsed=&zipperAnimationElapsed, .npcInspectCompleted=&npcInspectCompleted, .zipperInspectCompleted=&zipperInspectCompleted, .isZipperControllable=&isZipperControllable, .wasDataButtonPressed=&wasDataButtonPressed, .previousMap=&previousMap, .cameraFollowsPlayer=&cameraFollowsPlayer, .itemMessage=itemMessage, .itemMessageSize=(int)sizeof(itemMessage), .itemMessageTimer=&itemMessageTimer, .referenceText=referenceText, .referenceTextSize=(int)sizeof(referenceText), .referenceFileName=referenceFileName, .referenceFileNameSize=(int)sizeof(referenceFileName), .isReferenceTextOpen=&isReferenceTextOpen, .camera=&camera, .zipperTexture=zipperTexture, .fileTexture=fileTexture, .scene=&scene
+        .zipperPointerSelected=&zipperPointerSelected, .isZipperPointerFeedbackSuppressed=&isZipperPointerFeedbackSuppressed, .lastZipperPointerClickTime=&lastZipperPointerClickTime, .selectedReferencePointerTarget=&selectedReferencePointerTarget, .isReferencePointerFeedbackSuppressed=&isReferencePointerFeedbackSuppressed, .isReferencePointerPressed=&isReferencePointerPressed, .pressedReferenceTarget=&pressedReferenceTarget, .referencePressPosition=&referencePressPosition, .isReferenceDragActive=&isReferenceDragActive, .draggedReferenceTarget=&draggedReferenceTarget, .referenceDragPosition=&referenceDragPosition, .lastReferencePointerClickTime=&lastReferencePointerClickTime, .zipperAnimationElapsed=&zipperAnimationElapsed, .npcInspectCompleted=&npcInspectCompleted, .zipperInspectCompleted=&zipperInspectCompleted, .isZipperControllable=&isZipperControllable, .wasDataButtonPressed=&wasDataButtonPressed, .previousMap=&previousMap, .worldCoordinatesInitialized=&runtimeWorldCoordinatesInitialized, .cameraFollowsPlayer=&cameraFollowsPlayer, .itemMessage=itemMessage, .itemMessageSize=(int)sizeof(itemMessage), .itemMessageTimer=&itemMessageTimer, .referenceText=referenceText, .referenceTextSize=(int)sizeof(referenceText), .referenceFileName=referenceFileName, .referenceFileNameSize=(int)sizeof(referenceFileName), .isReferenceTextOpen=&isReferenceTextOpen, .camera=&camera, .zipperTexture=zipperTexture, .fileTexture=fileTexture, .scene=&scene
     };
     (void)OpenTextFile;
     (void)UpdateRpgCamera;
@@ -760,6 +781,7 @@ int main(void)
     (void)DrawRpgWorld;
     while (!WindowShouldClose()) {
         RpgViewport_Update();
+        RpgGameWindow_UpdateAutoHide();
         // 設定画面も本編ランタイムが入力を処理する。タイトル系シーンとは更新経路を分ける。
         if (RpgScene_IsGameScene(&scene) || RpgScene_IsGameSettings(&scene)) {
             RpgGameSave continueSave = RpgGameSave_Default();
@@ -772,6 +794,21 @@ int main(void)
             bool stageLoaded = !shouldReloadStage || (shouldContinue ?
                 RpgStageStorage_LoadRuntimeState(scene.selectedStageNumber, &stageData) :
                 RpgStageStorage_LoadStage(scene.selectedStageNumber, &stageData));
+            if (shouldReloadStage && shouldContinue && stageLoaded) {
+                RpgStageData staticStageData;
+                if (RpgStageStorage_LoadStage(scene.selectedStageNumber, &staticStageData) &&
+                    !HasMatchingAreaTopology(&stageData.stage, &staticStageData.stage)) {
+                    (void)RpgStageStorage_ClearRuntimeState(scene.selectedStageNumber);
+                    stageData = staticStageData;
+                    shouldContinue = false;
+                }
+            }
+            /* An editor topology change deliberately removes the old runtime snapshot.  Continue then
+               falls back to the published static stage instead of leaving the game without a stage. */
+            if (shouldReloadStage && shouldContinue && !stageLoaded) {
+                shouldContinue = false;
+                stageLoaded = RpgStageStorage_LoadStage(scene.selectedStageNumber, &stageData);
+            }
             if (shouldReloadStage && stageLoaded) {
                 currentStageNumber = scene.selectedStageNumber;
                 layout = stageData.layout;
@@ -786,6 +823,7 @@ int main(void)
                 attachments = stageData.attachments;
                 signalBlocks = stageData.signalBlocks;
                 dataShots = RpgDataShots_Default();
+                magnetRuntime = RpgMagnetRuntime_Default();
                 buttonEvent = RpgButtonEvent_Default();
                 events = stageData.mapEvents;
                 dialogue = stageData.dialogue;
@@ -798,6 +836,7 @@ int main(void)
                 /* ステージを読み直す時は、一時的なInbox所持情報を次の実行へ持ち越さない。 */
                 RpgZipper_ClearHeldObject(&zipper);
                 player = RpgCharacter_Create(layout.playerPosition, BLUE, BROWN);
+                RpgCharacter_SetUsesPlayerSpriteCollision(&player, true);
                 player.moveSpeed = layout.playerMoveSpeed;
                 player.scale = layout.playerScale;
                 npc = RpgCharacter_Create(layout.npcPosition, PURPLE, DARKBROWN);
@@ -818,11 +857,14 @@ int main(void)
                 zipperAttachedBlockCell = (RpgGridCell){ -1, -1 }; zipperPointerSelected = false;
                 isReferenceTextOpen = false; itemMessage[0] = '\0'; itemMessageTimer = 0.0f;
                 // 続きからは保存旗の土台上へ復帰し、接続済みZipperは追従状態まで同時に戻す。
+                /* Flag respawns are already in unified world coordinates. */
+                int continueRespawnAreaId = -1;
                 if (shouldContinue && RpgAttachments_SetRaisedSaveFlag(&attachments, continueSave.flagId)) {
                     for (int index = 0; index < attachments.count; index++) {
                         if (attachments.entries[index].type != RPG_BLOCK_ATTACHMENT_SAVE_FLAG ||
                             attachments.entries[index].folderId != continueSave.flagId) continue;
-                        player.position = RpgAttachments_GetSaveFlagRespawnPosition(&attachments.entries[index]);
+                        player.position = RpgAttachments_GetSaveFlagRespawnPositionWorld(&attachments.entries[index], &stage);
+                        continueRespawnAreaId = attachments.entries[index].cell.column / RPG_STAGE_COLUMNS;
                         player.verticalSpeed = 0.0f;
                         player.isGrounded = true;
                         activeSaveFlagId = continueSave.flagId;
@@ -840,13 +882,25 @@ int main(void)
                         zipper.character.isGrounded = true;
                     }
                 }
-                previousMap = (int)(player.position.x / (RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE)) + 1;
+                runtimeWorldCoordinatesInitialized = continueRespawnAreaId >= 0;
+                previousMap = continueRespawnAreaId >= 0 ? continueRespawnAreaId :
+                    RpgStage_FindNearestActiveMap(
+                        &stage, (int)(player.position.x / (RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE)));
                 if (isBuildRequested) {
                     /* 初めからは静的ステージ→フォルダ生成、続きからは既存フォルダ状態の読み込みだけを行う。 */
-                    bool buildReady = shouldContinue ?
-                        RpgStageBuild_Resume(currentStageNumber, &stage) :
-                        RpgStageBuild_Create(currentStageNumber, &stage, &attachments, player.position);
-                    if (buildReady && !shouldContinue) {
+                    bool resumedRuntimeBuild = false;
+                    bool buildReady;
+                    if (shouldContinue) {
+                        resumedRuntimeBuild = RpgStageBuild_Resume(currentStageNumber, &stage);
+                        /* A stale or manually altered build directory must not make
+                           Continue unusable. Recreate its runtime artifacts from
+                           the already-loaded runtime snapshot instead. */
+                        buildReady = resumedRuntimeBuild ||
+                            RpgStageBuild_Create(currentStageNumber, &stage, &attachments, player.position);
+                    } else {
+                        buildReady = RpgStageBuild_Create(currentStageNumber, &stage, &attachments, player.position);
+                    }
+                    if (buildReady && (!shouldContinue || !resumedRuntimeBuild)) {
                         /* static を読んで build 構成を作成した直後だけ、実行用の初期構成を書き出す。 */
                         runtimeState = stageData;
                         runtimeState.layout = layout;
@@ -855,7 +909,8 @@ int main(void)
                         if (!RpgStageStorage_SaveRuntimeState(currentStageNumber, &runtimeState))
                             buildReady = false;
                     }
-                    if (buildReady && shouldContinue) RpgObjectFolders_LoadReferenceDrops(&referenceDrops);
+                    if (buildReady && shouldContinue && resumedRuntimeBuild)
+                        RpgObjectFolders_LoadReferenceDrops(&referenceDrops);
                     if (!buildReady)
                         RpgObjectFolders_EndStageBuild();
                 } else {
@@ -884,7 +939,7 @@ int main(void)
             RpgStageBuild_Update(&stage);
             RpgRuntime_UpdateAndDraw(&runtime);
             if (RpgScene_IsGameScene(&scene)) {
-                int touchedFlagIndex = RpgAttachments_FindTouchedSaveFlag(&attachments, player.position);
+                int touchedFlagIndex = RpgAttachments_FindTouchedSaveFlagWorld(&attachments, &stage, player.position);
                 if (zipperInspectCompleted) isZipperConnected = true;
                 if (touchedFlagIndex >= 0 && attachments.entries[touchedFlagIndex].folderId != activeSaveFlagId) {
                     RpgGameSave gameSave = {
@@ -944,6 +999,7 @@ int main(void)
             .player = &player, .npc = &npc, .stage = &stage, .attachments = &attachments,
             .signalBlocks = &signalBlocks, .dataShots = &dataShots, .buttonEvent = &buttonEvent,
             .receivers = &receivers, .wires = &wires, .layout = &layout,
+            .magnetRuntime = &magnetRuntime,
             .wasButtonPressed = &wasDataButtonPressed,
             .acceptsPlayerInput = dialogueIndex < 0 && stage3IntroIndex < 0 && inspectTarget < 0 && !isReferenceTextOpen,
             .updatesWorldSystems = false
@@ -995,7 +1051,7 @@ int main(void)
         // フォルダの変更を移動前に反映し、ファイル数と容量が弾の見た目・速度へ直ちに反映されるようにする。
         RpgObjectFolders_UpdateDataShotLifetimes(&dataShots, &attachments, &referenceDrops);
         RpgDataShots_Update(&dataShots, &attachments, &stage, &receivers, &wires,
-                             layout.electricCellDelay, GetFrameTime(), false);
+                             layout.electricCellDelay, NULL, GetFrameTime(), false);
 #endif
         runtimeMovementContext.updatesWorldSystems = true;
         RpgRuntime_UpdateWorld(&runtimeMovementContext, GetFrameTime());
@@ -1128,7 +1184,11 @@ int main(void)
                 }
             }
         }
-        int currentMap = (int)(player.position.x / (RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE)) + 1;
+        /* Area IDs are no longer derived from a packed horizontal slot.  Use the
+           unified stage lookup so a saved flag in an inserted/rearranged area
+           keeps the correct active-area identity after the first frame. */
+        int currentMap = RpgStage_GetMapAtWorldPosition(&stage, player.position);
+        if (currentMap < 0) currentMap = previousMap;
         if (currentMap == 3 && previousMap != 3 && stage3Event.enabled && !stage3IntroShown) {
             stage3IntroIndex = 0;
             stage3IntroShown = true;
@@ -1179,18 +1239,7 @@ int main(void)
                 isReferencePointerFeedbackSuppressed = true;
             }
         }
-        bool canInspectZipper = fabsf(player.position.x - zipper.character.position.x) <= 72.0f;
-        if (IsKeyPressed(KEY_I) && inspectTarget < 0 && inspect.enabled && !npcInspectCompleted && canTalk &&
-            dialogueIndex < 0 && stage3IntroIndex < 0 && !isReferenceTextOpen) {
-            inspectTarget = 1;
-            inspectFunctionIndex = 0;
-            inspectLineIndex = 0;
-        } else if (IsKeyPressed(KEY_I) && inspectTarget < 0 && zipper.inspect.enabled && !zipperInspectCompleted && canInspectZipper &&
-                   dialogueIndex < 0 && stage3IntroIndex < 0 && !isReferenceTextOpen) {
-            inspectTarget = 2;
-            inspectFunctionIndex = 0;
-            inspectLineIndex = 0;
-        }
+        /* NPC と Zipper の個別「調べる」は廃止した。通常会話とイベントFunction列は別経路で維持する。 */
         UpdateRpgCamera(&camera, player.position.x, cameraFollowsPlayer);
         RpgReferenceTarget hoveredReferencePointerTarget = { .kind = RPG_REFERENCE_TARGET_NONE,
                                                                .row = -1, .column = -1, .dropIndex = -1 };
@@ -1302,6 +1351,7 @@ int main(void)
     UnloadTexture(zipperTexture);
     UnloadTexture(fileTexture);
     RpgStageBackground_Unload(&stageBackground);
+    RpgGameWindow_Uninstall();
     RpgViewport_Shutdown();
     RpgScene_Release(&scene);
     GameFont_Unload();

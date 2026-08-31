@@ -1,7 +1,8 @@
 // 依存: file_dialog.h
 #include "file_dialog.h"
 
-#include "../Rpg/rpg_file_io.h"
+/* 依存関係を更新: 共有RPGモジュールの配置に合わせる。 */
+#include "../Shered/Rpg/rpg_file_io.h"
 
 #include <windows.h>
 #include <commdlg.h>

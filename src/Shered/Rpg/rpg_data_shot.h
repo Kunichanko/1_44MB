@@ -4,6 +4,7 @@
 
 #include "rpg_attachment.h"
 #include "rpg_button_event.h"
+#include "rpg_character.h"
 #include "rpg_preview_event.h"
 #include "rpg_receiver.h"
 #include "rpg_wire.h"
@@ -40,6 +41,8 @@ typedef struct RpgDataShot {
     bool isElectric;
     int electricWireIndex;
     int electricCellIndex;
+    /* 同じ導線マスで毎フレーム状態を反転させないため、作用済みのマスを記録する。 */
+    int electricLastAppliedCellIndex;
     float electricDelayElapsed;
 } RpgDataShot;
 typedef struct RpgDataShots {
@@ -56,6 +59,8 @@ void RpgDataShot_SetFileProperties(RpgDataShot *shot, const RpgAttachment *attac
                                    int fileCount, unsigned long long totalBytes);
 void RpgDataShots_Trigger(RpgDataShots *shots, const RpgAttachments *attachments, int attachmentIndex);
 void RpgDataShots_TriggerAll(RpgDataShots *shots, const RpgAttachments *attachments);
+void RpgDataShots_TriggerAllInMap(RpgDataShots *shots, const RpgAttachments *attachments,
+                                  int mapIndex);
 // ボタン押下通知を受信した場合だけ、各電波発生装置からデータ弾を射出する。
 void RpgDataShots_ConsumeButtonEvent(RpgDataShots *shots, const RpgAttachments *attachments,
                                      const RpgButtonEvent *buttonEvent);
@@ -66,6 +71,7 @@ void RpgDataShots_TriggerPreview(RpgDataShots *shots, const RpgAttachments *atta
 void RpgDataShots_Update(RpgDataShots *shots, const RpgAttachments *attachments,
                          RpgStage *stage, const RpgReceivers *receivers,
                          const RpgWires *wires, float electricCellDelay,
+                         const RpgMovingSolidSet *movingSolids,
                          float deltaTime, bool previewsOnly);
 void RpgDataShots_Draw(const RpgDataShots *shots);
 void RpgDataShots_DrawMap(const RpgDataShots *shots, int mapIndex);

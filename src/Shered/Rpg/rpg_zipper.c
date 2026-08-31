@@ -10,10 +10,8 @@
 RpgZipper RpgZipper_Default(void)
 {
     RpgZipper zipper = { 0 };
-    // 初期配置はステージID (2, 0)、すなわち3番目のステージの中央下辺に固定する。
-    zipper.character = RpgCharacter_Create((Vector2){ 2.0f * RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE +
-                                                       RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE * 0.5f,
-                                                       RPG_STAGE_GROUND_TOP }, ORANGE, BROWN);
+    /* Zipper はステージへ初期配置しない。接続時だけランタイムがプレイヤー位置へ同期する。 */
+    zipper.character = RpgCharacter_Create((Vector2){ -RPG_STAGE_TILE_SIZE, -RPG_STAGE_TILE_SIZE }, ORANGE, BROWN);
     zipper.inspect = RpgInspect_Default("Zipper", "Nothing unusual here.");
     zipper.launchSpeed = 720.0f;
     zipper.returnSpeed = 180.0f;

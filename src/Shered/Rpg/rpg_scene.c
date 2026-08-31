@@ -9,15 +9,10 @@
 #include "game_font.h"
 #include "rpg_viewport.h"
 
-static const Rectangle startButton = { 360.0f, 238.0f, 240.0f, 44.0f };
-static const Rectangle settingsButton = { 360.0f, 298.0f, 240.0f, 44.0f };
-static const Rectangle newGameButton = { 360.0f, 238.0f, 240.0f, 44.0f };
-static const Rectangle continueButton = { 360.0f, 298.0f, 240.0f, 44.0f };
-static const Rectangle gameSettingsButton = { 842.0f, 506.0f, 94.0f, 26.0f };
-static const Rectangle returnToGameButton = { 340.0f, 292.0f, 280.0f, 40.0f };
-static const Rectangle returnToTitleButton = { 340.0f, 344.0f, 280.0f, 40.0f };
+static Rectangle gameSettingsButton = { 842.0f, 506.0f, 94.0f, 26.0f };
 
 static void DrawButton(Rectangle bounds, const char *label, bool emphasized);
+static Rectangle GetCenteredButton(float y, float width, float height);
 
 RpgSceneState RpgScene_Default(void)
 {
@@ -44,6 +39,12 @@ void RpgScene_Release(RpgSceneState *scene)
 
 void RpgScene_RegisterText(void)
 {
+    GameFont_AddText(u8"始める");
+    GameFont_AddText(u8"設定");
+    GameFont_AddText(u8"初めから");
+    GameFont_AddText(u8"続きから");
+    GameFont_AddText(u8"戻る");
+    GameFont_AddText(u8"タイトルへ");
     GameFont_AddText(u8"ステージを選択");
     GameFont_AddText(u8"をビルドする");
     GameFont_AddText(u8"をビルドする");
@@ -96,24 +97,28 @@ bool RpgScene_IsGameSettings(const RpgSceneState *scene)
     return scene != NULL && scene->kind == RPG_SCENE_GAME_SETTINGS;
 }
 
+void RpgScene_SetGameSettingsButtonBounds(Rectangle bounds)
+{
+    // 本編とエディターで異なる仮想表示サイズを使っても、描画と入力で同じ設定ボタン矩形を共有する。
+    if (bounds.width > 0.0f && bounds.height > 0.0f) gameSettingsButton = bounds;
+}
+
 bool RpgScene_TryOpenGameSettings(RpgSceneState *scene)
 {
     if (scene == NULL || scene->kind != RPG_SCENE_GAME || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT) ||
         !CheckCollisionPointRec(RpgViewport_GetMousePosition(), gameSettingsButton)) return false;
-    // 更新停止中も直前のゲーム状態を確認できるよう、画面を一枚だけ保存する。
+    // DPI依存の画面キャプチャではなく、論理ビューポートの直前フレームを保存する。
     RpgScene_Release(scene);
-    Image screenshot = LoadImageFromScreen();
-    if (screenshot.data != NULL) {
-        scene->frozenBackdrop = LoadTextureFromImage(screenshot);
-        scene->hasFrozenBackdrop = scene->frozenBackdrop.id != 0;
-        UnloadImage(screenshot);
-    }
+    scene->frozenBackdrop = RpgViewport_CopyLastFrameTexture();
+    scene->hasFrozenBackdrop = scene->frozenBackdrop.id != 0;
     scene->kind = RPG_SCENE_GAME_SETTINGS;
     return true;
 }
 
 bool RpgScene_UpdateGameSettings(RpgSceneState *scene)
 {
+    Rectangle returnToGameButton = GetCenteredButton(292.0f, 280.0f, 40.0f);
+    Rectangle returnToTitleButton = GetCenteredButton(344.0f, 280.0f, 40.0f);
     if (scene == NULL || scene->kind != RPG_SCENE_GAME_SETTINGS) return false;
     if (IsKeyPressed(KEY_ESCAPE)) {
         scene->kind = RPG_SCENE_GAME;
@@ -135,19 +140,27 @@ bool RpgScene_UpdateGameSettings(RpgSceneState *scene)
 
 void RpgScene_DrawGameSettingsButton(void)
 {
+    Vector2 labelSize;
     DrawRectangleRec(gameSettingsButton, Fade(DARKBLUE, 0.90f));
     DrawRectangleLinesEx(gameSettingsButton, 1.0f, RAYWHITE);
-    GameFont_Draw("設定", 868.0f, 510.0f, 18.0f, RAYWHITE);
+    labelSize = GameFont_MeasureText(u8"設定", 18.0f);
+    GameFont_Draw(u8"設定", gameSettingsButton.x + (gameSettingsButton.width - labelSize.x) * 0.5f,
+                  gameSettingsButton.y + (gameSettingsButton.height - labelSize.y) * 0.5f,
+                  18.0f, RAYWHITE);
 }
 
 void RpgScene_DrawGameSettingsOverlay(const RpgSceneState *scene)
 {
+    Rectangle returnToGameButton = GetCenteredButton(292.0f, 280.0f, 40.0f);
+    Rectangle returnToTitleButton = GetCenteredButton(344.0f, 280.0f, 40.0f);
+    Vector2 titleSize;
     if (!RpgScene_IsGameSettings(scene)) return;
     // 背面の状態を視認できる濃さに限定した、設定用の半透明マスク。
     DrawRectangle(0, 0, RpgViewport_GetWidth(), RpgViewport_GetHeight(), Fade(BLACK, 0.42f));
-    GameFont_Draw("設定", 430.0f, 220.0f, 32.0f, RAYWHITE);
-    DrawButton(returnToGameButton, "戻る", true);
-    if (scene->allowsTitleReturn) DrawButton(returnToTitleButton, "タイトルへ", false);
+    titleSize = GameFont_MeasureText(u8"設定", 32.0f);
+    GameFont_Draw(u8"設定", ((float)RpgViewport_GetWidth() - titleSize.x) * 0.5f, 220.0f, 32.0f, RAYWHITE);
+    DrawButton(returnToGameButton, u8"戻る", true);
+    if (scene->allowsTitleReturn) DrawButton(returnToTitleButton, u8"タイトルへ", false);
 }
 
 static void DrawBackground(void)
@@ -169,20 +182,31 @@ static void DrawButton(Rectangle bounds, const char *label, bool emphasized)
                   22.0f, RAYWHITE);
 }
 
+static Rectangle GetCenteredButton(float y, float width, float height)
+{
+    return (Rectangle){ ((float)RpgViewport_GetWidth() - width) * 0.5f, y, width, height };
+}
+
 static void DrawTitle(void)
 {
-    DrawText("RPG", 388, 112, 72, RAYWHITE);
-    DrawText("RPG", 392, 108, 72, SKYBLUE);
+    int titleWidth = MeasureText("RPG", 72);
+    int titleX = (RpgViewport_GetWidth() - titleWidth) / 2;
+    DrawText("RPG", titleX - 4, 112, 72, RAYWHITE);
+    DrawText("RPG", titleX, 108, 72, SKYBLUE);
 }
 
 static Rectangle GetBuildStageButton(int visibleIndex)
 {
-    return (Rectangle){ 248.0f + (visibleIndex % 2) * 236.0f,
+    return (Rectangle){ ((float)RpgViewport_GetWidth() - 464.0f) * 0.5f + (visibleIndex % 2) * 236.0f,
                         174.0f + (visibleIndex / 2) * 58.0f, 228.0f, 44.0f };
 }
 
 static void DrawTitleScene(RpgSceneState *scene)
 {
+    Rectangle startButton = GetCenteredButton(238.0f, 240.0f, 44.0f);
+    Rectangle settingsButton = GetCenteredButton(298.0f, 240.0f, 44.0f);
+    Rectangle newGameButton = GetCenteredButton(238.0f, 240.0f, 44.0f);
+    Rectangle continueButton = GetCenteredButton(298.0f, 240.0f, 44.0f);
     DrawTitle();
     if (scene->kind == RPG_SCENE_TITLE) {
         DrawButton(startButton, "始める", true);
@@ -204,13 +228,15 @@ static void DrawTitleScene(RpgSceneState *scene)
         if (IsKeyPressed(KEY_ESCAPE)) scene->kind = RPG_SCENE_TITLE;
     } else if (scene->kind == RPG_SCENE_TITLE_STAGE_BUILD) {
         const int visibleButtonCount = 8;
+        Rectangle stageListBounds = { ((float)RpgViewport_GetWidth() - 496.0f) * 0.5f, 154.0f, 496.0f, 280.0f };
         int maxScroll = scene->stageCount > visibleButtonCount ? scene->stageCount - visibleButtonCount : 0;
-        if (CheckCollisionPointRec(RpgViewport_GetMousePosition(), (Rectangle){ 232.0f, 154.0f, 496.0f, 280.0f })) {
+        if (CheckCollisionPointRec(RpgViewport_GetMousePosition(), stageListBounds)) {
             scene->stageButtonScroll -= (int)GetMouseWheelMove() * 2;
             if (scene->stageButtonScroll < 0) scene->stageButtonScroll = 0;
             if (scene->stageButtonScroll > maxScroll) scene->stageButtonScroll = maxScroll;
         }
-        GameFont_Draw("ステージを選択", 380.0f, 126.0f, 24.0f, RAYWHITE);
+        Vector2 headingSize = GameFont_MeasureText(u8"ステージを選択", 24.0f);
+        GameFont_Draw(u8"ステージを選択", ((float)RpgViewport_GetWidth() - headingSize.x) * 0.5f, 126.0f, 24.0f, RAYWHITE);
         for (int visibleIndex = 0; visibleIndex < visibleButtonCount; visibleIndex++) {
             int stageIndex = scene->stageButtonScroll + visibleIndex;
             if (stageIndex >= scene->stageCount) break;
@@ -228,7 +254,7 @@ static void DrawTitleScene(RpgSceneState *scene)
             DrawText(TextFormat("%d-%d / %d", scene->stageButtonScroll + 1,
                                 scene->stageButtonScroll + visibleButtonCount < scene->stageCount ?
                                 scene->stageButtonScroll + visibleButtonCount : scene->stageCount,
-                                scene->stageCount), 662, 126, 14, LIGHTGRAY);
+                                scene->stageCount), RpgViewport_GetWidth() - 66, 126, 14, LIGHTGRAY);
         }
         if (IsKeyPressed(KEY_ESCAPE)) scene->kind = RPG_SCENE_TITLE_START_MENU;
     } else {
@@ -241,7 +267,7 @@ static void DrawGameSettingsScene(RpgSceneState *scene)
 {
     if (scene->hasFrozenBackdrop)
         DrawTexturePro(scene->frozenBackdrop,
-                       (Rectangle){ 0.0f, 0.0f, (float)scene->frozenBackdrop.width, (float)scene->frozenBackdrop.height },
+                       (Rectangle){ 0.0f, 0.0f, (float)scene->frozenBackdrop.width, -(float)scene->frozenBackdrop.height },
                        (Rectangle){ 0.0f, 0.0f, (float)RpgViewport_GetWidth(), (float)RpgViewport_GetHeight() },
                        (Vector2){ 0.0f, 0.0f }, 0.0f, WHITE);
     else DrawBackground();

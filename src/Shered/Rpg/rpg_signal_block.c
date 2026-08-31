@@ -191,7 +191,10 @@ void RpgSignalBlocks_Update(RpgSignalBlocks *blocks, RpgStage *stage,
 {
     if (blocks == NULL || stage == NULL) return;
     if (RpgButtonEvent_Consume(signal, &blocks->lastSignalSequence))
-        for (int index = 0; index < blocks->count; index++) Activate(blocks, stage, index);
+        for (int index = 0; index < blocks->count; index++)
+            if (signal->sourceMapIndex >= 0 &&
+                blocks->entries[index].column / RPG_STAGE_COLUMNS == signal->sourceMapIndex)
+                Activate(blocks, stage, index);
     for (int index = 0; index < blocks->count; index++) {
         RpgSignalBlock *block = &blocks->entries[index];
         if (block->previewRemaining > 0.0f) {

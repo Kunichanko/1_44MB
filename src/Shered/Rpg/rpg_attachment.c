@@ -280,6 +280,30 @@ bool RpgAttachments_IsButtonPressed(const RpgAttachments *attachments, Vector2 p
     return false;
 }
 
+bool RpgAttachments_IsButtonPressedWorld(const RpgAttachments *attachments, const RpgStage *stage,
+                                         Vector2 playerPosition)
+{
+    int playerMap;
+    if (attachments == NULL || stage == NULL) return false;
+    /* Buttons are Area-owned.  The assembled stage may contain many Areas,
+       but a player can only trigger buttons belonging to the Area containing
+       their centre.  This also avoids scanning unrelated button paths. */
+    playerMap = RpgStage_GetMapAtWorldPosition(stage, playerPosition);
+    if (playerMap < 0) return false;
+    for (int index = 0; index < attachments->count; index++) {
+        const RpgAttachment *attachment = &attachments->entries[index];
+        RpgGridCell outerCell;
+        Vector2 position;
+        if (attachment->isZipperHeld || attachment->type != RPG_BLOCK_ATTACHMENT_DATA_BUTTON) continue;
+        if (attachment->cell.column / RPG_STAGE_COLUMNS != playerMap) continue;
+        outerCell = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
+        position = RpgStage_GetWorldPositionForCell(stage, outerCell.row, outerCell.column);
+        if (fabsf(playerPosition.x - position.x) <= 22.0f && fabsf(playerPosition.y - position.y) <= 24.0f)
+            return true;
+    }
+    return false;
+}
+
 int RpgAttachments_FindTouchedSaveFlag(const RpgAttachments *attachments, Vector2 playerPosition)
 {
     if (attachments == NULL) return -1;
@@ -287,6 +311,21 @@ int RpgAttachments_FindTouchedSaveFlag(const RpgAttachments *attachments, Vector
         const RpgAttachment *attachment = &attachments->entries[index];
         if (attachment->isZipperHeld || attachment->type != RPG_BLOCK_ATTACHMENT_SAVE_FLAG) continue;
         if (Vector2Distance(playerPosition, RpgAttachments_GetPosition(attachment, 0)) <= 28.0f) return index;
+    }
+    return -1;
+}
+
+int RpgAttachments_FindTouchedSaveFlagWorld(const RpgAttachments *attachments, const RpgStage *stage,
+                                            Vector2 playerPosition)
+{
+    if (attachments == NULL || stage == NULL) return -1;
+    for (int index = 0; index < attachments->count; index++) {
+        const RpgAttachment *attachment = &attachments->entries[index];
+        if (attachment->isZipperHeld || attachment->type != RPG_BLOCK_ATTACHMENT_SAVE_FLAG) continue;
+        if (Vector2Distance(playerPosition,
+                            RpgStage_GetWorldPositionForCell(stage, attachment->cell.row,
+                                                             attachment->cell.column)) <= 28.0f)
+            return index;
     }
     return -1;
 }
@@ -325,6 +364,15 @@ Vector2 RpgAttachments_GetSaveFlagRespawnPosition(const RpgAttachment *attachmen
     /* キャラクター座標は足元基準なので、旗を支えるブロックの上辺へ置く。 */
     return (Vector2){ (attachment->cell.column + 0.5f) * RPG_STAGE_TILE_SIZE,
                       attachment->cell.row * RPG_STAGE_TILE_SIZE };
+}
+
+Vector2 RpgAttachments_GetSaveFlagRespawnPositionWorld(const RpgAttachment *attachment,
+                                                        const RpgStage *stage)
+{
+    Vector2 position = RpgStage_GetWorldPositionForCell(stage, attachment == NULL ? -1 : attachment->cell.row,
+                                                         attachment == NULL ? -1 : attachment->cell.column);
+    position.y -= RPG_STAGE_TILE_SIZE * 0.5f;
+    return position;
 }
 
 int RpgAttachments_FindAtPosition(const RpgAttachments *attachments, Vector2 position, float distance)

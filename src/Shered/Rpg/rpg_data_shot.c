@@ -1,5 +1,7 @@
-// 依存する自プロジェクト内ファイル: rpg_data_shot.h
+// 依存する自プロジェクト内ファイル: rpg_data_shot.h, rpg_magnet.h
 #include "rpg_data_shot.h"
+
+#include "rpg_magnet.h"
 
 #include "raymath.h"
 
@@ -9,6 +11,38 @@ static Vector2 RpgDataShots_GetCellCenter(RpgGridCell cell)
 {
     return (Vector2){ cell.column * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f,
                       cell.row * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f };
+}
+
+/* Data paths and receivers are serialized in packed storage-cell coordinates.
+   Player physics, however, now uses the stage's connected two-dimensional world.
+   Convert only while consulting world-space collision data; retaining the stored
+   shot position keeps data paths, receivers, and per-map drawing in sync. */
+static bool RpgDataShots_StoragePositionToWorld(const RpgStage *stage, Vector2 storagePosition,
+                                                Vector2 *worldPosition)
+{
+    int storageColumn = (int)floorf(storagePosition.x / RPG_STAGE_TILE_SIZE);
+    int storageRow = (int)floorf(storagePosition.y / RPG_STAGE_TILE_SIZE);
+    if (stage == NULL || worldPosition == NULL || storageColumn < 0 ||
+        storageColumn >= RPG_STAGE_WORLD_COLUMNS || storageRow < 0 ||
+        storageRow >= RPG_STAGE_ROWS) return false;
+    int mapIndex = storageColumn / RPG_STAGE_COLUMNS;
+    if (!RpgStage_IsMapActive(stage, mapIndex)) return false;
+    Rectangle worldCell = RpgStage_GetWorldBoundsForCell(stage, storageRow, storageColumn);
+    float localX = storagePosition.x - storageColumn * RPG_STAGE_TILE_SIZE;
+    float localY = storagePosition.y - storageRow * RPG_STAGE_TILE_SIZE;
+    *worldPosition = (Vector2){ worldCell.x + localX, worldCell.y + localY };
+    return true;
+}
+
+static Vector2 RpgDataShots_WorldPositionToStorage(const RpgStage *stage, Vector2 worldPosition)
+{
+    int storageColumn;
+    int storageRow;
+    if (!RpgStage_GetWorldCellAtPosition(stage, worldPosition, &storageRow, &storageColumn))
+        return worldPosition;
+    Rectangle worldCell = RpgStage_GetWorldBoundsForCell(stage, storageRow, storageColumn);
+    return (Vector2){ storageColumn * RPG_STAGE_TILE_SIZE + (worldPosition.x - worldCell.x),
+                      storageRow * RPG_STAGE_TILE_SIZE + (worldPosition.y - worldCell.y) };
 }
 
 RpgDataShots RpgDataShots_Default(void) { return (RpgDataShots){ .nextFolderSerial = 1 }; }
@@ -35,6 +69,7 @@ void RpgDataShot_SetFileProperties(RpgDataShot *shot, const RpgAttachment *attac
 }
 
 static bool RpgDataShots_FindWallImpactAlongSegment(const RpgStage *stage, Vector2 start, Vector2 end,
+                                                    const RpgMovingSolidSet *movingSolids,
                                                     float radius, Vector2 *impactPosition)
 {
     // 高速な弾でも壁を飛び越えないよう、移動線分を小刻みに半径込みで調べる。
@@ -44,7 +79,25 @@ static bool RpgDataShots_FindWallImpactAlongSegment(const RpgStage *stage, Vecto
     for (int step = 1; step <= steps; step++) {
         float progress = (float)step / (float)steps;
         Vector2 position = Vector2Add(start, Vector2Scale(movement, progress));
-        if (RpgStage_FindSolidCircleCollisionCenter(stage, position, radius, impactPosition)) return true;
+        Vector2 worldPosition;
+        if (!RpgDataShots_StoragePositionToWorld(stage, position, &worldPosition)) {
+            *impactPosition = position;
+            return true;
+        }
+        Vector2 worldImpact;
+        if (RpgStage_FindSolidCircleCollisionCenter(stage, worldPosition, radius, &worldImpact)) {
+            *impactPosition = RpgDataShots_WorldPositionToStorage(stage, worldImpact);
+            return true;
+        }
+        /* Dynamic blocks expose the same world-space rectangles used by player physics. */
+        if (movingSolids != NULL) {
+            for (int solidIndex = 0; solidIndex < movingSolids->count; solidIndex++) {
+                if (CheckCollisionCircleRec(worldPosition, radius, movingSolids->entries[solidIndex].bounds)) {
+                    *impactPosition = position;
+                    return true;
+                }
+            }
+        }
         if (position.x - radius < 0.0f || position.x + radius > RPG_STAGE_WORLD_WIDTH ||
             position.y - radius < 0.0f || position.y + radius > RPG_STAGE_ROWS * RPG_STAGE_TILE_SIZE) {
             *impactPosition = position;
@@ -110,7 +163,7 @@ static void RpgDataShots_Spawn(RpgDataShots *shots, const RpgAttachments *attach
         shots->entries[index] = (RpgDataShot){ .active = true, .isPreview = isPreview,
             .folderSerial = shots->nextFolderSerial++, .attachmentIndex = attachmentIndex,
             .position = RpgDataShots_GetCellCenter(attachment->dataPath.cells[0]),
-            .metadataCell = { -1, -1 } };
+            .metadataCell = { -1, -1 }, .electricLastAppliedCellIndex = -1 };
         RpgDataShot_SetFileProperties(&shots->entries[index], attachment,
             isPreview ? attachment->previewFileCount : 0,
             isPreview ? attachment->previewTotalBytes : 0);
@@ -133,11 +186,22 @@ void RpgDataShots_TriggerAll(RpgDataShots *shots, const RpgAttachments *attachme
         RpgDataShots_Trigger(shots, attachments, index);
 }
 
+void RpgDataShots_TriggerAllInMap(RpgDataShots *shots, const RpgAttachments *attachments,
+                                  int mapIndex)
+{
+    if (shots == NULL || attachments == NULL || mapIndex < 0) return;
+    for (int index = 0; index < attachments->count; index++) {
+        const RpgAttachment *attachment = &attachments->entries[index];
+        if (attachment->cell.column / RPG_STAGE_COLUMNS != mapIndex) continue;
+        RpgDataShots_Trigger(shots, attachments, index);
+    }
+}
+
 void RpgDataShots_ConsumeButtonEvent(RpgDataShots *shots, const RpgAttachments *attachments,
                                      const RpgButtonEvent *buttonEvent)
 {
     if (RpgButtonEvent_Consume(buttonEvent, &shots->lastButtonEventSequence))
-        RpgDataShots_TriggerAll(shots, attachments);
+        RpgDataShots_TriggerAllInMap(shots, attachments, buttonEvent->sourceMapIndex);
 }
 
 void RpgDataShots_ConsumePreviewEvent(RpgDataShots *shots, const RpgAttachments *attachments,
@@ -161,9 +225,9 @@ void RpgDataShots_TriggerPreview(RpgDataShots *shots, const RpgAttachments *atta
 void RpgDataShots_Update(RpgDataShots *shots, const RpgAttachments *attachments,
                          RpgStage *stage, const RpgReceivers *receivers,
                          const RpgWires *wires, float electricCellDelay,
+                         const RpgMovingSolidSet *movingSolids,
                          float deltaTime, bool previewsOnly)
 {
-    (void)previewsOnly;
     for (int index = 0; index < RPG_DATA_SHOT_MAX_COUNT; index++) {
         RpgDataShot *shot = &shots->entries[index];
         if (!shot->active || shot->isZipperHeld || shot->attachmentIndex >= attachments->count) continue;
@@ -171,11 +235,14 @@ void RpgDataShots_Update(RpgDataShots *shots, const RpgAttachments *attachments,
             // 導線の進行は受容体ではなく、電気化したデータ弾自身が担当する。
             if (!RpgDataShots_UpdateElectric(shot, wires, electricCellDelay, deltaTime)) shot->active = false;
             // プレビュー弾は更新呼び出し側の用途に関わらず、ギミックへ影響しない。
-            else if (!shot->isPreview && !previewsOnly) {
+            else if (!shot->isPreview && !previewsOnly &&
+                     shot->electricLastAppliedCellIndex != shot->electricCellIndex) {
                 int row = (int)(shot->position.y / RPG_STAGE_TILE_SIZE);
                 int column = (int)(shot->position.x / RPG_STAGE_TILE_SIZE);
                 // 導線上の電気化データ弾がドアのマスへ入った瞬間、ドア全体を開状態にする。
                 RpgStage_SetDoorOpenAtCell(stage, row, column, true);
+                RpgMagnets_ToggleAtCell(stage, row, column);
+                shot->electricLastAppliedCellIndex = shot->electricCellIndex;
             }
             continue;
         }
@@ -215,11 +282,12 @@ void RpgDataShots_Update(RpgDataShots *shots, const RpgAttachments *attachments,
             else {
                 shot->isElectric = true;
                 shot->electricCellIndex = 0;
+                shot->electricLastAppliedCellIndex = -1;
                 shot->electricDelayElapsed = 0.0f;
                 shot->position = RpgDataShots_GetCellCenter(
                     wires->entries[shot->electricWireIndex].path.cells[0]);
             }
-        } else if (RpgDataShots_FindWallImpactAlongSegment(stage, previousPosition, shot->position, shot->size,
+        } else if (RpgDataShots_FindWallImpactAlongSegment(stage, previousPosition, shot->position, movingSolids, shot->size,
                                                     &impactPosition)) {
             shot->impactPosition = impactPosition;
             shot->hitWall = true;

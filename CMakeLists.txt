@@ -15,7 +15,7 @@ target_include_directories(rpg_explorer_shared PUBLIC
     src/Shered/Explorer
     src/Shered)
 target_compile_options(rpg_explorer_shared PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(rpg_explorer_shared PUBLIC raylib shell32 gdi32)
+target_link_libraries(rpg_explorer_shared PUBLIC raylib shell32 gdi32 dwmapi)
 
 # 共有実装は実行形式ごとに重複させず、ここで一度だけまとめる。
 file(GLOB RPG_SHARED_SOURCES CONFIGURE_DEPENDS
@@ -33,18 +33,19 @@ target_link_libraries(rpg_shared PUBLIC rpg_explorer_shared)
 
 add_executable(rpg_version WIN32 src/Play/rpg_main.c)
 target_compile_options(rpg_version PRIVATE -Wall -Wextra -Wpedantic)
-target_link_options(rpg_version PRIVATE "-Wl,--stack,8388608")
+target_link_options(rpg_version PRIVATE "-Wl,--stack,16777216")
 target_link_libraries(rpg_version PRIVATE rpg_shared)
 
 add_executable(rpg_editor WIN32
     src/Editor/rpg_editor_main.c
     src/Editor/rpg_editor_drag.c
+    src/Editor/rpg_editor_navigation.c
     src/Editor/rpg_editor_play.c
     src/Editor/rpg_editor_text.c
     src/Editor/file_dialog.c)
 target_include_directories(rpg_editor PRIVATE src/Editor)
 target_compile_options(rpg_editor PRIVATE -Wall -Wextra -Wpedantic)
-target_link_options(rpg_editor PRIVATE "-Wl,--stack,8388608")
+target_link_options(rpg_editor PRIVATE "-Wl,--stack,16777216")
 target_link_libraries(rpg_editor PRIVATE rpg_shared imm32 comdlg32)
 
 # Explorer風UIはPlayの補助実行形式として分離する。

@@ -4,6 +4,7 @@
 #include "rpg_runtime.h"
 #include "rpg_viewport.h"
 #include "raymath.h"
+#include "rlgl.h"
 #include <stddef.h>
 #include <math.h>
 #include <stdio.h>
@@ -20,12 +21,13 @@
 #include "rpg_stage_build.h"
 #include "rpg_explorer_launcher.h"
 #include "rpg_explorer_shell.h"
+#include "rpg_magnet.h"
 #include "rpg_runtime_update.h"
 #include "rpg_scene.h"
-enum { RPG_SCREEN_WIDTH = 960, RPG_SCREEN_HEIGHT = 540, RPG_PLAY_AREA_HEIGHT = 480 };
 static const float zipperImportAnimationDuration = 0.60f;
 static Texture2D folderReturnIcon = { 0 };
 static bool hasLoadedFolderReturnIcon = false;
+static const char *GetReferenceFileName(const char *filePath);
 
 /* 依存先: rpg_stage の追従File、rpg_object_folder の実ファイル移動。
    役割: 追従FileをFolderへ渡す間だけ表示位置を管理し、描画とファイル操作を分離する。 */
@@ -40,6 +42,10 @@ typedef struct RpgReferenceFolderTransfer {
     Vector2 destinationPosition;
     float drawScale;
     float elapsed;
+    bool isKeyDoorTransfer;
+    int keyDoorRow;
+    int keyDoorColumn;
+    char failureMessage[RPG_KEY_DOOR_FAILURE_TEXT_LENGTH];
     bool active;
 } RpgReferenceFolderTransfer;
 
@@ -48,6 +54,247 @@ static RpgReferenceFolderTransfer referenceFolderTransfer = {
     .followerIndex = -1
 };
 static const float referenceFolderTransferDuration = 0.42f;
+static RpgPlayerPushState playerPushState = { .heldBlockIndex = -1 };
+
+static int GetRuntimeMapIndex(const RpgStage *stage, Vector2 position, int fallbackMapIndex)
+{
+    int mapIndex = RpgStage_GetMapAtWorldPosition(stage, position);
+    if (mapIndex >= 0) return mapIndex;
+    if (RpgStage_IsMapActive(stage, fallbackMapIndex)) return fallbackMapIndex;
+    return RpgStage_FindNearestActiveMapAtGrid(stage,
+        (int)floorf(position.x / (RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE)),
+        -(int)floorf(position.y / RPG_STAGE_WORLD_HEIGHT));
+}
+
+/* Storage keeps map cells in horizontal slots, while rendering places each slot at
+   its persistent two-dimensional area coordinate. */
+static Vector2 GetRuntimeMapRenderOffset(const RpgStage *stage, int mapIndex)
+{
+    (void)stage;
+    (void)mapIndex;
+    return (Vector2){ 0.0f, 0.0f };
+}
+
+/* Local map draw functions use x=0 for the first column of a map.  The saved
+   stage remains horizontally packed, so this is intentionally separate from
+   GetRuntimeMapRenderOffset(), which projects world-space objects. */
+static Vector2 GetRuntimeMapRenderOrigin(const RpgStage *stage, int mapIndex)
+{
+    if (!RpgStage_IsMapActive(stage, mapIndex)) return (Vector2){ 0.0f, 0.0f };
+    return (Vector2){
+        (float)stage->mapGridX[mapIndex] * RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE,
+        -(float)stage->mapGridY[mapIndex] * RPG_STAGE_WORLD_HEIGHT
+    };
+}
+
+static Vector2 StoragePositionToWorld(const RpgStage *stage, Vector2 position, int mapIndex)
+{
+    const float mapWidth = RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE;
+    const float mapHeight = RPG_STAGE_ROWS * RPG_STAGE_TILE_SIZE;
+    if (!RpgStage_IsMapActive(stage, mapIndex)) return position;
+    return Vector2Add(position, (Vector2){
+        (stage->mapGridX[mapIndex] - mapIndex) * mapWidth,
+        -stage->mapGridY[mapIndex] * mapHeight
+    });
+}
+
+static void InitializeRuntimeWorldCoordinates(RpgRuntimeContext *context)
+{
+    const float mapWidth = RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE;
+    if (context == NULL || context->stage == NULL || context->player == NULL ||
+        context->worldCoordinatesInitialized == NULL || *context->worldCoordinatesInitialized) return;
+    int playerMap = context->previousMap == NULL ? -1 : *context->previousMap;
+    if (!RpgStage_IsMapActive(context->stage, playerMap))
+        playerMap = (int)floorf(context->player->position.x / mapWidth);
+    context->player->position = StoragePositionToWorld(context->stage, context->player->position, playerMap);
+    if (context->zipper != NULL && context->zipper->character.position.x >= 0.0f) {
+        int mapIndex = (int)floorf(context->zipper->character.position.x / mapWidth);
+        context->zipper->character.position = StoragePositionToWorld(context->stage,
+            context->zipper->character.position, mapIndex);
+    }
+    if (context->npc != NULL && context->npc->position.x >= 0.0f) {
+        int mapIndex = (int)floorf(context->npc->position.x / mapWidth);
+        context->npc->position = StoragePositionToWorld(context->stage, context->npc->position, mapIndex);
+    }
+    if (context->referenceDrops != NULL) for (int index = 0; index < context->referenceDrops->count; index++) {
+        RpgReferenceObject *object = &context->referenceDrops->entries[index];
+        int mapIndex = (int)floorf(object->position.x / mapWidth);
+        object->position = StoragePositionToWorld(context->stage, object->position, mapIndex);
+    }
+    if (context->previousMap != NULL)
+        *context->previousMap = RpgStage_GetMapAtWorldPosition(context->stage, context->player->position);
+    *context->worldCoordinatesInitialized = true;
+}
+
+static void DrawConnectedStageMaps(const RpgStage *stage, const RpgMagnetRuntime *magnetRuntime,
+                                   const RpgWires *wires, const RpgReceivers *receivers,
+                                   const RpgAttachments *attachments, const RpgDataShots *dataShots,
+                                   Texture2D fileTexture, const RpgStageBackground *stageBackground,
+                                   float backgroundBrightness, float blockBrightness)
+{
+    for (int mapIndex = 0; mapIndex < RPG_STAGE_MAP_COUNT; mapIndex++) {
+        if (!RpgStage_IsMapActive(stage, mapIndex)) continue;
+
+        int firstColumn = mapIndex * RPG_STAGE_COLUMNS;
+        Vector2 origin = GetRuntimeMapRenderOrigin(stage, mapIndex);
+        rlPushMatrix();
+        rlTranslatef(origin.x, origin.y, 0.0f);
+
+        RpgStageBackground_Draw(stageBackground,
+                                (Rectangle){ 0.0f, 0.0f,
+                                             (float)(RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE),
+                                             (float)(RPG_STAGE_ROWS * RPG_STAGE_TILE_SIZE) },
+                                backgroundBrightness);
+        RpgImageObjects_DrawLayer(&stage->imageObjects, mapIndex, RPG_STAGE_COLUMNS,
+                                  RPG_STAGE_TILE_SIZE, WHITE, RPG_IMAGE_OBJECT_LAYER_BACK);
+        RpgStage_DrawMap(stage, mapIndex, false, blockBrightness);
+
+        for (int row = 0; row < RPG_STAGE_ROWS; row++) {
+            for (int localColumn = 0; localColumn < RPG_STAGE_COLUMNS; localColumn++) {
+                int column = firstColumn + localColumn;
+                RpgObjectFolder objectFolder = { .cell = { row, column } };
+                if (!RpgObjectFolder_BlockHasLinkedFiles(&objectFolder, stage->blocks[row][column])) continue;
+                Rectangle objectBounds = { localColumn * RPG_STAGE_TILE_SIZE, row * RPG_STAGE_TILE_SIZE,
+                                           RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE };
+                DrawRectangleRec(objectBounds, Fade(GOLD, 0.30f));
+                DrawRectangleLinesEx(objectBounds, 2.0f, ORANGE);
+            }
+        }
+
+        RpgStage_DrawMapReferenceObjects(stage, mapIndex, fileTexture);
+        RpgStage_DrawMapEffects(stage, mapIndex);
+        rlPushMatrix();
+        rlTranslatef(-(float)(firstColumn * RPG_STAGE_TILE_SIZE), 0.0f, 0.0f);
+        RpgMagnets_DrawFields(stage, firstColumn, RPG_STAGE_COLUMNS);
+        rlPopMatrix();
+        RpgWires_DrawMap(wires, stage, mapIndex);
+        RpgWires_DrawElectric(wires, dataShots, firstColumn, RPG_STAGE_COLUMNS);
+        RpgReceivers_DrawMap(receivers, mapIndex);
+        RpgAttachments_DrawMap(attachments, mapIndex);
+        RpgDataShots_DrawMap(dataShots, mapIndex);
+        RpgImageObjects_DrawLayer(&stage->imageObjects, mapIndex, RPG_STAGE_COLUMNS,
+                                  RPG_STAGE_TILE_SIZE, WHITE,
+                                  RPG_IMAGE_OBJECT_LAYER_BLOCK_FRONT_CHARACTER_BACK);
+        RpgImageObjects_DrawLayer(&stage->imageObjects, mapIndex, RPG_STAGE_COLUMNS,
+                                  RPG_STAGE_TILE_SIZE, WHITE, RPG_IMAGE_OBJECT_LAYER_FRONT);
+        rlPopMatrix();
+    }
+    /* Dynamic metals already use connected-world coordinates.  Draw them once
+       after the per-slot static maps, not through a storage-slot transform. */
+    RpgMagnets_DrawMetals(magnetRuntime, 0, RPG_STAGE_WORLD_COLUMNS, 0.0f, blockBrightness);
+}
+
+/* Convert the camera's rendered world position back into the stage's local coordinates. */
+static Vector2 GetRuntimePointerWorldPosition(Camera2D camera, const RpgStage *stage, int mapIndex)
+{
+    (void)stage;
+    (void)mapIndex;
+    return GetScreenToWorld2D(RpgViewport_GetMousePosition(), camera);
+}
+
+/* Player-following objects are stored in the same slot coordinate system as the
+   player.  Area changes remap that storage coordinate, so move every follower
+   by the exact remap delta before its normal smoothing update runs. */
+static void TranslatePlayerFollowers(RpgRuntimeContext *context, Vector2 delta)
+{
+    if (context == NULL) return;
+    if (context->zipperFollowsPlayer != NULL && *context->zipperFollowsPlayer && context->zipper != NULL)
+        context->zipper->character.position = Vector2Add(context->zipper->character.position, delta);
+    if (context->referenceDrops == NULL) return;
+    for (int index = 0; index < context->referenceDrops->count; index++) {
+        RpgReferenceObject *object = &context->referenceDrops->entries[index];
+        if (object->followsPlayer) object->position = Vector2Add(object->position, delta);
+    }
+}
+
+static bool MovePlayerToAdjacentArea(RpgRuntimeContext *context, int *mapIndex,
+                                     RpgAreaDirection direction)
+{
+    const float mapWidth = RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE;
+    const float mapHeight = RPG_STAGE_ROWS * RPG_STAGE_TILE_SIZE;
+    int targetMap;
+    float localX;
+    float localY;
+    Vector2 previousPosition;
+    if (context == NULL || mapIndex == NULL || context->stage == NULL || context->player == NULL) return false;
+    *mapIndex = RpgStage_FindNearestActiveMap(context->stage, *mapIndex);
+    if (*mapIndex < 0) return false;
+    targetMap = RpgStage_GetAdjacentMap(context->stage, *mapIndex, direction);
+    if (targetMap < 0) return false;
+    previousPosition = context->player->position;
+    localX = context->player->position.x - context->stage->mapGridX[*mapIndex] * mapWidth;
+    localY = context->player->position.y + context->stage->mapGridY[*mapIndex] * mapHeight;
+    context->player->position.x = context->stage->mapGridX[targetMap] * mapWidth + localX;
+    context->player->position.y = -context->stage->mapGridY[targetMap] * mapHeight + localY;
+    Vector2 transitionDelta = Vector2Subtract(context->player->position, previousPosition);
+    TranslatePlayerFollowers(context, transitionDelta);
+    RpgMagnets_TranslateHeldPushBlock(context->magnetRuntime, &playerPushState, transitionDelta);
+    *mapIndex = targetMap;
+    return true;
+}
+
+static bool GetAreaMoveDirectionFromArrowKey(RpgAreaDirection *direction)
+{
+    if (direction == NULL) return false;
+    if (IsKeyPressed(KEY_LEFT)) *direction = RPG_AREA_LEFT;
+    else if (IsKeyPressed(KEY_RIGHT)) *direction = RPG_AREA_RIGHT;
+    else if (IsKeyPressed(KEY_UP)) *direction = RPG_AREA_UP;
+    else if (IsKeyPressed(KEY_DOWN)) *direction = RPG_AREA_DOWN;
+    else return false;
+    return true;
+}
+
+static void TransitionPlayerBetweenAreas(RpgRuntimeContext *context, int *mapIndex)
+{
+    const float mapWidth = RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE;
+    const float mapHeight = RPG_STAGE_ROWS * RPG_STAGE_TILE_SIZE;
+    RpgCharacter *player;
+    int direction = -1;
+    int targetMap;
+    float mapLeft;
+    float mapTop;
+    Vector2 previousPosition;
+    Vector2 transitionDelta;
+    if (context == NULL || mapIndex == NULL || context->stage == NULL || context->player == NULL) return;
+    *mapIndex = RpgStage_FindNearestActiveMap(context->stage, *mapIndex);
+    if (*mapIndex < 0) return;
+    player = context->player;
+    previousPosition = player->position;
+    mapLeft = context->stage->mapGridX[*mapIndex] * mapWidth;
+    mapTop = -context->stage->mapGridY[*mapIndex] * mapHeight;
+    if (player->position.x < mapLeft) direction = RPG_AREA_LEFT;
+    else if (player->position.x >= mapLeft + mapWidth) direction = RPG_AREA_RIGHT;
+    else if (player->position.y < mapTop) direction = RPG_AREA_UP;
+    else if (player->position.y >= mapTop + mapHeight) direction = RPG_AREA_DOWN;
+    if (direction < 0) return;
+    targetMap = RpgStage_GetAdjacentMap(context->stage, *mapIndex, (RpgAreaDirection)direction);
+    if (targetMap < 0) {
+        if (direction == RPG_AREA_LEFT) player->position.x = mapLeft;
+        else if (direction == RPG_AREA_RIGHT) player->position.x = mapLeft + mapWidth - 0.01f;
+        else if (direction == RPG_AREA_UP) player->position.y = mapTop;
+        else player->position.y = mapTop + mapHeight - 0.01f;
+        player->verticalSpeed = 0.0f;
+        return;
+    }
+    /* Areas are one connected world.  Only validate the destination border;
+       positions and followers must not be remapped through storage slots. */
+    if (RpgStage_CheckSolidCollision(context->stage, RpgCharacter_GetCollisionBounds(player))) {
+        player->position = previousPosition;
+        if (direction == RPG_AREA_LEFT) player->position.x = mapLeft + 0.01f;
+        else if (direction == RPG_AREA_RIGHT) player->position.x = mapLeft + mapWidth - 0.01f;
+        else if (direction == RPG_AREA_UP) player->position.y = mapTop + 0.01f;
+        else player->position.y = mapTop + mapHeight - 0.01f;
+        player->verticalSpeed = 0.0f;
+        return;
+    }
+    (void)transitionDelta;
+    *mapIndex = targetMap;
+}
+
+typedef struct RpgNearbyKeyDoor {
+    int row;
+    int column;
+} RpgNearbyKeyDoor;
 
 void RpgRuntime_ResetTransientState(void)
 {
@@ -55,10 +302,10 @@ void RpgRuntime_ResetTransientState(void)
         .folderTarget = { .kind = RPG_REFERENCE_TARGET_NONE, .row = -1, .column = -1, .dropIndex = -1 },
         .followerIndex = -1
     };
+    playerPushState = RpgPlayerPushState_Default();
 }
 
 static const char *npcTalkPrompt = u8"[E] \u8a71\u3057\u304b\u3051\u308b";
-static const char *zipperInspectPrompt = u8"[I] \u8abf\u3079\u308b";
 static const Rectangle referenceTextCloseButton = { 648.0f, 262.0f, 144.0f, 26.0f };
 
 static bool IsReferenceFolderTarget(const RpgStage *stage, RpgReferenceTarget target)
@@ -66,6 +313,28 @@ static bool IsReferenceFolderTarget(const RpgStage *stage, RpgReferenceTarget ta
     return stage != NULL && target.kind == RPG_REFERENCE_TARGET_CELL && target.row >= 0 &&
            target.row < RPG_STAGE_ROWS && target.column >= 0 && target.column < RPG_STAGE_WORLD_COLUMNS &&
            RpgBlockInventory_IsReferenceFolder(stage->blocks[target.row][target.column]);
+}
+
+static RpgNearbyKeyDoor FindNearbyKeyDoor(const RpgStage *stage, Vector2 position, float maximumDistance)
+{
+    RpgNearbyKeyDoor result = { .row = -1, .column = -1 };
+    float closestDistance = maximumDistance;
+    if (stage == NULL) return result;
+    for (int index = 0; index < stage->keyDoorCount; index++) {
+        const RpgKeyDoor *door = &stage->keyDoors[index];
+        if (door->rootRow < 0 || door->rootRow >= RPG_STAGE_ROWS || door->rootColumn < 0 ||
+            door->rootColumn >= RPG_STAGE_WORLD_COLUMNS ||
+            RpgBlockInventory_IsKeyDoorOpen(stage->blocks[door->rootRow][door->rootColumn])) continue;
+        Vector2 center = RpgStage_GetWorldPositionForCell(stage, door->rootRow, door->rootColumn);
+        center.y += RPG_STAGE_TILE_SIZE;
+        float distance = Vector2Distance(position, center);
+        if (distance <= closestDistance) {
+            closestDistance = distance;
+            result.row = door->rootRow;
+            result.column = door->rootColumn;
+        }
+    }
+    return result;
 }
 
 /* 弧を描く二次ベジェ補間で、FileがFolderへ収まる動きを作る。 */
@@ -120,6 +389,51 @@ static bool StartReferenceFolderTransfer(RpgRuntimeContext *context, RpgReferenc
     return true;
 }
 
+static bool ReferenceFileMatchesKeyDoor(const RpgReferenceObject *file, const RpgKeyDoor *door)
+{
+    if (file == NULL || door == NULL || file->path[0] == '\0' || door->keyPath[0] == '\0') return false;
+    return strcmp(GetReferenceFileName(file->path), GetReferenceFileName(door->keyPath)) == 0;
+}
+
+static bool StartKeyDoorTransfer(RpgRuntimeContext *context, RpgNearbyKeyDoor target)
+{
+    RpgKeyDoor *door;
+    RpgReferenceObject *follower;
+    int followerIndex;
+    RpgObjectFolder folder;
+    char destination[RPG_STAGE_REFERENCE_PATH_LENGTH] = { 0 };
+    if (context == NULL || referenceFolderTransfer.active || target.row < 0 || target.column < 0) return false;
+    door = RpgStage_GetKeyDoorAtCell(context->stage, target.row, target.column);
+    followerIndex = RpgReferenceObjects_FindFollowerIndex(context->referenceDrops);
+    if (door == NULL || followerIndex < 0) return false;
+    follower = &context->referenceDrops->entries[followerIndex];
+    folder.cell = (RpgGridCell){ .row = door->rootRow, .column = door->rootColumn };
+    if (!RpgObjectFolder_GetBlockDirectory(&folder, context->stage->blocks[door->rootRow][door->rootColumn],
+                                           destination, sizeof(destination))) return false;
+    referenceFolderTransfer = (RpgReferenceFolderTransfer){
+        .stage = context->stage,
+        .objects = context->referenceDrops,
+        .folderTarget = { .kind = RPG_REFERENCE_TARGET_NONE, .row = -1, .column = -1, .dropIndex = -1 },
+        .followerIndex = followerIndex,
+        .startPosition = follower->position,
+        .destinationPosition = RpgStage_GetWorldPositionForCell(context->stage,
+                                                                 door->rootRow, door->rootColumn),
+        .drawScale = follower->drawScale > 0.0f ? follower->drawScale : 1.0f,
+        .elapsed = 0.0f,
+        .isKeyDoorTransfer = true,
+        .keyDoorRow = door->rootRow,
+        .keyDoorColumn = door->rootColumn,
+        .active = true
+    };
+    referenceFolderTransfer.destinationPosition.y += RPG_STAGE_TILE_SIZE;
+    snprintf(referenceFolderTransfer.sourcePath, sizeof(referenceFolderTransfer.sourcePath), "%s", follower->path);
+    snprintf(referenceFolderTransfer.destinationDirectory, sizeof(referenceFolderTransfer.destinationDirectory), "%s", destination);
+    snprintf(referenceFolderTransfer.failureMessage, sizeof(referenceFolderTransfer.failureMessage), "%s",
+             door->failureText[0] != '\0' ? door->failureText : "This door needs its key file.");
+    follower->followsPlayer = false;
+    return true;
+}
+
 static int FindReferenceDropByPath(const RpgReferenceObjects *objects, const char *path)
 {
     if (objects == NULL || path == NULL || path[0] == '\0') return -1;
@@ -165,8 +479,20 @@ static void UpdateReferenceFolderTransfer(RpgRuntimeContext *context, float delt
     }
     fileTarget = (RpgReferenceTarget){ .kind = RPG_REFERENCE_TARGET_DROP, .row = -1, .column = -1,
                                        .dropIndex = followerIndex };
-    if (!StoreReferenceTargetInDirectory(context, fileTarget, transfer->destinationDirectory,
-                                         "File stored in folder")) {
+    if (transfer->isKeyDoorTransfer && !ReferenceFileMatchesKeyDoor(&transfer->objects->entries[followerIndex],
+                                                                     RpgStage_GetKeyDoorAtCell(context->stage,
+                                                                                               transfer->keyDoorRow,
+                                                                                               transfer->keyDoorColumn))) {
+        transfer->objects->entries[followerIndex].followsPlayer = true;
+        transfer->objects->entries[followerIndex].isCompressed = true;
+        snprintf(context->itemMessage, (size_t)context->itemMessageSize, "%s", transfer->failureMessage);
+        GameFont_AddText(context->itemMessage);
+        *context->itemMessageTimer = 2.0f;
+    } else if (StoreReferenceTargetInDirectory(context, fileTarget, transfer->destinationDirectory,
+                                                transfer->isKeyDoorTransfer ? "Key accepted: door opened" : "File stored in folder")) {
+        if (transfer->isKeyDoorTransfer)
+            RpgStage_SetDoorOpenAtCell(context->stage, transfer->keyDoorRow, transfer->keyDoorColumn, true);
+    } else {
         /* 実ファイル操作が失敗してもFileを失わない。追従へ復帰させて再試行可能にする。 */
         transfer->objects->entries[followerIndex].followsPlayer = true;
         snprintf(context->itemMessage, (size_t)context->itemMessageSize, "Could not store File");
@@ -254,11 +580,11 @@ static void OpenTextFile(const char *path, char *fileName, size_t fileNameSize,
 }
 
 // File.png の配置元にかかわらず、選択表示とドラッグ表示を同じ矩形で扱う。
-static Rectangle GetReferenceTargetBounds(const RpgReferenceObjects *objects, RpgReferenceTarget target)
+static Rectangle GetReferenceTargetBounds(const RpgStage *stage, const RpgReferenceObjects *objects,
+                                          RpgReferenceTarget target)
 {
     if (target.kind == RPG_REFERENCE_TARGET_CELL)
-        return (Rectangle){ target.column * RPG_STAGE_TILE_SIZE, target.row * RPG_STAGE_TILE_SIZE,
-                            RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE };
+        return RpgStage_GetWorldBoundsForCell(stage, target.row, target.column);
     if (target.kind == RPG_REFERENCE_TARGET_DROP && target.dropIndex >= 0 && target.dropIndex < objects->count) {
         const RpgReferenceObject *object = &objects->entries[target.dropIndex];
         float size = 48.0f * (object->drawScale > 0.0f ? object->drawScale : 1.0f);
@@ -514,17 +840,15 @@ void RpgRuntime_ProcessZipperCommand(RpgRuntimeContext *context)
 void RpgRuntime_ProcessReferenceFolderZipperCommand(RpgRuntimeContext *context)
 {
     RpgGridCell folderCell;
-    int playerMapIndex;
     if (context == NULL || context->stage == NULL || context->player == NULL || context->zipper == NULL ||
         context->zipperFollowsPlayer == NULL || context->isZipperLaunched == NULL ||
         context->isZipperControllable == NULL || context->attachedDataShotIndex == NULL ||
         context->attachedAttachmentIndex == NULL || context->isZipperAttachedToBlock == NULL ||
         context->zipperAttachedBlockCell == NULL) return;
-    playerMapIndex = (int)(context->player->position.x / (RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE));
-    if (!RpgStageBuild_ConsumeReferenceFolderZipperRequest(context->stage, playerMapIndex, &folderCell) ||
+    if (!RpgStageBuild_ConsumeReferenceFolderZipperRequest(context->stage, context->player->position, &folderCell) ||
         !RpgObjectFolder_ActivateReferenceFolderAsZipper(context->stage, folderCell)) return;
-    context->zipper->character.position = (Vector2){ (folderCell.column + 0.5f) * RPG_STAGE_TILE_SIZE,
-                                                      (folderCell.row + 1.0f) * RPG_STAGE_TILE_SIZE };
+    context->zipper->character.position = RpgStage_GetWorldPositionForCell(context->stage, folderCell.row, folderCell.column);
+    context->zipper->character.position.y += RPG_STAGE_TILE_SIZE * 0.5f;
     context->zipper->character.verticalSpeed = 0.0f;
     context->zipper->character.isGrounded = true;
     *context->zipperFollowsPlayer = true;
@@ -626,27 +950,33 @@ static void DrawMoveSprite(Texture2D zipperTexture, const RpgCharacter *player, 
 
 static float GetStageViewportZoom(void)
 {
-    return (float)RPG_SCREEN_WIDTH / (float)(RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE);
+    /* 20x12 cells are 5:3, whereas the presentation viewport can be wider.
+       Fit on both axes so editor full-map mode never crops its top/bottom row. */
+    float widthZoom = (float)RpgViewport_GetWidth() /
+                      (float)(RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE);
+    float heightZoom = (float)RpgViewport_GetHeight() /
+                       (float)(RPG_STAGE_ROWS * RPG_STAGE_TILE_SIZE);
+    return fminf(widthZoom, heightZoom);
 }
 
-static void UpdateRpgCamera(Camera2D *camera, float playerX, bool followsPlayer)
+static void UpdateRpgCamera(Camera2D *camera, const RpgStage *stage, int mapIndex,
+                            Vector2 playerPosition, bool followsPlayer)
 {
-    // 本編・エディター内プレイで同一の16x8マス表示倍率を使う。
+    // 仮想表示の横幅から倍率を決め、本編の20x12とエディターの表示を同じカメラ処理で扱う。
     camera->zoom = GetStageViewportZoom();
-    camera->offset = (Vector2){ RPG_SCREEN_WIDTH / 2.0f, RPG_PLAY_AREA_HEIGHT / 2.0f };
-    float halfViewWidth = RPG_SCREEN_WIDTH / (2.0f * camera->zoom);
+    camera->offset = (Vector2){ RpgViewport_GetWidth() / 2.0f, RpgViewport_GetHeight() / 2.0f };
     if (followsPlayer) {
-        camera->target.x = playerX;
-        if (camera->target.x < halfViewWidth) camera->target.x = halfViewWidth;
-        if (camera->target.x > RPG_STAGE_WORLD_WIDTH - halfViewWidth)
-            camera->target.x = RPG_STAGE_WORLD_WIDTH - halfViewWidth;
+        /* Follow the player's position after the physical storage slot has been
+           projected onto the two-dimensional area grid. */
+        camera->target = Vector2Add(playerPosition, GetRuntimeMapRenderOffset(stage, mapIndex));
     } else {
-        int mapIndex = (int)(playerX / (RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE));
-        if (mapIndex >= RPG_STAGE_MAP_COUNT) mapIndex = RPG_STAGE_MAP_COUNT - 1;
-        camera->target.x = mapIndex * RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE +
-                           RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE / 2.0f;
+        camera->target = Vector2Add(
+            (Vector2){ stage->mapGridX[mapIndex] * RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE +
+                        RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE / 2.0f,
+                        -stage->mapGridY[mapIndex] * RPG_STAGE_WORLD_HEIGHT +
+                        RPG_STAGE_WORLD_HEIGHT / 2.0f },
+            GetRuntimeMapRenderOffset(stage, mapIndex));
     }
-    camera->target.y = RPG_STAGE_WORLD_HEIGHT / 2.0f;
 }
 
 static void UpdateZipperFollow(RpgZipper *zipper, const RpgCharacter *player, float deltaTime)
@@ -680,11 +1010,11 @@ static void MoveZipperCollisionCenterTo(RpgZipper *zipper, Vector2 targetCenter)
                                              Vector2Subtract(targetCenter, currentCenter));
 }
 
-static bool GetStageCellAtCenter(Vector2 center, RpgGridCell *cell)
+static bool GetStageCellAtCenter(const RpgStage *stage, Vector2 center, RpgGridCell *cell)
 {
-    int row = (int)floorf(center.y / RPG_STAGE_TILE_SIZE);
-    int column = (int)floorf(center.x / RPG_STAGE_TILE_SIZE);
-    if (row < 0 || row >= RPG_STAGE_ROWS || column < 0 || column >= RPG_STAGE_WORLD_COLUMNS) return false;
+    int row;
+    int column;
+    if (!RpgStage_GetWorldCellAtPosition(stage, center, &row, &column)) return false;
     *cell = (RpgGridCell){ row, column };
     return true;
 }
@@ -706,8 +1036,7 @@ static bool DoesZipperHitReferenceFile(const RpgStage *stage, Rectangle bounds, 
 {
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
         if (!RpgBlockInventory_IsReferenceObject(stage->blocks[row][column])) continue;
-        Rectangle cell = { column * RPG_STAGE_TILE_SIZE, row * RPG_STAGE_TILE_SIZE,
-                           RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE };
+        Rectangle cell = RpgStage_GetWorldBoundsForCell(stage, row, column);
         if (CheckCollisionRecs(bounds, cell)) {
             *center = (Vector2){ cell.x + cell.width * 0.5f, cell.y + cell.height * 0.5f };
             return true;
@@ -716,12 +1045,14 @@ static bool DoesZipperHitReferenceFile(const RpgStage *stage, Rectangle bounds, 
     return false;
 }
 
-static bool DoesZipperHitAttachment(const RpgAttachments *attachments, Rectangle bounds, Vector2 *center,
+static bool DoesZipperHitAttachment(const RpgStage *stage, const RpgAttachments *attachments, Rectangle bounds, Vector2 *center,
                                     RpgGridCell *attachmentCell, int *attachmentIndex)
 {
     for (int index = 0; index < attachments->count; index++) {
         if (attachments->entries[index].isZipperHeld) continue;
-        Vector2 position = RpgAttachments_GetPosition(&attachments->entries[index], 0);
+        RpgGridCell outerCell = RpgGridPath_GetSideNeighbor(attachments->entries[index].cell,
+                                                            attachments->entries[index].side);
+        Vector2 position = RpgStage_GetWorldPositionForCell(stage, outerCell.row, outerCell.column);
         Rectangle attachmentBounds = { position.x - 22.0f, position.y - 22.0f, 44.0f, 44.0f };
         if (CheckCollisionRecs(bounds, attachmentBounds)) {
             *center = position;
@@ -777,7 +1108,7 @@ static void UpdateLaunchedZipper(RpgZipper *zipper, Vector2 *velocity, const Rpg
         int hitAttachmentIndex = -1;
         bool hitReferenceFile = DoesZipperHitReferenceFile(stage, forwardCollisionBounds, &collisionCenter);
         bool hitAttachment = !hitReferenceFile &&
-            DoesZipperHitAttachment(attachments, forwardCollisionBounds, &collisionCenter, &attachmentCell,
+            DoesZipperHitAttachment(stage, attachments, forwardCollisionBounds, &collisionCenter, &attachmentCell,
                                      &hitAttachmentIndex);
         if (hitReferenceFile || hitAttachment) {
             MoveZipperCollisionCenterTo(&candidate, collisionCenter);
@@ -787,27 +1118,25 @@ static void UpdateLaunchedZipper(RpgZipper *zipper, Vector2 *velocity, const Rpg
                 *attachedBlockCell = attachmentCell;
                 *attachedAttachmentIndex = hitAttachmentIndex;
             } else {
-                GetStageCellAtCenter(collisionCenter, attachedBlockCell);
+                GetStageCellAtCenter(stage, collisionCenter, attachedBlockCell);
                 *attachedAttachmentIndex = -1;
             }
             *zipper = candidate;
             return;
         }
-        bool hitWorldEdge = forwardCollisionBounds.x < 0.0f ||
-            forwardCollisionBounds.x + forwardCollisionBounds.width > RPG_STAGE_WORLD_WIDTH ||
-            forwardCollisionBounds.y < 0.0f ||
-            forwardCollisionBounds.y + forwardCollisionBounds.height > RPG_STAGE_WORLD_HEIGHT;
+        Vector2 forwardCenter = { forwardCollisionBounds.x + forwardCollisionBounds.width * 0.5f,
+                                  forwardCollisionBounds.y + forwardCollisionBounds.height * 0.5f };
+        bool hitWorldEdge = RpgStage_GetMapAtWorldPosition(stage, forwardCenter) < 0;
         if (hitWorldEdge || RpgStage_FindSolidCollisionCenter(stage, forwardCollisionBounds, &collisionCenter)) {
             if (!hitWorldEdge) {
-                GetStageCellAtCenter(collisionCenter, attachedBlockCell);
+                GetStageCellAtCenter(stage, collisionCenter, attachedBlockCell);
                 /* 複数マスブロックでは、ドラッグと共通の代表マスへZipperを吸着させる。 */
                 int rootRow;
                 int rootColumn;
                 if (RpgStage_FindEffectRootCell(stage, attachedBlockCell->row, attachedBlockCell->column,
                                                 &rootRow, &rootColumn, NULL)) {
                     *attachedBlockCell = (RpgGridCell){ rootRow, rootColumn };
-                    collisionCenter = (Vector2){ (rootColumn + 0.5f) * RPG_STAGE_TILE_SIZE,
-                                                 (rootRow + 0.5f) * RPG_STAGE_TILE_SIZE };
+                    collisionCenter = RpgStage_GetWorldPositionForCell(stage, rootRow, rootColumn);
                 }
                 MoveZipperCollisionCenterTo(&candidate, collisionCenter);
             }
@@ -844,7 +1173,8 @@ static void UpdateZipperAttachedToDataShot(RpgZipper *zipper, const RpgDataShots
     // 弾が壁へ当たって消えた場合は、その衝突位置へ残す。空中消滅なら主人公へ戻す。
     if (shot->hitWall) {
         MoveZipperCollisionCenterTo(zipper, shot->impactPosition);
-        GetStageCellAtCenter(shot->impactPosition, attachedBlockCell);
+        attachedBlockCell->row = (int)floorf(shot->impactPosition.y / RPG_STAGE_TILE_SIZE);
+        attachedBlockCell->column = (int)floorf(shot->impactPosition.x / RPG_STAGE_TILE_SIZE);
         *isAttachedToBlock = true;
     } else {
         *zipperFollowsPlayer = true;
@@ -855,13 +1185,16 @@ static void UpdateZipperAttachedToDataShot(RpgZipper *zipper, const RpgDataShots
 
 Rectangle RpgRuntime_GetStopButtonBounds(void)
 {
-    return (Rectangle){ 740.0f, 506.0f, 92.0f, 26.0f };
+    const float width = 92.0f;
+    const float height = 26.0f;
+    return (Rectangle){ (float)RpgViewport_GetWidth() - width - 12.0f,
+                        (float)RpgViewport_GetHeight() - height - 12.0f,
+                        width, height };
 }
 
 static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
                          const RpgStage *stage,
-                         Camera2D camera, bool followsPlayer,
-                         int currentMap, bool canTalk, const RpgDialogue *dialogue,
+                         const RpgMagnetRuntime *magnetRuntime, int currentMapIndex, Camera2D camera, bool canTalk, const RpgDialogue *dialogue,
                          int dialogueIndex, int stage3IntroIndex, const RpgStage3Event *stage3Event, const RpgZipper *zipper,
                          Texture2D zipperTexture, Texture2D fileTexture, const RpgInspect *inspect, const RpgInspect *zipperInspect,
                          int inspectTarget, int inspectFunctionIndex, int inspectLineIndex,
@@ -889,10 +1222,14 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
                            bool isZipperConnected)
 {
     (void)npcInspectCompleted;
+    (void)zipperInspectCompleted;
     (void)stage3IntroIndex;
     RpgViewport_BeginFrame();
     ClearBackground(BLACK);
     BeginMode2D(camera);
+    DrawConnectedStageMaps(stage, magnetRuntime, wires, receivers, attachments, dataShots,
+                           fileTexture, stageBackground, backgroundBrightness, blockBrightness);
+#if 0
     // 背景を各エリアのマス座標で描画し、共有ランタイムでもブロックと一致させる。
     for (int mapIndex = 0; mapIndex < RPG_STAGE_MAP_COUNT; mapIndex++) {
         if (!RpgStage_IsMapActive(stage, mapIndex)) continue;
@@ -907,6 +1244,8 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
     RpgImageObjects_DrawLayer(&stage->imageObjects, 0, RPG_STAGE_WORLD_COLUMNS,
                               RPG_STAGE_TILE_SIZE, WHITE, RPG_IMAGE_OBJECT_LAYER_BACK);
     RpgStage_Draw(stage, false, blockBrightness);
+    RpgMagnets_DrawMetals(magnetRuntime, 0, RPG_STAGE_WORLD_COLUMNS, 0.0f,
+                          blockBrightness);
     // 通常ブロックへ紐づけたファイルは、そのブロック自体を強調する。
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
         RpgObjectFolder objectFolder = { .cell = { row, column } };
@@ -936,6 +1275,7 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
                                             draggedReferenceTarget.row : -1,
                                         isReferenceDragActive && draggedReferenceTarget.kind == RPG_REFERENCE_TARGET_CELL ?
                                             draggedReferenceTarget.column : -1);
+ #endif
     int excludedReferenceDropIndex = isReferenceDragActive &&
         draggedReferenceTarget.kind == RPG_REFERENCE_TARGET_DROP ? draggedReferenceTarget.dropIndex :
         GetReferenceFolderTransferExcludedIndex(referenceDrops);
@@ -947,11 +1287,13 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
                                       transferPosition.y - transferSize * 0.5f, transferSize, transferSize }, WHITE);
     }
     if (isReferenceDragActive && draggedReferenceTarget.kind == RPG_REFERENCE_TARGET_CELL)
-        RpgStage_DrawReferenceObject(fileTexture, GetReferenceTargetBounds(referenceDrops, draggedReferenceTarget),
+        RpgStage_DrawReferenceObject(fileTexture, GetReferenceTargetBounds(stage, referenceDrops, draggedReferenceTarget),
                                      Fade(WHITE, 0.28f));
     RpgItems_Draw(items);
     RpgMapEvents_Draw(events);
+#if 0
     RpgStage_DrawEffects(stage);
+    RpgMagnets_DrawFields(stage, 0, RPG_STAGE_WORLD_COLUMNS);
     RpgWires_Draw(wires, stage);
     RpgWires_DrawElectric(wires, dataShots, 0, RPG_STAGE_WORLD_COLUMNS);
     RpgReceivers_Draw(receivers);
@@ -961,22 +1303,25 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
     RpgImageObjects_DrawLayer(&stage->imageObjects, 0, RPG_STAGE_WORLD_COLUMNS,
                               RPG_STAGE_TILE_SIZE, WHITE,
                               RPG_IMAGE_OBJECT_LAYER_BLOCK_FRONT_CHARACTER_BACK);
+#endif
     DrawZipper(zipperTexture, &zipper->character, zipperAnimationElapsed);
     RpgRuntime_DrawZipperFolderReturn(zipper);
     if (isMoveSpriteVisible) DrawMoveSprite(zipperTexture, player, npc, zipper, moveSpriteTarget, moveSpriteX);
     RpgCharacter_Draw(npc, "NPC");
     RpgCharacter_DrawPlayer(player, isZipperLaunched ? RPG_CHARACTER_ANIMATION_ZIPGO : playerAnimation);
     /* 最前面PNGはキャラクター描画後に重ねる。 */
+#if 0
     RpgImageObjects_DrawLayer(&stage->imageObjects, 0, RPG_STAGE_WORLD_COLUMNS,
                               RPG_STAGE_TILE_SIZE, WHITE, RPG_IMAGE_OBJECT_LAYER_FRONT);
+#endif
     RpgZipper_DrawPointerFeedback(RpgZipper_GetPixelAlignedSpriteBounds(&zipper->character, 380.0f),
                                   isZipperPointerHovered, isZipperPointerSelected);
     if (!isReferencePointerFeedbackSuppressed && selectedReferenceTarget.kind != RPG_REFERENCE_TARGET_NONE) {
-        Rectangle selectedBounds = GetReferenceTargetBounds(referenceDrops, selectedReferenceTarget);
+        Rectangle selectedBounds = GetReferenceTargetBounds(stage, referenceDrops, selectedReferenceTarget);
         RpgZipper_DrawPointerFeedback(selectedBounds, false, true);
     }
     if (!isReferencePointerFeedbackSuppressed && hoveredReferenceTarget.kind != RPG_REFERENCE_TARGET_NONE) {
-        Rectangle hoveredBounds = GetReferenceTargetBounds(referenceDrops, hoveredReferenceTarget);
+        Rectangle hoveredBounds = GetReferenceTargetBounds(stage, referenceDrops, hoveredReferenceTarget);
         bool isSelected = hoveredReferenceTarget.kind == selectedReferenceTarget.kind &&
             hoveredReferenceTarget.row == selectedReferenceTarget.row &&
             hoveredReferenceTarget.column == selectedReferenceTarget.column &&
@@ -984,7 +1329,7 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
         RpgZipper_DrawPointerFeedback(hoveredBounds, true, isSelected);
     }
     if (isReferenceDragActive) {
-        Rectangle draggedBounds = GetReferenceTargetBounds(referenceDrops, draggedReferenceTarget);
+        Rectangle draggedBounds = GetReferenceTargetBounds(stage, referenceDrops, draggedReferenceTarget);
         float draggedSize = draggedBounds.width > 0.0f ? draggedBounds.width : RPG_STAGE_TILE_SIZE;
         RpgStage_DrawReferenceObject(fileTexture, (Rectangle){ referenceDragPosition.x - draggedSize * 0.5f,
                                                                 referenceDragPosition.y - draggedSize * 0.5f,
@@ -1000,12 +1345,8 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
                       Fade(RAYWHITE, 0.9f));
         GameFont_Draw(npcTalkPrompt, npc->position.x - 54, npc->position.y - 112, 16, MAROON);
     }
-    if (RpgCharacter_IsNear(player, &zipper->character, 72.0f) && inspectTarget < 0 &&
-        zipperInspect->enabled && !zipperInspectCompleted) {
-        GameFont_Draw(zipperInspectPrompt, zipper->character.position.x - 44.0f, 270.0f, 16, MAROON);
-    }
     if (nearbyReferenceTarget.kind != RPG_REFERENCE_TARGET_NONE && !isReferenceTextOpen) {
-        Rectangle referenceBounds = GetReferenceTargetBounds(referenceDrops, nearbyReferenceTarget);
+        Rectangle referenceBounds = GetReferenceTargetBounds(stage, referenceDrops, nearbyReferenceTarget);
         float x = referenceBounds.x + referenceBounds.width * 0.5f;
         float y = referenceBounds.y - 38.0f;
         float fileNameWidth = GameFont_MeasureText(referenceFileName, 16.0f).x;
@@ -1020,15 +1361,17 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
             GameFont_Draw("[E] Open  [G] Acquire", x - 48.0f, y + 22.0f, 15.0f, MAROON);
         }
     }
+    RpgNearbyKeyDoor nearbyKeyDoor = FindNearbyKeyDoor(stage, player->position, 72.0f);
+    if (nearbyKeyDoor.row >= 0 && !isReferenceTextOpen) {
+        Rectangle doorBounds = RpgStage_GetWorldBoundsForCell(stage, nearbyKeyDoor.row, nearbyKeyDoor.column);
+        float promptX = doorBounds.x - 18.0f;
+        float promptY = doorBounds.y - 24.0f;
+        DrawRectangle((int)promptX, (int)promptY, 94, 22, Fade(RAYWHITE, 0.90f));
+        GameFont_Draw("[E] Examine", promptX + 5.0f, promptY + 3.0f, 14.0f, MAROON);
+    }
     EndMode2D();
     // 本編のワールドと常設操作UIを混在させない。上部帯は不透明にして、ゲーム描画をUIの背後へ見せない。
-    DrawRectangle(0, 480, RPG_VIEWPORT_WIDTH, RPG_VIEWPORT_HEIGHT - 480, Fade(RAYWHITE, 0.97f));
-    DrawLine(0, 480, RPG_VIEWPORT_WIDTH, 480, LIGHTGRAY);
-    DrawText(TextFormat("Area (%d, %d)", stage->mapGridX[currentMap], stage->mapGridY[currentMap]),
-             18, 490, 16, DARKGRAY);
-    DrawText("Move: A/D or arrows   Jump: W   Launch Zipper: Space", 160, 490, 14, DARKGRAY);
-    DrawText(followsPlayer ? "Camera: Follow [C]" : "Camera: Map Pivot [C]", 510, 515, 14,
-             DARKBLUE);
+    // 本編は20x12マスを画面全体へ使う。常設のエリア表示・操作説明・カメラ切替帯は描画しない。
     /* 実 Zipper フォルダの変更通知で更新される、ゲーム共通のストレージ表示。 */
     if (isZipperConnected) {
         unsigned long long usedBytes = RpgObjectFolder_GetZipperStorageBytes();
@@ -1069,6 +1412,13 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
                       178, 432, 17, GRAY);
     }
     if (showStopButton) {
+        Rectangle playerAreaBounds = { 12.0f, 12.0f, 182.0f, 28.0f };
+        DrawRectangleRec(playerAreaBounds, Fade(BLACK, 0.72f));
+        DrawRectangleLinesEx(playerAreaBounds, 1.0f, SKYBLUE);
+        DrawText(TextFormat("Player Area[%d][%d]", stage->mapGridX[currentMapIndex],
+                            stage->mapGridY[currentMapIndex]),
+                 (int)playerAreaBounds.x + 7, (int)playerAreaBounds.y + 7, 14, RAYWHITE);
+
         Rectangle stopButtonBounds = RpgRuntime_GetStopButtonBounds();
         DrawRectangleRec(stopButtonBounds, MAROON);
         DrawRectangleLinesEx(stopButtonBounds, 1.0f, RAYWHITE);
@@ -1377,6 +1727,10 @@ static void AdvanceRuntimeInspectFunctions(RpgRuntimeContext *context, float del
 void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
 {
     if (context == NULL) return;
+    InitializeRuntimeWorldCoordinates(context);
+    // 本編の常設UIは設定ボタンだけを右上へ置き、マス表示用の下部帯を作らない。
+    RpgScene_SetGameSettingsButtonBounds((Rectangle){ RpgViewport_GetWidth() - 106.0f, 12.0f,
+                                                        94.0f, 26.0f });
     // 設定シーンでは本編の入力・物理・描画更新を実行せず、シーンUIだけを処理する。
     if (context->scene != NULL && RpgScene_IsGameSettings(context->scene)) {
         RpgScene_UpdateGameSettings(context->scene);
@@ -1394,7 +1748,6 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
 #define zipperTexture (context->zipperTexture)
 #define fileTexture (context->fileTexture)
     {
-        if (IsKeyPressed(KEY_C)) (*context->cameraFollowsPlayer) = !(*context->cameraFollowsPlayer);
         bool hasPlayerMoveInput = IsKeyDown(KEY_A) || IsKeyDown(KEY_D) || IsKeyDown(KEY_LEFT) ||
                                   IsKeyDown(KEY_RIGHT) || IsKeyPressed(KEY_W);
         if (hasPlayerMoveInput && !(*context->isReferenceTextOpen)) {
@@ -1441,7 +1794,11 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
             .player = &(*context->player), .npc = &(*context->npc), .stage = &(*context->stage), .attachments = &(*context->attachments),
             .signalBlocks = &(*context->signalBlocks), .dataShots = &(*context->dataShots), .buttonEvent = &(*context->buttonEvent),
             .receivers = &(*context->receivers), .wires = &(*context->wires), .layout = &(*context->layout),
+            .magnetRuntime = context->magnetRuntime,
+            .playerPushState = &playerPushState,
             .wasButtonPressed = &(*context->wasDataButtonPressed),
+            .currentMapIndex = GetRuntimeMapIndex(&(*context->stage), (*context->player).position,
+                                                   *context->previousMap),
             .acceptsPlayerInput = (*context->dialogueIndex) < 0 && (*context->stage3IntroIndex) < 0 &&
                                   (*context->inspectTarget) < 0 && !(*context->isInspectMoveRunning) &&
                                   !(*context->isReferenceTextOpen),
@@ -1453,7 +1810,9 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
             if ((*context->zipperFollowsPlayer)) {
                 // 射出開始位置は常に主人公。カーソルへ向かう単位ベクトルを固定して直進させる。
                 (*context->zipper).character.position = (*context->player).position;
-                Vector2 direction = Vector2Subtract(GetScreenToWorld2D(RpgViewport_GetMousePosition(), (*context->camera)),
+                Vector2 direction = Vector2Subtract(GetRuntimePointerWorldPosition((*context->camera), &(*context->stage),
+                                                                                     GetRuntimeMapIndex(&(*context->stage), (*context->player).position,
+                                                                                                        *context->previousMap)),
                                                     GetZipperCollisionCenter(&(*context->zipper)));
                 if (Vector2LengthSqr(direction) < 0.001f) direction = (Vector2){ 1.0f, 0.0f };
                 (*context->zipperLaunchVelocity) = Vector2Scale(Vector2Normalize(direction), (*context->zipper).launchSpeed);
@@ -1489,10 +1848,23 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
         // フォルダの変更を移動前に反映し、ファイル数と容量が弾の見た目・速度へ直ちに反映されるようにする。
         RpgObjectFolders_UpdateDataShotLifetimes(&(*context->dataShots), &(*context->attachments), &(*context->referenceDrops));
         RpgDataShots_Update(&(*context->dataShots), &(*context->attachments), &(*context->stage), &(*context->receivers), &(*context->wires),
-                             (*context->layout).electricCellDelay, GetFrameTime(), false);
+                             (*context->layout).electricCellDelay, NULL, GetFrameTime(), false);
 #endif
         runtimeMovementContext.updatesWorldSystems = true;
         RpgRuntime_UpdateWorld(&runtimeMovementContext, GetFrameTime());
+        /* Keep the area occupied before this movement step as the source of an
+           edge transition.  A player crossing a storage-slot boundary must not
+           be reclassified as the numerically next slot before the two-dimensional
+           grid resolves its actual neighbour (an inserted area can live in any
+           free storage slot). */
+        int currentMapIndex = RpgStage_FindNearestActiveMap(&(*context->stage),
+                                                            *context->previousMap);
+        if (runtimeMovementContext.acceptsPlayerInput) {
+            RpgAreaDirection direction;
+            if (GetAreaMoveDirectionFromArrowKey(&direction))
+                (void)MovePlayerToAdjacentArea(context, &currentMapIndex, direction);
+        }
+        TransitionPlayerBetweenAreas(context, &currentMapIndex);
         RpgObjectFolders_UpdateDataShotLifetimes(&(*context->dataShots), &(*context->attachments), &(*context->referenceDrops));
         // 電気化で失われた弾本体のフォルダを同フレームで処理し、追加ファイルをドロップする。
         RpgObjectFolders_UpdateDataShotLifetimes(&(*context->dataShots), &(*context->attachments), &(*context->referenceDrops));
@@ -1520,6 +1892,7 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
                                                        .row = -1, .column = -1, .dropIndex = -1 };
         RpgReferenceTarget nearbyFolderTarget = { .kind = RPG_REFERENCE_TARGET_NONE,
                                                     .row = -1, .column = -1, .dropIndex = -1 };
+        RpgNearbyKeyDoor nearbyKeyDoor = FindNearbyKeyDoor(&(*context->stage), (*context->player).position, 72.0f);
         bool canReadReference = RpgReferenceObjects_FindNearbyTarget(&(*context->stage), &(*context->referenceDrops),
                                                                        (*context->player).position, 72.0f,
                                                                        &nearbyReferenceTarget);
@@ -1665,8 +2038,8 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
         }
 #endif
         AdvanceRuntimeInspectFunctions(context, GetFrameTime());
-        int currentMap = (int)((*context->player).position.x / (RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE)) + 1;
-        int areaIndex = currentMap - 1;
+        currentMapIndex = GetRuntimeMapIndex(&(*context->stage), (*context->player).position, currentMapIndex);
+        int areaIndex = currentMapIndex;
         /* エリアイベントは、そのエリアに初めて入った瞬間だけ既存の会話表示で実行する。 */
         if ((*context->inspectTarget) < 0 && (*context->dialogueIndex) < 0 &&
             (*context->stage3IntroIndex) < 0 && context->areaEntryEvents != NULL &&
@@ -1681,8 +2054,13 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
                 (*context->inspectLineIndex) = 0;
             }
         }
-        (*context->previousMap) = currentMap;
-        bool isReferenceCollected = canReadReference && !referenceFolderTransfer.active &&
+        (*context->previousMap) = currentMapIndex;
+        bool didTogglePushBlock = IsKeyPressed(KEY_G) && (*context->inspectTarget) < 0 &&
+                                  (*context->dialogueIndex) < 0 && (*context->stage3IntroIndex) < 0 &&
+                                  !(*context->isReferenceTextOpen) &&
+                                  RpgMagnets_TogglePlayerPush(context->magnetRuntime, &(*context->stage),
+                                                              &playerPushState, (*context->player).position, 72.0f);
+        bool isReferenceCollected = !didTogglePushBlock && canReadReference && !referenceFolderTransfer.active &&
                                    !IsReferenceFolderTarget(&(*context->stage), nearbyReferenceTarget) &&
                                    IsKeyPressed(KEY_G) &&
                                    (*context->inspectTarget) < 0 && (*context->dialogueIndex) < 0 &&
@@ -1734,6 +2112,18 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
                 if ((*context->dialogueIndex) >= (*context->dialogue).lineCount) (*context->dialogueIndex) = -1;
             } else if (canTalk) {
                 (*context->dialogueIndex) = 0;
+            } else if (nearbyKeyDoor.row >= 0 && !referenceFolderTransfer.active) {
+                int followerIndex = RpgReferenceObjects_FindFollowerIndex(&(*context->referenceDrops));
+                RpgKeyDoor *door = RpgStage_GetKeyDoorAtCell(&(*context->stage), nearbyKeyDoor.row, nearbyKeyDoor.column);
+                if (followerIndex >= 0 && StartKeyDoorTransfer(context, nearbyKeyDoor)) {
+                    (*context->selectedReferencePointerTarget).kind = RPG_REFERENCE_TARGET_NONE;
+                    (*context->isReferencePointerFeedbackSuppressed) = true;
+                } else if (door != NULL) {
+                    snprintf(itemMessage, (size_t)context->itemMessageSize, "%s",
+                             door->failureText[0] != '\0' ? door->failureText : "This door needs its key file.");
+                    GameFont_AddText(itemMessage);
+                    *context->itemMessageTimer = 2.0f;
+                }
             } else if (canReadReference) {
                 const char *referencePath = RpgReferenceObjects_GetTargetPath(&(*context->stage), &(*context->referenceDrops),
                                                                                 nearbyReferenceTarget);
@@ -1746,27 +2136,17 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
                 (*context->isReferencePointerFeedbackSuppressed) = true;
             }
         }
-        bool canInspectZipper = RpgCharacter_IsNear(&(*context->player), &(*context->zipper).character, 72.0f);
-        if (IsKeyPressed(KEY_I) && (*context->inspectTarget) < 0 && (*context->inspect).enabled && !(*context->npcInspectCompleted) && canTalk &&
-            (*context->dialogueIndex) < 0 && (*context->stage3IntroIndex) < 0 && !(*context->isReferenceTextOpen)) {
-            (*context->inspectTarget) = 1;
-            (*context->inspectFunctionIndex) = 0;
-            (*context->inspectLineIndex) = 0;
-        } else if (IsKeyPressed(KEY_I) && (*context->inspectTarget) < 0 && (*context->zipper).inspect.enabled && !(*context->zipperInspectCompleted) && canInspectZipper &&
-                   (*context->dialogueIndex) < 0 && (*context->stage3IntroIndex) < 0 && !(*context->isReferenceTextOpen)) {
-            (*context->inspectTarget) = 2;
-            (*context->inspectFunctionIndex) = 0;
-            (*context->inspectLineIndex) = 0;
-        }
+        /* NPC と Zipper の個別「調べる」は廃止した。Eの通常会話とイベントFunction列は別経路で維持する。 */
         /* 入力・エリア侵入で開始または更新された列を同一フレームで実行する。
            時間を設定したFunctionだけが次フレーム以降へ継続する。 */
         AdvanceRuntimeInspectFunctions(context, 0.0f);
-        UpdateRpgCamera(&(*context->camera), (*context->player).position.x, (*context->cameraFollowsPlayer));
+        UpdateRpgCamera(&(*context->camera), &(*context->stage), currentMapIndex,
+                        (*context->player).position, (*context->cameraFollowsPlayer));
         RpgReferenceTarget hoveredReferencePointerTarget = { .kind = RPG_REFERENCE_TARGET_NONE,
                                                                .row = -1, .column = -1, .dropIndex = -1 };
         bool isReferencePointerHovered = false;
         if (!(*context->isReferenceTextOpen) && (*context->inspectTarget) < 0 && (*context->dialogueIndex) < 0 && (*context->stage3IntroIndex) < 0) {
-            Vector2 pointerWorldPosition = GetScreenToWorld2D(RpgViewport_GetMousePosition(), (*context->camera));
+            Vector2 pointerWorldPosition = GetRuntimePointerWorldPosition((*context->camera), &(*context->stage), currentMapIndex);
             isReferencePointerHovered = !(*context->isReferenceDragActive) &&
                                         RpgReferenceObjects_FindTarget(&(*context->stage), &(*context->referenceDrops),
                                                                        pointerWorldPosition,
@@ -1830,7 +2210,7 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
         bool isZipperPointerHovered = false;
         if (((*context->zipperFollowsPlayer) || (*context->isZipperAttachedToBlock) || (*context->attachedDataShotIndex) >= 0) && (*context->inspectTarget) < 0 && (*context->dialogueIndex) < 0 &&
             (*context->stage3IntroIndex) < 0 && !(*context->isReferenceTextOpen)) {
-            Vector2 pointerWorldPosition = GetScreenToWorld2D(RpgViewport_GetMousePosition(), (*context->camera));
+            Vector2 pointerWorldPosition = GetRuntimePointerWorldPosition((*context->camera), &(*context->stage), currentMapIndex);
             Rectangle zipperBounds = RpgZipper_GetSpriteBounds(&(*context->zipper).character, 380.0f);
             isZipperPointerHovered = CheckCollisionPointRec(pointerWorldPosition, zipperBounds);
             if (!isZipperPointerHovered) (*context->isZipperPointerFeedbackSuppressed) = false;
@@ -1857,7 +2237,8 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
         RpgCharacterAnimation playerAnimation = RPG_CHARACTER_ANIMATION_AUTOMATIC;
         if (HasRunningPlayerWalkMove())
             playerAnimation = RPG_CHARACTER_ANIMATION_WALK;
-        DrawRpgWorld(&(*context->player), &(*context->npc), &(*context->stage), (*context->camera), (*context->cameraFollowsPlayer), currentMap, canTalk,
+        DrawRpgWorld(&(*context->player), &(*context->npc), &(*context->stage), context->magnetRuntime, currentMapIndex,
+                     (*context->camera), canTalk,
                      &(*context->dialogue), (*context->dialogueIndex), (*context->stage3IntroIndex), activeEntryEvent, &(*context->zipper), zipperTexture, fileTexture, &(*context->inspect), &(*context->zipper).inspect,
                      (*context->inspectTarget), (*context->inspectFunctionIndex), (*context->inspectLineIndex), false, 0.0f, RPG_INSPECT_MOVE_PLAYER,
                      (*context->npcInspectCompleted), (*context->zipperInspectCompleted),

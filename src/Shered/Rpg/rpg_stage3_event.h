@@ -27,8 +27,8 @@ bool RpgStage3Event_Load(const char *filePath, RpgStage3Event *event);
 bool RpgStage3Event_Save(const char *filePath, const RpgStage3Event *event);
 /* 大きなエリアイベント配列を戻り値にせず、呼び出し元の領域へ直接初期化する。 */
 void RpgAreaEntryEvents_Initialize(RpgAreaEntryEvents *events);
-bool RpgAreaEntryEvents_Load(const char *filePath, RpgAreaEntryEvents *events);
-bool RpgAreaEntryEvents_Save(const char *filePath, const RpgAreaEntryEvents *events);
+bool RpgAreaEntryEvents_Load(const char *filePath, const RpgStage *stage, RpgAreaEntryEvents *events);
+bool RpgAreaEntryEvents_Save(const char *filePath, const RpgStage *stage, const RpgAreaEntryEvents *events);
 
 #endif
 // 役割: ステージ3導入イベントの構造と保存 API を宣言する。

@@ -17,6 +17,9 @@ unsigned long long RpgObjectFolder_GetZipperStorageBytes(void);
 /* 追従Fileをゲーム内Folderへ格納する。ファイル操作は描画処理から独立させる。 */
 /* ステージFileの永続コピーを残したまま、Folderへ同名ファイルを格納する。 */
 bool RpgObjectFolder_StoreFileInDirectory(const char *sourcePath, const char *destinationDirectory);
+/* ブロック固有の build/objects フォルダを、ランタイム格納先として取得する。 */
+bool RpgObjectFolder_GetBlockDirectory(const RpgObjectFolder *folder, int blockType,
+                                       char *path, size_t pathSize);
 bool RpgObjectFolder_OpenZipperDirectory(void);
 /* Folder を移動せずに Zipper 構造へ更新し、以後の Inbox と Explorer のルートに採用する。 */
 bool RpgObjectFolder_ActivateReferenceFolderAsZipper(RpgStage *stage, RpgGridCell cell);

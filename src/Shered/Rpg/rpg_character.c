@@ -18,6 +18,34 @@ static int playerZipgoFrameCount = 1;
 static int playerWalkFrameIndices[RPG_CHARACTER_SPRITE_FRAME_COUNT] = { 0 };
 static int playerJumpFrameIndices[RPG_CHARACTER_SPRITE_FRAME_COUNT] = { 0 };
 static int playerZipgoFrameIndices[RPG_CHARACTER_SPRITE_FRAME_COUNT] = { 0 };
+/* idle 表示に使う walk シート先頭の不透明領域。読み込みに失敗した時だけ控えめな既定値を使う。 */
+static Rectangle playerOpaqueSourceBounds = { 4.0f, 1.0f, 24.0f, 31.0f };
+
+static void LoadPlayerOpaqueSourceBounds(const char *texturePath, int sourceFrameIndex)
+{
+    Image image = LoadImage(texturePath);
+    Color *pixels = image.data != NULL ? LoadImageColors(image) : NULL;
+    int frameColumns = image.width / RPG_CHARACTER_SPRITE_FRAME_SIZE;
+    if (pixels != NULL && frameColumns > 0) {
+        int frameX = (sourceFrameIndex % frameColumns) * RPG_CHARACTER_SPRITE_FRAME_SIZE;
+        int frameY = (sourceFrameIndex / frameColumns) * RPG_CHARACTER_SPRITE_FRAME_SIZE;
+        int left = RPG_CHARACTER_SPRITE_FRAME_SIZE, top = RPG_CHARACTER_SPRITE_FRAME_SIZE;
+        int right = -1, bottom = -1;
+        for (int y = 0; y < RPG_CHARACTER_SPRITE_FRAME_SIZE; y++) for (int x = 0; x < RPG_CHARACTER_SPRITE_FRAME_SIZE; x++) {
+            if (pixels[(frameY + y) * image.width + frameX + x].a == 0) continue;
+            if (x < left) left = x;
+            if (x > right) right = x;
+            if (y < top) top = y;
+            if (y > bottom) bottom = y;
+        }
+        if (right >= left && bottom >= top)
+            playerOpaqueSourceBounds = (Rectangle){ (float)left, (float)top,
+                                                     (float)(right - left + 1),
+                                                     (float)(bottom - top + 1) };
+        UnloadImageColors(pixels);
+    }
+    if (image.data != NULL) UnloadImage(image);
+}
 
 /* 末尾に空フレームを含むSpriteシートでも透明フレームを再生しないよう、有効フレーム数を読込時に確定する。 */
 static int GetSpriteVisibleFrameIndices(const char *texturePath, int *frameIndices, int capacity)
@@ -84,6 +112,7 @@ bool RpgCharacter_LoadPlayerSprites(void)
                                                              RPG_CHARACTER_SPRITE_FRAME_COUNT);
         playerZipgoFrameCount = GetSpriteVisibleFrameIndices(zipgoPath, playerZipgoFrameIndices,
                                                               RPG_CHARACTER_SPRITE_FRAME_COUNT);
+        LoadPlayerOpaqueSourceBounds(walkPath, playerWalkFrameIndices[0]);
         return true;
     }
     RpgCharacter_UnloadPlayerSprites();
@@ -108,6 +137,11 @@ RpgCharacter RpgCharacter_Create(Vector2 position, Color shirtColor, Color hairC
                            .shirtColor = shirtColor, .hairColor = hairColor };
 }
 
+void RpgCharacter_SetUsesPlayerSpriteCollision(RpgCharacter *character, bool enabled)
+{
+    if (character != NULL) character->usesPlayerSpriteCollision = enabled;
+}
+
 void RpgCharacter_ResetAnimation(RpgCharacter *character)
 {
     if (character != NULL) character->animationElapsed = 0.0f;
@@ -128,7 +162,18 @@ static void UpdateAnimationState(RpgCharacter *character, Vector2 previousPositi
 
 Rectangle RpgCharacter_GetCollisionBounds(const RpgCharacter *character)
 {
-    (void)character;
+    if (character == NULL) return (Rectangle){ 0 };
+    if (character->usesPlayerSpriteCollision) {
+        float size = RPG_STAGE_TILE_SIZE * Clamp(character->scale, 0.5f, 1.0f);
+        float pixelScale = size / RPG_CHARACTER_SPRITE_FRAME_SIZE;
+        float left = playerOpaqueSourceBounds.x;
+        if (character->facingDirection < 0)
+            left = RPG_CHARACTER_SPRITE_FRAME_SIZE - playerOpaqueSourceBounds.x - playerOpaqueSourceBounds.width;
+        return (Rectangle){ character->position.x - size * 0.5f + left * pixelScale,
+                            character->position.y - size + playerOpaqueSourceBounds.y * pixelScale,
+                            playerOpaqueSourceBounds.width * pixelScale,
+                            playerOpaqueSourceBounds.height * pixelScale };
+    }
     return (Rectangle){ character->position.x - RPG_STAGE_TILE_SIZE * 0.5f,
                         character->position.y - RPG_STAGE_TILE_SIZE,
                         RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE };
@@ -144,8 +189,18 @@ Rectangle RpgCharacter_GetVisualBounds(const RpgCharacter *character)
                         width, size + 21.0f };
 }
 
+static bool RpgCharacter_CheckMovingSolidCollision(Rectangle bounds,
+                                                    const RpgMovingSolidSet *movingSolids)
+{
+    if (movingSolids == NULL || movingSolids->entries == NULL) return false;
+    for (int index = 0; index < movingSolids->count; index++)
+        if (CheckCollisionRecs(bounds, movingSolids->entries[index].bounds)) return true;
+    return false;
+}
+
 static bool RpgCharacter_MoveAxis(RpgCharacter *character, const RpgStage *stage,
-                                  float amount, bool isVertical)
+                                  const RpgMovingSolidSet *movingSolids, float amount,
+                                  bool isVertical)
 {
     // 大きなフレーム時間でも壁を飛び越えないよう、移動を小さな単位に分けて判定する。
     const float maximumStep = 4.0f;
@@ -153,9 +208,21 @@ static bool RpgCharacter_MoveAxis(RpgCharacter *character, const RpgStage *stage
     float direction = amount < 0.0f ? -1.0f : 1.0f;
     while (remaining > 0.0f) {
         float step = direction * (remaining > maximumStep ? maximumStep : remaining);
+        Rectangle previousBounds = RpgCharacter_GetCollisionBounds(character);
         if (isVertical) character->position.y += step;
         else character->position.x += step;
-        if (RpgStage_CheckSolidCollision(stage, RpgCharacter_GetCollisionBounds(character))) {
+        /* 一方向床は下向きに上辺を通過した時だけ、足元を床面へ正確にそろえる。 */
+        if (isVertical && step > 0.0f) {
+            float landingY;
+            if (RpgStage_FindOneWayPlatformLanding(stage, previousBounds,
+                                                    RpgCharacter_GetCollisionBounds(character), &landingY)) {
+                character->position.y = landingY;
+                return true;
+            }
+        }
+        if (RpgStage_CheckSolidCollision(stage, RpgCharacter_GetCollisionBounds(character)) ||
+            RpgCharacter_CheckMovingSolidCollision(RpgCharacter_GetCollisionBounds(character),
+                                                    movingSolids)) {
             if (isVertical) character->position.y -= step;
             else character->position.x -= step;
             return true;
@@ -165,43 +232,143 @@ static bool RpgCharacter_MoveAxis(RpgCharacter *character, const RpgStage *stage
     return false;
 }
 
-static bool RpgCharacter_HasGroundBelow(const RpgCharacter *character, const RpgStage *stage)
+static bool RpgCharacter_HasGroundBelow(const RpgCharacter *character, const RpgStage *stage,
+                                        const RpgMovingSolidSet *movingSolids)
 {
     // 接地中の静止状態でも、足元のブロックが削除されたら自然に落下へ移行する。
     RpgCharacter probe = *character;
+    Rectangle currentBounds = RpgCharacter_GetCollisionBounds(character);
     probe.position.y += 1.0f;
-    return RpgStage_CheckSolidCollision(stage, RpgCharacter_GetCollisionBounds(&probe));
+    Rectangle probeBounds = RpgCharacter_GetCollisionBounds(&probe);
+    return RpgStage_CheckSolidCollision(stage, probeBounds) ||
+           RpgCharacter_CheckMovingSolidCollision(probeBounds, movingSolids) ||
+           RpgStage_FindOneWayPlatformLanding(stage, currentBounds, probeBounds, NULL);
 }
 
 void RpgCharacter_UpdatePlayerWithStage(RpgCharacter *character, float deltaTime,
                                         const RpgStage *stage, float minimumX, float maximumX)
 {
+    RpgCharacter_UpdatePlayerWithStageAndMovingSolids(character, deltaTime, stage, NULL,
+                                                       minimumX, maximumX);
+}
+
+void RpgCharacter_UpdatePlayerWithStageAndMovingSolids(RpgCharacter *character, float deltaTime,
+                                                       const RpgStage *stage,
+                                                       const RpgMovingSolidSet *movingSolids,
+                                                       float minimumX, float maximumX)
+{
+    RpgCharacter_UpdatePlayerWithStageAndMovingSolidsControlled(character, deltaTime, stage,
+                                                                 movingSolids, minimumX, maximumX,
+                                                                 true, true);
+}
+
+void RpgCharacter_UpdatePlayerWithStageAndMovingSolidsControlled(RpgCharacter *character, float deltaTime,
+                                                                 const RpgStage *stage,
+                                                                 const RpgMovingSolidSet *movingSolids,
+                                                                 float minimumX, float maximumX,
+                                                                 bool allowHorizontalInput, bool allowJumpInput)
+{
     Vector2 previousPosition = character->position;
     bool wasGrounded = character->isGrounded;
     float direction = 0.0f;
-    if (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT)) direction -= 1.0f;
-    if (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT)) direction += 1.0f;
+    if (allowHorizontalInput) {
+        if (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT)) direction -= 1.0f;
+        if (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT)) direction += 1.0f;
+    }
 
-    RpgCharacter_MoveAxis(character, stage, direction * character->moveSpeed * deltaTime, false);
+    RpgCharacter_MoveAxis(character, stage, movingSolids,
+                          direction * character->moveSpeed * deltaTime, false);
     character->position.x = Clamp(character->position.x, minimumX, maximumX);
-    if (character->isGrounded && IsKeyPressed(KEY_W)) {
+    if (allowJumpInput && character->isGrounded && IsKeyPressed(KEY_W)) {
         character->verticalSpeed = -460.0f;
         character->isGrounded = false;
     }
 
     character->verticalSpeed += 1200.0f * deltaTime;
-    bool collidedVertically = RpgCharacter_MoveAxis(character, stage,
+    bool collidedVertically = RpgCharacter_MoveAxis(character, stage, movingSolids,
                                                      character->verticalSpeed * deltaTime, true);
     if (collidedVertically) {
         character->isGrounded = character->verticalSpeed > 0.0f;
         character->verticalSpeed = 0.0f;
-    } else if (character->verticalSpeed >= 0.0f && RpgCharacter_HasGroundBelow(character, stage)) {
+    } else if (character->verticalSpeed >= 0.0f &&
+               RpgCharacter_HasGroundBelow(character, stage, movingSolids)) {
         character->isGrounded = true;
         character->verticalSpeed = 0.0f;
     } else {
         character->isGrounded = false;
     }
     UpdateAnimationState(character, previousPosition, wasGrounded, deltaTime);
+}
+
+static bool RpgCharacter_OverlapsHorizontally(Rectangle first, Rectangle second)
+{
+    return first.x < second.x + second.width && first.x + first.width > second.x;
+}
+
+static void RpgCharacter_ResolveSingleMovingSolid(RpgCharacter *character, const RpgStage *stage,
+                                                   RpgMovingSolid solid)
+{
+    Rectangle playerBounds = RpgCharacter_GetCollisionBounds(character);
+    float deltaX = solid.bounds.x - solid.previousBounds.x;
+    float deltaY = solid.bounds.y - solid.previousBounds.y;
+    bool wasStandingOnSolid = RpgCharacter_OverlapsHorizontally(playerBounds, solid.previousBounds) &&
+        fabsf((playerBounds.y + playerBounds.height) - solid.previousBounds.y) <= 2.0f;
+
+    /* 横に動いた足場へ接地している時だけ、足場と同じ量をプレイヤーへ渡す。 */
+    if (wasStandingOnSolid && fabsf(deltaX) > 0.0001f) {
+        character->position.x += deltaX;
+        playerBounds = RpgCharacter_GetCollisionBounds(character);
+        if (RpgStage_CheckSolidCollision(stage, playerBounds)) {
+            character->position.x -= deltaX;
+            playerBounds = RpgCharacter_GetCollisionBounds(character);
+        }
+    }
+
+    if (!CheckCollisionRecs(playerBounds, solid.bounds)) return;
+
+    float pushLeft = solid.bounds.x - (playerBounds.x + playerBounds.width);
+    float pushRight = solid.bounds.x + solid.bounds.width - playerBounds.x;
+    float pushUp = solid.bounds.y - (playerBounds.y + playerBounds.height);
+    float pushDown = solid.bounds.y + solid.bounds.height - playerBounds.y;
+    float horizontalPush = fabsf(pushLeft) < fabsf(pushRight) ? pushLeft : pushRight;
+    float verticalPush = fabsf(pushUp) < fabsf(pushDown) ? pushUp : pushDown;
+
+    /* 動いた方向を優先しつつ、常にXまたはYの一軸だけで重なりを外す。 */
+    bool preferHorizontal = fabsf(deltaX) > fabsf(deltaY) ? true :
+                            fabsf(deltaY) > fabsf(deltaX) ? false :
+                            fabsf(horizontalPush) <= fabsf(verticalPush);
+    const bool horizontalCandidates[2] = { preferHorizontal, !preferHorizontal };
+    const float pushes[2] = { preferHorizontal ? horizontalPush : verticalPush,
+                              preferHorizontal ? verticalPush : horizontalPush };
+    /* 一軸だけで押し出す。優先方向が地形で塞がれた場合のみ、もう一方を試す。 */
+    for (int candidate = 0; candidate < 2; candidate++) {
+        bool horizontal = horizontalCandidates[candidate];
+        float push = pushes[candidate];
+        if (horizontal) character->position.x += push;
+        else character->position.y += push;
+        if (!RpgStage_CheckSolidCollision(stage, RpgCharacter_GetCollisionBounds(character))) {
+            if (!horizontal) {
+                if (push < 0.0f) {
+                    character->isGrounded = true;
+                    character->verticalSpeed = 0.0f;
+                } else if (character->verticalSpeed < 0.0f) {
+                    character->verticalSpeed = 0.0f;
+                }
+            }
+            break;
+        }
+        if (horizontal) character->position.x -= push;
+        else character->position.y -= push;
+    }
+}
+
+void RpgCharacter_ResolveMovingSolidContacts(RpgCharacter *character, const RpgStage *stage,
+                                             const RpgMovingSolidSet *movingSolids)
+{
+    if (character == NULL || stage == NULL || movingSolids == NULL || movingSolids->entries == NULL)
+        return;
+    for (int index = 0; index < movingSolids->count; index++)
+        RpgCharacter_ResolveSingleMovingSolid(character, stage, movingSolids->entries[index]);
 }
 
 void RpgCharacter_UpdatePlayer(RpgCharacter *character, float deltaTime, float groundY,

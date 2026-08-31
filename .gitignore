@@ -5,3 +5,12 @@
 /cmake-build*/
 /CMakeFiles/
 CMakeCache.txt
+
+# Build diagnostics and compiler probes are reproducible. Keep executable,
+# runtime DLL, and Stage data under build/ available to the project.
+/build/compile_tmp/
+/build/*.log
+/build/*.err.log
+/build/*.out.log
+/build/*.o
+/build/*.su

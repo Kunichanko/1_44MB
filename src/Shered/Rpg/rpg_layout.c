@@ -14,6 +14,8 @@ static void NormalizeGlobalRuntime(RpgLayout *layout)
 {
     if (layout->electricCellDelay < 0.01f || layout->electricCellDelay > 2.0f)
         layout->electricCellDelay = 0.15f;
+    if (layout->magnetMetalSpeed < 16.0f || layout->magnetMetalSpeed > 960.0f)
+        layout->magnetMetalSpeed = 160.0f;
     if (layout->zipperFolderReturnDuration < 0.10f || layout->zipperFolderReturnDuration > 5.0f)
         layout->zipperFolderReturnDuration = 0.45f;
     if (layout->zipperFolderReturnAnimationDelay < 0.0f || layout->zipperFolderReturnAnimationDelay > 5.0f)
@@ -38,7 +40,7 @@ RpgLayout RpgLayout_Default(void)
     return (RpgLayout){ .playerPosition = { 8.5f * RPG_STAGE_TILE_SIZE, RPG_STAGE_GROUND_TOP },
                          .npcPosition = { 12.5f * RPG_STAGE_TILE_SIZE, RPG_STAGE_GROUND_TOP },
                          .playerMoveSpeed = 180.0f, .playerScale = 1.0f, .npcScale = 1.0f,
-                          .stage3IntroEnabled = true, .electricCellDelay = 0.15f,
+                          .stage3IntroEnabled = true, .electricCellDelay = 0.15f, .magnetMetalSpeed = 160.0f,
                           .backgroundBrightness = 1.0f, .blockBrightness = 1.0f,
                           .zipperMaxCapacityKB = 10U,
                          .zipperFolderReturnDuration = 0.45f, .zipperFolderReturnAnimationDelay = 0.0f,
@@ -114,12 +116,14 @@ bool RpgLayout_LoadGlobalRuntime(RpgLayout *layout)
     FILE *file = fopen(GetGlobalRuntimePath(), "r");
     // 既存ステージの値を初回だけ共有設定へ移し、以後はステージ別の値を参照しない。
     if (file == NULL) return RpgLayout_SaveGlobalRuntime(layout);
-    int readCount = fscanf(file, "%f %f %f %f", &layout->electricCellDelay,
+    int readCount = fscanf(file, "%f %f %f %f %f", &layout->electricCellDelay,
                            &layout->zipperFolderReturnDuration,
-                           &layout->zipperFolderReturnAnimationDelay, &layout->referenceFollowerScale);
+                           &layout->zipperFolderReturnAnimationDelay, &layout->referenceFollowerScale,
+                           &layout->magnetMetalSpeed);
     fclose(file);
     if (readCount < 3) return RpgLayout_SaveGlobalRuntime(layout);
     if (readCount < 4) layout->referenceFollowerScale = 0.50f;
+    if (readCount < 5) layout->magnetMetalSpeed = 160.0f;
     NormalizeGlobalRuntime(layout);
     return true;
 }
@@ -129,9 +133,9 @@ bool RpgLayout_SaveGlobalRuntime(const RpgLayout *layout)
     if (layout == NULL) return false;
     FILE *file = fopen(GetGlobalRuntimePath(), "w");
     if (file == NULL) return false;
-    fprintf(file, "%.3f %.2f %.2f %.2f\n", layout->electricCellDelay,
+    fprintf(file, "%.3f %.2f %.2f %.2f %.1f\n", layout->electricCellDelay,
             layout->zipperFolderReturnDuration, layout->zipperFolderReturnAnimationDelay,
-            layout->referenceFollowerScale);
+            layout->referenceFollowerScale, layout->magnetMetalSpeed);
     return fclose(file) == 0;
 }
 // 役割: RPG のキャラクター配置と全体レイアウト設定を保存・読み込みする。

@@ -91,18 +91,23 @@ void RpgAreaEntryEvents_Initialize(RpgAreaEntryEvents *events)
         events->entries[index] = RpgStage3Event_Default();
 }
 
-bool RpgAreaEntryEvents_Load(const char *filePath, RpgAreaEntryEvents *events)
+bool RpgAreaEntryEvents_Load(const char *filePath, const RpgStage *stage, RpgAreaEntryEvents *events)
 {
     FILE *file = fopen(filePath, "r");
     char line[RPG_DIALOGUE_SPEAKER_LENGTH + RPG_DIALOGUE_LINE_LENGTH + 48];
     int version = 0;
-    if (file == NULL || events == NULL) { if (file != NULL) fclose(file); return false; }
-    if (fscanf(file, "v%d\n", &version) != 1 || (version != 1 && version != 2)) { fclose(file); return false; }
+    if (file == NULL || stage == NULL || events == NULL) { if (file != NULL) fclose(file); return false; }
+    if (fscanf(file, "v%d\n", &version) != 1 || (version != 1 && version != 2 && version != 3)) { fclose(file); return false; }
     RpgAreaEntryEvents_Initialize(events);
     while (fgets(line, sizeof(line), file) != NULL) {
         int index = -1, enabled = 0, count = 0;
-        if (version == 2) {
-            if (sscanf(line, "area %d", &index) != 1 || index < 0 || index >= RPG_STAGE_MAP_COUNT) break;
+        if (version == 2 || version == 3) {
+            if (version == 3) {
+                int gridX, gridY;
+                if (sscanf(line, "area2d %d %d", &gridX, &gridY) != 2) break;
+                index = RpgStage_GetMapAtGrid(stage, gridX, gridY);
+            } else if (sscanf(line, "area %d", &index) != 1) break;
+            if (index < 0 || index >= RPG_STAGE_MAP_COUNT) break;
             RpgStage3Event *event = &events->entries[index];
             if (!RpgInspect_LoadStream(file, &event->inspect)) break;
             event->enabled = event->inspect.enabled;
@@ -132,14 +137,15 @@ bool RpgAreaEntryEvents_Load(const char *filePath, RpgAreaEntryEvents *events)
     return true;
 }
 
-bool RpgAreaEntryEvents_Save(const char *filePath, const RpgAreaEntryEvents *events)
+bool RpgAreaEntryEvents_Save(const char *filePath, const RpgStage *stage, const RpgAreaEntryEvents *events)
 {
     FILE *file;
-    if (events == NULL || (file = fopen(filePath, "w")) == NULL) return false;
-    fprintf(file, "v2\n");
+    if (events == NULL || stage == NULL || (file = fopen(filePath, "w")) == NULL) return false;
+    fprintf(file, "v3\n");
     for (int index = 0; index < RPG_STAGE_MAP_COUNT; index++) {
+        if (!RpgStage_IsMapActive(stage, index)) continue;
         const RpgStage3Event *event = &events->entries[index];
-        fprintf(file, "area %d\n", index);
+        fprintf(file, "area2d %d %d\n", stage->mapGridX[index], stage->mapGridY[index]);
         if (!RpgInspect_SaveStream(file, &event->inspect)) { fclose(file); return false; }
     }
     return fclose(file) == 0;

@@ -35,6 +35,22 @@ enum {
     RPG_BLOCK_REFERENCE_FOLDER = 36,
     /* 見た目専用PNGを独立オブジェクトとして配置するためのパレット項目。 */
     RPG_BLOCK_IMAGE_OBJECT = 37,
+    /* 下・横からは通過し、上から落下したプレイヤーだけを受け止める1マス床。 */
+    RPG_BLOCK_ONE_WAY_PLATFORM = 38,
+    /* 受容体から届いた電気で状態を切り替える1マスの磁石。 */
+    RPG_BLOCK_EFFECT_MAGNET_OFF = 39,
+    RPG_BLOCK_EFFECT_MAGNET_ON = 40,
+    /* 重力と磁石の吸引対象になる、通常ブロック扱いの金属マス。 */
+    RPG_BLOCK_METAL = 41,
+    /* 指定Fileを格納した時だけ開く、通常Doorとは別意匠の3マス扉。 */
+    RPG_BLOCK_KEY_DOOR_CLOSED_TOP = 42,
+    RPG_BLOCK_KEY_DOOR_CLOSED_MIDDLE = 43,
+    RPG_BLOCK_KEY_DOOR_CLOSED_BOTTOM = 44,
+    RPG_BLOCK_KEY_DOOR_OPEN_TOP = 45,
+    RPG_BLOCK_KEY_DOOR_OPEN_MIDDLE = 46,
+    RPG_BLOCK_KEY_DOOR_OPEN_BOTTOM = 47,
+    /* Player can hold this gravity block with G; it is not magnetizable. */
+    RPG_BLOCK_PUSH_BLOCK = 48,
     RPG_BLOCK_ATTACHMENT_RADIO_EMITTER = 200,
     RPG_BLOCK_ATTACHMENT_DATA_BUTTON = 201,
     RPG_BLOCK_ATTACHMENT_SAVE_FLAG = 202,
@@ -61,13 +77,21 @@ bool RpgBlockInventory_IsReferenceObject(int blockType);
 bool RpgBlockInventory_IsReferenceFolder(int blockType);
 bool RpgBlockInventory_IsDoorBlock(int blockType);
 bool RpgBlockInventory_IsDoorOpen(int blockType);
+bool RpgBlockInventory_IsKeyDoorBlock(int blockType);
+bool RpgBlockInventory_IsKeyDoorOpen(int blockType);
 bool RpgBlockInventory_IsSignalShrinkBlock(int blockType);
 bool RpgBlockInventory_IsAttachment(int blockType);
 bool RpgBlockInventory_IsCellAttachment(int blockType);
 bool RpgBlockInventory_IsMapEventProperty(int blockType);
+bool RpgBlockInventory_IsOneWayPlatform(int blockType);
+bool RpgBlockInventory_IsMagnetBlock(int blockType);
+bool RpgBlockInventory_IsMagnetActive(int blockType);
+bool RpgBlockInventory_IsMetalBlock(int blockType);
+bool RpgBlockInventory_IsPushBlock(int blockType);
 bool RpgBlockInventory_IsOrdinaryBlock(int blockType);
 int RpgBlockInventory_GetEffectRootType(int blockType);
 const RpgEffectShape *RpgBlockInventory_GetEffectShape(int blockType);
 const RpgEffectShape *RpgBlockInventory_GetDoorShape(bool isOpen);
+const RpgEffectShape *RpgBlockInventory_GetKeyDoorShape(bool isOpen);
 #endif
 // 役割: ブロック種別・パレット・特殊形状の定義を宣言する。

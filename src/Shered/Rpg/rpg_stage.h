@@ -6,14 +6,15 @@
 #include "rpg_block_inventory.h"
 #include "rpg_image_object.h"
 
-enum { RPG_STAGE_TILE_SIZE = 32, RPG_STAGE_COLUMNS = 16, RPG_STAGE_ROWS = 8,
+enum { RPG_STAGE_TILE_SIZE = 32, RPG_STAGE_COLUMNS = 20, RPG_STAGE_ROWS = 12,
        RPG_STAGE_INITIAL_MAP_COUNT = 6, RPG_STAGE_MAP_COUNT = 24,
        RPG_STAGE_WORLD_COLUMNS = RPG_STAGE_COLUMNS * RPG_STAGE_MAP_COUNT,
        RPG_STAGE_WORLD_WIDTH = RPG_STAGE_WORLD_COLUMNS * RPG_STAGE_TILE_SIZE,
        RPG_STAGE_WORLD_HEIGHT = RPG_STAGE_ROWS * RPG_STAGE_TILE_SIZE,
        RPG_STAGE_GROUND_START_ROW = RPG_STAGE_ROWS - 2,
        RPG_STAGE_GROUND_TOP = RPG_STAGE_GROUND_START_ROW * RPG_STAGE_TILE_SIZE,
-       RPG_STAGE_REFERENCE_PATH_LENGTH = 260 };
+       RPG_STAGE_REFERENCE_PATH_LENGTH = 260, RPG_KEY_DOOR_MAX_COUNT = 32,
+       RPG_KEY_DOOR_FAILURE_TEXT_LENGTH = 192 };
 
 typedef enum RpgAreaDirection {
     RPG_AREA_LEFT,
@@ -22,35 +23,65 @@ typedef enum RpgAreaDirection {
     RPG_AREA_DOWN
 } RpgAreaDirection;
 
+typedef struct RpgKeyDoor {
+    int rootRow;
+    int rootColumn;
+    char keyPath[RPG_STAGE_REFERENCE_PATH_LENGTH];
+    char failureText[RPG_KEY_DOOR_FAILURE_TEXT_LENGTH];
+} RpgKeyDoor;
+
 typedef struct RpgStage {
     // エリアの実体は固定スロットに置き、使用中のスロットだけを台帳で管理する。
     bool mapActive[RPG_STAGE_MAP_COUNT];
     int mapGridX[RPG_STAGE_MAP_COUNT];
     int mapGridY[RPG_STAGE_MAP_COUNT];
+    /* Transient query origin: never serialized.  It lets a movement step cross
+       a map edge in the continuous stage space before its storage slot changes. */
+    int spatialReferenceMap;
     int blocks[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS];
     char referencePaths[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS][RPG_STAGE_REFERENCE_PATH_LENGTH];
+    int keyDoorCount;
+    RpgKeyDoor keyDoors[RPG_KEY_DOOR_MAX_COUNT];
     /* PNG画像はFolderやFILE.pngと別の、見た目専用オブジェクトとして管理する。 */
     RpgImageObjects imageObjects;
 } RpgStage;
 
-RpgStage RpgStage_Default(void);
+/* 大きいステージ本体を値返却せず、呼出し側が保持する領域を初期化する。 */
+void RpgStage_Initialize(RpgStage *stage);
 bool RpgStage_Load(const char *filePath, RpgStage *stage);
 bool RpgStage_Save(const char *filePath, const RpgStage *stage);
 int RpgStage_GetMapCount(const RpgStage *stage);
 bool RpgStage_IsMapActive(const RpgStage *stage, int mapIndex);
 int RpgStage_GetMapAtGrid(const RpgStage *stage, int gridX, int gridY);
+/* Runtime positions use the persistent two-dimensional map grid.  Storage slots
+   are an implementation detail and must only be used when accessing arrays. */
+int RpgStage_GetMapAtWorldPosition(const RpgStage *stage, Vector2 position);
+bool RpgStage_GetWorldCellAtPosition(const RpgStage *stage, Vector2 position,
+                                     int *storageRow, int *storageColumn);
+Vector2 RpgStage_GetWorldPositionForCell(const RpgStage *stage, int row, int column);
+Rectangle RpgStage_GetWorldBoundsForCell(const RpgStage *stage, int row, int column);
 // 二次元ステージID (x, y) に最も近い、現在有効なステージスロットを返す。
 int RpgStage_FindNearestActiveMapAtGrid(const RpgStage *stage, int gridX, int gridY);
 // 無効になったスロットを参照している場合も、二次元IDを基準に最寄りへ補正する。
 int RpgStage_FindNearestActiveMap(const RpgStage *stage, int mapIndex);
 int RpgStage_GetAdjacentMap(const RpgStage *stage, int mapIndex, RpgAreaDirection direction);
+/* Retained as a source-compatible no-op.  Runtime coordinates are world-space. */
+void RpgStage_SetSpatialReferenceMap(RpgStage *stage, int mapIndex);
 int RpgStage_GetOrCreateAdjacentMap(RpgStage *stage, int mapIndex, RpgAreaDirection direction);
+/* 指定方向の座標列／行を空けて新エリアを挿入する。既存エリアは必要に応じて一マスずらす。 */
+int RpgStage_InsertAdjacentMap(RpgStage *stage, int mapIndex, RpgAreaDirection direction);
 bool RpgStage_RemoveMap(RpgStage *stage, int mapIndex);
+/* Moves an existing area slot to an unoccupied 2D map coordinate without
+   relocating the map's stored blocks or owned objects. */
+bool RpgStage_MoveMapToGrid(RpgStage *stage, int mapIndex, int gridX, int gridY);
 bool RpgStage_SetBlockAtPosition(RpgStage *stage, Vector2 position, bool isBlock);
 bool RpgStage_SetBlockTypeAtPosition(RpgStage *stage, Vector2 position, int blockType);
 int RpgStage_GetBlockTypeAtPosition(const RpgStage *stage, Vector2 position);
 // 指定マスを含むドア全体を開閉状態へ切り替える。ドア以外では何もしない。
 bool RpgStage_SetDoorOpenAtCell(RpgStage *stage, int row, int column, bool isOpen);
+RpgKeyDoor *RpgStage_EnsureKeyDoor(RpgStage *stage, int row, int column);
+RpgKeyDoor *RpgStage_GetKeyDoorAtCell(RpgStage *stage, int row, int column);
+const RpgKeyDoor *RpgStage_GetKeyDoorAtCellConst(const RpgStage *stage, int row, int column);
 bool RpgStage_SetReferencePathAtCell(RpgStage *stage, int row, int column, const char *path);
 const char *RpgStage_GetReferencePathAtCell(const RpgStage *stage, int row, int column);
 enum { RPG_REFERENCE_OBJECT_MAX_COUNT = 32 };
@@ -62,6 +93,10 @@ typedef struct RpgReferenceObject {
     /* Gで取得したFileはステージ上の対象から独立し、プレイヤー後方を小さく追従する。 */
     bool followsPlayer;
     float drawScale;
+    /* G取得時は圧縮アニメーション完了後にだけ追従へ移行する。 */
+    bool isCompressing;
+    bool isCompressed;
+    float compressionElapsed;
 } RpgReferenceObject;
 typedef struct RpgReferenceObjects { int count; RpgReferenceObject entries[RPG_REFERENCE_OBJECT_MAX_COUNT]; } RpgReferenceObjects;
 typedef enum RpgReferenceTargetKind { RPG_REFERENCE_TARGET_NONE, RPG_REFERENCE_TARGET_CELL, RPG_REFERENCE_TARGET_DROP } RpgReferenceTargetKind;
@@ -94,6 +129,9 @@ bool RpgStage_IsSolidBlock(int blockType);
 bool RpgStage_IsSolidAtPosition(const RpgStage *stage, Vector2 position);
 bool RpgStage_CheckSolidCollision(const RpgStage *stage, Rectangle bounds);
 bool RpgStage_FindSolidCollisionCenter(const RpgStage *stage, Rectangle bounds, Vector2 *center);
+/* 一方向床を上から横切った落下だけを検出し、着地すべき足元Y座標を返す。 */
+bool RpgStage_FindOneWayPlatformLanding(const RpgStage *stage, Rectangle previousBounds,
+                                        Rectangle candidateBounds, float *landingY);
 /* 複数マス特殊ブロックの任意の構成マスから、ドラッグと共通の代表（先頭）マスを求める。 */
 bool RpgStage_FindEffectRootCell(const RpgStage *stage, int row, int column, int *rootRow,
                                  int *rootColumn, const RpgEffectShape **shapeResult);

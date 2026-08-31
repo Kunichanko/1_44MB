@@ -60,6 +60,8 @@ bool RpgStageStorage_GetRuntimePath(int stageNumber, RpgStageRuntimeKind kind, c
 /* ビルド時に生成した実行用構成を保存・復元する。Settings / stage.package は参照しない。 */
 bool RpgStageStorage_SaveRuntimeState(int stageNumber, const RpgStageData *data);
 bool RpgStageStorage_LoadRuntimeState(int stageNumber, RpgStageData *data);
+/* Static area topology changed: discard the incompatible game-session snapshot. */
+bool RpgStageStorage_ClearRuntimeState(int stageNumber);
 bool RpgStageStorage_PublishStage(int stageNumber);
 bool RpgStageStorage_PublishCatalog(const RpgStageCatalog *catalog);
 void RpgStageStorage_ClearPackagedStaticStage(int stageNumber);

@@ -7,6 +7,7 @@
 
 #include "raymath.h"
 #include "rpg_block_inventory.h"
+#include "rpg_physics.h"
 
 enum { RPG_MAGNET_DIRECTION_COUNT = 4 };
 
@@ -93,6 +94,24 @@ static bool DoesMetalCollide(const RpgMagnetRuntime *runtime, int ignoredIndex, 
     return false;
 }
 
+typedef struct RpgMetalObstacleContext {
+    const RpgMagnetRuntime *runtime;
+    int ignoredIndex;
+} RpgMetalObstacleContext;
+
+static bool DoesMetalCollideCallback(void *context, Rectangle bounds)
+{
+    const RpgMetalObstacleContext *metalContext = (const RpgMetalObstacleContext *)context;
+    return metalContext != NULL && DoesMetalCollide(metalContext->runtime,
+                                                    metalContext->ignoredIndex, bounds);
+}
+
+/* One-way floors are traversal surfaces, not opaque magnetic obstacles. */
+static bool StopsMagnetField(int blockType)
+{
+    return blockType != 0 && !RpgBlockInventory_IsOneWayPlatform(blockType);
+}
+
 static bool IsRayClear(const RpgStage *stage, int magnetRow, int magnetColumn,
                        int directionRow, int directionColumn, Vector2 metalPosition)
 {
@@ -109,7 +128,7 @@ static bool IsRayClear(const RpgStage *stage, int magnetRow, int magnetColumn,
         int column;
         if (!RpgStage_GetWorldCellAtPosition(stage, sample, &row, &column)) return false;
         if (row == metalRow && column == metalColumn) return true;
-        if (stage->blocks[row][column] != 0) return false;
+        if (StopsMagnetField(stage->blocks[row][column])) return false;
     }
 }
 
@@ -154,19 +173,10 @@ static float MoveMetalAxis(RpgMagnetRuntime *runtime, const RpgStage *stage, int
 {
     RpgMagnetMetal *metal = &runtime->metals[metalIndex];
     float start = vertical ? metal->position.y : metal->position.x;
-    float remaining = fabsf(amount);
-    float direction = amount < 0.0f ? -1.0f : 1.0f;
-    while (remaining > 0.0f) {
-        float step = direction * fminf(remaining, 2.0f);
-        Vector2 candidate = metal->position;
-        if (vertical) candidate.y += step;
-        else candidate.x += step;
-        Rectangle candidateBounds = GetMetalBounds(candidate);
-        if (RpgStage_CheckSolidCollision(stage, candidateBounds) ||
-            DoesMetalCollide(runtime, metalIndex, candidateBounds)) break;
-        metal->position = candidate;
-        remaining -= fabsf(step);
-    }
+    RpgMetalObstacleContext context = { .runtime = runtime, .ignoredIndex = metalIndex };
+    RpgPhysics_MoveAxis(stage, &metal->position,
+                         (Rectangle){ 0.0f, 0.0f, RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE },
+                         amount, vertical, DoesMetalCollideCallback, &context);
     return (vertical ? metal->position.y : metal->position.x) - start;
 }
 
@@ -341,7 +351,7 @@ void RpgMagnets_DrawFields(const RpgStage *stage, int firstColumn, int columnCou
                     Vector2 target = { targetColumn * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f,
                                        targetRow * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f };
                     DrawLineEx(center, target, 1.5f, Fade(SKYBLUE, 0.28f));
-                    if (blockType != 0) break;
+                    if (StopsMagnetField(blockType)) break;
                 }
             }
         }

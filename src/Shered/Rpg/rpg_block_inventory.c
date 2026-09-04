@@ -4,8 +4,8 @@
 #include <stddef.h>
 
 static const RpgBlockInventory inventories[] = {
-    { "Earth", { 1, 2, 3, 4, 5, RPG_BLOCK_HOLE_VERTICAL, RPG_BLOCK_HOLE_HORIZONTAL,
-                   RPG_BLOCK_ONE_WAY_PLATFORM, RPG_BLOCK_METAL, RPG_BLOCK_PUSH_BLOCK }, 10, false, false },
+    { "Earth", { 1, RPG_BLOCK_HOLE_VERTICAL, RPG_BLOCK_HOLE_HORIZONTAL,
+                   RPG_BLOCK_ONE_WAY_PLATFORM, RPG_BLOCK_METAL, RPG_BLOCK_PUSH_BLOCK }, 6, false, false },
     /* 既存ステージとの互換性を保つため定義は残し、選択パレットだけを必要な効果へ絞る。 */
     { "Effect", { RPG_BLOCK_DOOR_CLOSED_TOP, RPG_BLOCK_KEY_DOOR_CLOSED_TOP,
                     RPG_BLOCK_SIGNAL_SHRINK_ROOT_HORIZONTAL, RPG_BLOCK_EFFECT_MAGNET_OFF }, 4, false, false },

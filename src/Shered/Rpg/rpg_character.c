@@ -1,5 +1,6 @@
 // 依存する自プロジェクト内ファイル: rpg_character.h, rpg_stage.h
 #include "rpg_character.h"
+#include "rpg_physics.h"
 
 #include <math.h>
 #include <stddef.h>
@@ -198,6 +199,11 @@ static bool RpgCharacter_CheckMovingSolidCollision(Rectangle bounds,
     return false;
 }
 
+static bool RpgCharacter_CheckMovingSolidCollisionCallback(void *context, Rectangle bounds)
+{
+    return RpgCharacter_CheckMovingSolidCollision(bounds, (const RpgMovingSolidSet *)context);
+}
+
 static bool RpgCharacter_MoveAxis(RpgCharacter *character, const RpgStage *stage,
                                   const RpgMovingSolidSet *movingSolids, float amount,
                                   bool isVertical)
@@ -245,6 +251,28 @@ static bool RpgCharacter_HasGroundBelow(const RpgCharacter *character, const Rpg
            RpgStage_FindOneWayPlatformLanding(stage, currentBounds, probeBounds, NULL);
 }
 
+/* Characters and movable blocks now use this same shared axis/one-way physics. */
+static bool RpgCharacter_MoveAxisShared(RpgCharacter *character, const RpgStage *stage,
+                                        const RpgMovingSolidSet *movingSolids, float amount,
+                                        bool isVertical)
+{
+    Rectangle bounds = RpgCharacter_GetCollisionBounds(character);
+    Rectangle localBounds = { bounds.x - character->position.x, bounds.y - character->position.y,
+                              bounds.width, bounds.height };
+    return RpgPhysics_MoveAxis(stage, &character->position, localBounds, amount, isVertical,
+                               RpgCharacter_CheckMovingSolidCollisionCallback, (void *)movingSolids);
+}
+
+static bool RpgCharacter_HasGroundBelowShared(const RpgCharacter *character, const RpgStage *stage,
+                                              const RpgMovingSolidSet *movingSolids)
+{
+    Rectangle bounds = RpgCharacter_GetCollisionBounds(character);
+    Rectangle localBounds = { bounds.x - character->position.x, bounds.y - character->position.y,
+                              bounds.width, bounds.height };
+    return RpgPhysics_HasGroundBelow(stage, character->position, localBounds,
+                                     RpgCharacter_CheckMovingSolidCollisionCallback, (void *)movingSolids);
+}
+
 void RpgCharacter_UpdatePlayerWithStage(RpgCharacter *character, float deltaTime,
                                         const RpgStage *stage, float minimumX, float maximumX)
 {
@@ -276,7 +304,7 @@ void RpgCharacter_UpdatePlayerWithStageAndMovingSolidsControlled(RpgCharacter *c
         if (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT)) direction += 1.0f;
     }
 
-    RpgCharacter_MoveAxis(character, stage, movingSolids,
+    RpgCharacter_MoveAxisShared(character, stage, movingSolids,
                           direction * character->moveSpeed * deltaTime, false);
     character->position.x = Clamp(character->position.x, minimumX, maximumX);
     if (allowJumpInput && character->isGrounded && IsKeyPressed(KEY_W)) {
@@ -285,13 +313,13 @@ void RpgCharacter_UpdatePlayerWithStageAndMovingSolidsControlled(RpgCharacter *c
     }
 
     character->verticalSpeed += 1200.0f * deltaTime;
-    bool collidedVertically = RpgCharacter_MoveAxis(character, stage, movingSolids,
+    bool collidedVertically = RpgCharacter_MoveAxisShared(character, stage, movingSolids,
                                                      character->verticalSpeed * deltaTime, true);
     if (collidedVertically) {
         character->isGrounded = character->verticalSpeed > 0.0f;
         character->verticalSpeed = 0.0f;
     } else if (character->verticalSpeed >= 0.0f &&
-               RpgCharacter_HasGroundBelow(character, stage, movingSolids)) {
+               RpgCharacter_HasGroundBelowShared(character, stage, movingSolids)) {
         character->isGrounded = true;
         character->verticalSpeed = 0.0f;
     } else {

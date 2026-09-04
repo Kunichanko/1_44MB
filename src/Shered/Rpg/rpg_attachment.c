@@ -1,5 +1,6 @@
 // 依存する自プロジェクト内ファイル: rpg_attachment.h
 #include "rpg_attachment.h"
+#include "rpg_gimic_sprites.h"
 
 #include "raymath.h"
 
@@ -7,6 +8,9 @@
 #include <stdio.h>
 #include <string.h>
 
+enum { RPG_SHOOTER_ANIMATION_MILLISECONDS = 360 };
+static const float RPG_SHOOTER_ANIMATION_DURATION =
+    (float)RPG_SHOOTER_ANIMATION_MILLISECONDS / 1000.0f;
 /* データ弾のファイルごとの増分は、32pxマスの1/4（8px）単位だけを許可する。 */
 static float RpgAttachments_NormalizeShotSizePerFile(float sizePerFile)
 {
@@ -21,6 +25,27 @@ static bool RpgAttachments_IsCellInStage(RpgGridCell cell)
 {
     return cell.row >= 0 && cell.row < RPG_STAGE_ROWS && cell.column >= 0 &&
            cell.column < RPG_STAGE_WORLD_COLUMNS;
+}
+
+/* A shooter lives in its outer cell.  Its default path begins there and ends
+   one cell ahead, unless the stage boundary leaves no forward cell. */
+static RpgGridCell RpgAttachments_GetShooterFrontCell(const RpgAttachment *attachment)
+{
+    RpgGridCell outerCell = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
+    RpgGridCell frontCell = RpgGridPath_GetSideNeighbor(outerCell, attachment->side);
+    return RpgAttachments_IsCellInStage(frontCell) ? frontCell : outerCell;
+}
+
+static void RpgAttachments_SetDefaultShooterPath(RpgAttachment *attachment)
+{
+    RpgGridCell bodyCell = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
+    RpgGridCell frontCell = RpgAttachments_GetShooterFrontCell(attachment);
+    attachment->dataPath.cells[0] = bodyCell;
+    attachment->dataPath.cellCount = 1;
+    if (frontCell.row != bodyCell.row || frontCell.column != bodyCell.column) {
+        attachment->dataPath.cells[1] = frontCell;
+        attachment->dataPath.cellCount = 2;
+    }
 }
 
 static bool RpgAttachments_AreSame(const RpgAttachment *first, const RpgAttachment *second)
@@ -126,6 +151,8 @@ bool RpgAttachments_Load(const char *filePath, RpgAttachments *attachments)
         attachment->previewFileCount = 2;
         attachment->previewTotalBytes = 0;
         attachment->dataPath = (RpgGridPath){ .cellCount = 1, .cells = { outerCell } };
+        if (attachment->type == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER)
+            RpgAttachments_SetDefaultShooterPath(attachment);
         if (currentFormat) {
             int previewEnabled = 0;
             float ignoredLegacyPreviewSize = 0.0f;
@@ -162,6 +189,15 @@ bool RpgAttachments_Load(const char *filePath, RpgAttachments *attachments)
                     !RpgAttachments_IsCellInStage(attachment->dataPath.cells[pathIndex])) {
                     fclose(file); return false;
                 }
+            if (attachment->type == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER &&
+                attachment->dataPath.cellCount == 1) {
+                RpgGridCell frontCell = RpgAttachments_GetShooterFrontCell(attachment);
+                if ((attachment->dataPath.cells[0].row == outerCell.row &&
+                     attachment->dataPath.cells[0].column == outerCell.column) ||
+                    (attachment->dataPath.cells[0].row == frontCell.row &&
+                     attachment->dataPath.cells[0].column == frontCell.column))
+                    RpgAttachments_SetDefaultShooterPath(attachment);
+            }
         }
     }
     if (fclose(file) != 0) return false;
@@ -202,6 +238,8 @@ bool RpgAttachments_Add(RpgAttachments *attachments, const RpgStage *stage, int 
         !RpgAttachments_IsCellInStage(cell) || stage->blocks[cell.row][cell.column] == 0 ||
         !RpgAttachments_HasOuterEmptyCell(stage, cell, side) ||
         side < RPG_GRID_SIDE_TOP || side > RPG_GRID_SIDE_LEFT) return false;
+    if (type == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER)
+        RpgAttachments_SetDefaultShooterPath(&attachment);
     if (RpgBlockInventory_IsCellAttachment(type) && RpgAttachments_IsCellOccupied(attachments, outerCell))
         return false;
     for (int index = 0; index < attachments->count; index++)
@@ -322,9 +360,10 @@ int RpgAttachments_FindTouchedSaveFlagWorld(const RpgAttachments *attachments, c
     for (int index = 0; index < attachments->count; index++) {
         const RpgAttachment *attachment = &attachments->entries[index];
         if (attachment->isZipperHeld || attachment->type != RPG_BLOCK_ATTACHMENT_SAVE_FLAG) continue;
+        RpgGridCell occupiedCell = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
         if (Vector2Distance(playerPosition,
-                            RpgStage_GetWorldPositionForCell(stage, attachment->cell.row,
-                                                             attachment->cell.column)) <= 28.0f)
+                            RpgStage_GetWorldPositionForCell(stage, occupiedCell.row,
+                                                             occupiedCell.column)) <= 28.0f)
             return index;
     }
     return -1;
@@ -343,11 +382,48 @@ bool RpgAttachments_SetRaisedSaveFlag(RpgAttachments *attachments, int flagId)
     return found;
 }
 
+bool RpgAttachments_StartShooterAnimation(RpgAttachments *attachments, int attachmentIndex)
+{
+    if (attachments == NULL || attachmentIndex < 0 || attachmentIndex >= attachments->count)
+        return false;
+    RpgAttachment *attachment = &attachments->entries[attachmentIndex];
+    if (attachment->type != RPG_BLOCK_ATTACHMENT_RADIO_EMITTER ||
+        attachment->shooterAnimationElapsed > 0.0f)
+        return false;
+    attachment->shooterAnimationElapsed = RPG_SHOOTER_ANIMATION_DURATION;
+    return true;
+}
+
+void RpgAttachments_UpdateShooterAnimations(RpgAttachments *attachments, float deltaTime)
+{
+    if (attachments == NULL || deltaTime <= 0.0f) return;
+    for (int index = 0; index < attachments->count; index++) {
+        RpgAttachment *attachment = &attachments->entries[index];
+        if (attachment->shooterAnimationElapsed <= 0.0f) continue;
+        attachment->shooterAnimationElapsed -= deltaTime;
+        if (attachment->shooterAnimationElapsed < 0.0f) attachment->shooterAnimationElapsed = 0.0f;
+    }
+}
+
+float RpgAttachments_GetShooterAnimationProgress(const RpgAttachment *attachment)
+{
+    if (attachment == NULL || attachment->type != RPG_BLOCK_ATTACHMENT_RADIO_EMITTER ||
+        attachment->shooterAnimationElapsed <= 0.0f)
+        return 0.0f;
+    float progress = 1.0f - attachment->shooterAnimationElapsed / RPG_SHOOTER_ANIMATION_DURATION;
+    if (progress < 0.0f) return 0.0f;
+    if (progress > 1.0f) return 1.0f;
+    return progress;
+}
+
 Vector2 RpgAttachments_GetPosition(const RpgAttachment *attachment, int firstColumn)
 {
     RpgGridCell outerCell = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
     float x = (outerCell.column - firstColumn) * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f;
     float y = outerCell.row * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f;
+    /* Cell attachments live in the adjacent empty cell, so both their visual and hit position
+       are the center of that occupied cell rather than the supporting block's edge. */
+    if (RpgBlockInventory_IsCellAttachment(attachment->type)) return (Vector2){ x, y };
     // 外側1マスのうち、土台だけを取付先ブロック側の辺へ寄せる。
     // 支持ブロックと空気マスの境界を唯一の取付基準にする。描画・当たり判定・ドラッグはすべてこの値を使う。
     float offset = RPG_STAGE_TILE_SIZE * 0.5f;
@@ -442,7 +518,17 @@ static Vector2 RpgAttachments_GetOutwardDirection(RpgGridSide side)
     return (Vector2){ 0.0f, -1.0f };
 }
 
-static void RpgAttachments_DrawIcon(int type, Vector2 position, RpgGridSide side, float alpha)
+static float RpgAttachments_GetIconRotation(RpgGridSide side)
+{
+    /* Attachment art uses down as its zero-degree orientation. */
+    if (side == RPG_GRID_SIDE_RIGHT) return 270.0f;
+    if (side == RPG_GRID_SIDE_BOTTOM) return 0.0f;
+    if (side == RPG_GRID_SIDE_LEFT) return 90.0f;
+    return 180.0f;
+}
+
+static void RpgAttachments_DrawIcon(int type, Vector2 position, RpgGridSide side, float alpha,
+                                    float shooterAnimationProgress)
 {
     position = RpgStage_SnapRenderPoint(position);
     Vector2 direction = RpgAttachments_GetOutwardDirection(side);
@@ -467,6 +553,12 @@ static void RpgAttachments_DrawIcon(int type, Vector2 position, RpgGridSide side
         return;
     }
     if (type != RPG_BLOCK_ATTACHMENT_RADIO_EMITTER) return;
+    Rectangle shooterBounds = { position.x - RPG_STAGE_TILE_SIZE * 0.5f,
+                                position.y - RPG_STAGE_TILE_SIZE * 0.5f,
+                                RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE };
+    if (RpgGimicSprites_DrawShooter(shooterBounds, RpgAttachments_GetIconRotation(side),
+                                    shooterAnimationProgress, Fade(WHITE, alpha)))
+        return;
     Vector2 base = Vector2Add(position, Vector2Scale(direction, 3.0f));
     Vector2 coil = Vector2Add(position, Vector2Scale(direction, 12.0f));
     Vector2 sphere = Vector2Add(position, Vector2Scale(direction, 21.0f));
@@ -487,7 +579,8 @@ static void RpgAttachments_DrawIcon(int type, Vector2 position, RpgGridSide side
 static void RpgAttachments_DrawSaveFlag(const RpgAttachment *attachment, Vector2 position, float alpha)
 {
     position = RpgStage_SnapRenderPoint(position);
-    RpgAttachments_DrawIcon(attachment->type, position, attachment->side, alpha);
+    RpgAttachments_DrawIcon(attachment->type, position, attachment->side, alpha,
+                            RpgAttachments_GetShooterAnimationProgress(attachment));
     if (attachment->type == RPG_BLOCK_ATTACHMENT_SAVE_FLAG && attachment->flagRaised) {
         Vector2 poleTop = { position.x, position.y - 22.0f };
         Vector2 flagBottom = { poleTop.x + 1.0f, poleTop.y + 11.0f };
@@ -531,7 +624,7 @@ void RpgAttachments_DrawMapExcept(const RpgAttachments *attachments, int mapInde
 
 void RpgAttachments_DrawGhost(int type, Vector2 position, RpgGridSide side, bool isSnapped)
 {
-    RpgAttachments_DrawIcon(type, position, side, isSnapped ? 0.74f : 0.42f);
+    RpgAttachments_DrawIcon(type, position, side, isSnapped ? 0.74f : 0.42f, 0.0f);
 }
 
 void RpgAttachments_DrawDataPaths(const RpgAttachments *attachments, int mapIndex)

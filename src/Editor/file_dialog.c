@@ -7,15 +7,26 @@
 #include <windows.h>
 #include <commdlg.h>
 
+#include <stdio.h>
+#include <wchar.h>
+
 bool FileDialog_SelectPng(char *destinationPath, size_t destinationPathSize)
 {
     if (destinationPath == NULL || destinationPathSize == 0) return false;
     wchar_t selectedPath[1024] = {0};
+    wchar_t spriteDirectoryWide[1024] = {0};
+    if (GetModuleFileNameW(NULL, spriteDirectoryWide,
+                           (DWORD)(sizeof(spriteDirectoryWide) / sizeof(spriteDirectoryWide[0]))) > 0) {
+        wchar_t *fileName = wcsrchr(spriteDirectoryWide, L'\\');
+        if (fileName != NULL)
+            swprintf(fileName, (size_t)(spriteDirectoryWide + 1024 - fileName), L"\\..\\assets\\Sprite");
+    }
     OPENFILENAMEW dialog = {0};
     dialog.lStructSize = sizeof(dialog);
     dialog.lpstrFilter = L"PNG files (*.png)\0*.png\0All files (*.*)\0*.*\0";
     dialog.lpstrFile = selectedPath;
     dialog.nMaxFile = (DWORD)(sizeof(selectedPath) / sizeof(selectedPath[0]));
+    dialog.lpstrInitialDir = spriteDirectoryWide[0] != L'\0' ? spriteDirectoryWide : NULL;
     dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
 
     return GetOpenFileNameW(&dialog) != FALSE &&

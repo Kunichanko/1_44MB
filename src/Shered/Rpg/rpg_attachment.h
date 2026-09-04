@@ -28,6 +28,8 @@ typedef struct RpgAttachment {
     unsigned long long previewTotalBytes;
     RpgGridPath dataPath;
     bool flagRaised;
+    /* Runtime-only shooter animation gate.  It is intentionally not serialized. */
+    float shooterAnimationElapsed;
     /* Zipperが実フォルダを保持している間は、配置物を描画・機能とも停止する。 */
     bool isZipperHeld;
 } RpgAttachment;
@@ -50,6 +52,9 @@ int RpgAttachments_FindTouchedSaveFlag(const RpgAttachments *attachments, Vector
 int RpgAttachments_FindTouchedSaveFlagWorld(const RpgAttachments *attachments, const RpgStage *stage,
                                             Vector2 playerPosition);
 bool RpgAttachments_SetRaisedSaveFlag(RpgAttachments *attachments, int flagId);
+bool RpgAttachments_StartShooterAnimation(RpgAttachments *attachments, int attachmentIndex);
+void RpgAttachments_UpdateShooterAnimations(RpgAttachments *attachments, float deltaTime);
+float RpgAttachments_GetShooterAnimationProgress(const RpgAttachment *attachment);
 bool RpgAttachments_IsCellOccupied(const RpgAttachments *attachments, RpgGridCell cell);
 bool RpgAttachments_GetOccupiedCell(const RpgAttachment *attachment, RpgGridCell *cell);
 int RpgAttachments_FindAtPosition(const RpgAttachments *attachments, Vector2 position, float distance);

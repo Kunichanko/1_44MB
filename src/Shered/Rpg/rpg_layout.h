@@ -15,6 +15,11 @@ typedef struct RpgLayout {
     bool stage3IntroEnabled;
     /* ステージ固有の背景PNG。空文字なら背景を描画しない。 */
     char backgroundPath[RPG_LAYOUT_BACKGROUND_PATH_LENGTH];
+    char groundBlockPath[RPG_LAYOUT_BACKGROUND_PATH_LENGTH];
+    /* Ground material adjustments: 0.50 is neutral for every component. */
+    float groundHue;
+    float groundSaturation;
+    float groundLightness;
     /* ステージ固有の見た目。0.15〜1.00で背景とブロックを個別に暗くできる。 */
     float backgroundBrightness;
     float blockBrightness;

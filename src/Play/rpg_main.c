@@ -30,6 +30,8 @@
 #include "rpg_layout.h"
 #include "rpg_magnet.h"
 #include "rpg_stage_background.h"
+#include "rpg_stage_ground_texture.h"
+#include "rpg_gimic_sprites.h"
 #include "rpg_viewport.h"
 #include "rpg_game_window.h"
 #include "rpg_inspect.h"
@@ -645,6 +647,11 @@ int main(void)
     RpgLayout layout = stageData.layout;
     RpgStageBackground stageBackground = RpgStageBackground_Default();
     RpgStageBackground_Load(&stageBackground, layout.backgroundPath);
+    RpgStageGroundTexture groundBlockTexture = RpgStageGroundTexture_Default();
+    RpgStageGroundTexture_Load(&groundBlockTexture, layout.groundBlockPath);
+    RpgStage_SetGroundTexture(groundBlockTexture.texture);
+    RpgStage_SetGroundAppearance(layout.groundHue, layout.groundSaturation,
+                                 layout.groundLightness);
     static RpgStage stage;
     stage = stageData.stage;
     // 保存済みの日本語ファイル名を描画より先にフォントへ登録し、? 表示を防ぐ。
@@ -814,6 +821,10 @@ int main(void)
                 layout = stageData.layout;
                 RpgLayout_LoadGlobalRuntime(&layout);
                 RpgStageBackground_Load(&stageBackground, layout.backgroundPath);
+                RpgStageGroundTexture_Load(&groundBlockTexture, layout.groundBlockPath);
+                RpgStage_SetGroundTexture(groundBlockTexture.texture);
+                RpgStage_SetGroundAppearance(layout.groundHue, layout.groundSaturation,
+                                             layout.groundLightness);
                 stage = stageData.stage;
                 RegisterReferenceFileNames(&stage);
                 items = stageData.items;
@@ -1351,6 +1362,9 @@ int main(void)
     UnloadTexture(zipperTexture);
     UnloadTexture(fileTexture);
     RpgStageBackground_Unload(&stageBackground);
+    RpgStage_SetGroundTexture((Texture2D){ 0 });
+    RpgStageGroundTexture_Unload(&groundBlockTexture);
+    RpgGimicSprites_Unload();
     RpgGameWindow_Uninstall();
     RpgViewport_Shutdown();
     RpgScene_Release(&scene);

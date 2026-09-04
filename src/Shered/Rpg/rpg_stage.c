@@ -5,6 +5,7 @@
 #include "raymath.h"
 
 #include "rpg_block_inventory.h"
+#include "rpg_gimic_sprites.h"
 #include "rpg_viewport.h"
 
 #include <math.h>
@@ -15,6 +16,35 @@
 #define RPG_REFERENCE_COMPRESSION_DURATION 0.48f
 static Texture2D referenceCompressAnimationTexture = { 0 };
 static Texture2D referenceCompressedTexture = { 0 };
+static Texture2D groundTexture = { 0 };
+static float groundHue = 0.50f;
+static float groundSaturation = 0.50f;
+static float groundLightness = 0.50f;
+static Shader groundAdjustmentShader = { 0 };
+static int groundHueLocation = -1;
+static int groundSaturationLocation = -1;
+static int groundLightnessLocation = -1;
+
+static const char *groundAdjustmentFragmentShader =
+    "#version 330\n"
+    "in vec2 fragTexCoord;\n"
+    "in vec4 fragColor;\n"
+    "uniform sampler2D texture0;\n"
+    "uniform vec4 colDiffuse;\n"
+    "uniform float groundHue;\n"
+    "uniform float groundSaturation;\n"
+    "uniform float groundLightness;\n"
+    "out vec4 finalColor;\n"
+    "vec3 rgbToHsl(vec3 c) {\n"
+    "  float hi=max(max(c.r,c.g),c.b), lo=min(min(c.r,c.g),c.b), d=hi-lo, l=(hi+lo)*0.5;\n"
+    "  if(d<0.00001) return vec3(0.0,0.0,l);\n"
+    "  float s=d/(1.0-abs(2.0*l-1.0)), h;\n"
+    "  if(hi==c.r) h=mod((c.g-c.b)/d,6.0); else if(hi==c.g) h=(c.b-c.r)/d+2.0; else h=(c.r-c.g)/d+4.0;\n"
+    "  return vec3(h/6.0,s,l);\n"
+    "}\n"
+    "float hueChannel(float p,float q,float t) { if(t<0.0)t+=1.0; if(t>1.0)t-=1.0; if(t<1.0/6.0)return p+(q-p)*6.0*t; if(t<0.5)return q; if(t<2.0/3.0)return p+(q-p)*(2.0/3.0-t)*6.0; return p; }\n"
+    "vec3 hslToRgb(vec3 hsl) { if(hsl.y<0.00001)return vec3(hsl.z); float q=hsl.z<0.5?hsl.z*(1.0+hsl.y):hsl.z+hsl.y-hsl.z*hsl.y, p=2.0*hsl.z-q; return vec3(hueChannel(p,q,hsl.x+1.0/3.0),hueChannel(p,q,hsl.x),hueChannel(p,q,hsl.x-1.0/3.0)); }\n"
+    "void main() { vec4 c=texture(texture0,fragTexCoord)*colDiffuse*fragColor; vec3 hsl=rgbToHsl(c.rgb); hsl.x=fract(hsl.x+(groundHue-0.5)); hsl.y=clamp(hsl.y*(groundSaturation*2.0),0.0,1.0); hsl.z=clamp(hsl.z*(groundLightness*2.0),0.0,1.0); finalColor=vec4(hslToRgb(hsl),c.a); }\n";
 
 static void EnsureReferenceCompressionTextures(void)
 {
@@ -1291,13 +1321,30 @@ Color RpgStage_GetBlockColor(int blockType)
     if (blockType == RPG_BLOCK_KEY_DOOR_OPEN_TOP) blockType = RPG_BLOCK_KEY_DOOR_CLOSED_TOP;
     if (blockType >= RPG_BLOCK_KEY_DOOR_CLOSED_TOP && blockType <= RPG_BLOCK_KEY_DOOR_OPEN_BOTTOM)
         return (Color){ 68, 48, 105, 255 };
+    /* The Earth palette is one visual material, even when its placement slots
+       use different basic block IDs. */
+    if (blockType >= 1 && blockType <= 10) return colors[1];
     return blockType >= 1 && blockType <= RPG_BLOCK_DOOR_OPEN_BOTTOM ? colors[blockType] :
            blockType == RPG_BLOCK_EFFECT_BUTTON ? (Color){ 72, 84, 104, 255 } : colors[1];
+}
+
+void RpgStage_SetGroundTexture(Texture2D texture)
+{
+    groundTexture = texture;
+}
+
+void RpgStage_SetGroundAppearance(float hue, float saturation, float lightness)
+{
+    groundHue = Clamp(hue, 0.0f, 1.0f);
+    groundSaturation = Clamp(saturation, 0.0f, 1.0f);
+    groundLightness = Clamp(lightness, 0.0f, 1.0f);
 }
 
 void RpgStage_DrawEffectSymbol(Rectangle cell, int blockType)
 {
     const float center = RPG_STAGE_TILE_SIZE * 0.5f;
+    if (blockType == RPG_BLOCK_EFFECT_MAGNET_OFF || blockType == RPG_BLOCK_EFFECT_MAGNET_ON)
+        return;
     if (blockType == RPG_BLOCK_EFFECT_BOUNCE)
         DrawCircle((int)(cell.x + center), (int)(cell.y + center), 8.0f, RAYWHITE);
     if (blockType == RPG_BLOCK_EFFECT_SLOW)
@@ -1401,6 +1448,84 @@ static Color ApplyBlockBrightness(Color color, float brightness)
     return color;
 }
 
+static Color RpgStage_AdjustGroundColor(Color color)
+{
+    float red = (float)color.r / 255.0f;
+    float green = (float)color.g / 255.0f;
+    float blue = (float)color.b / 255.0f;
+    float high = fmaxf(red, fmaxf(green, blue));
+    float low = fminf(red, fminf(green, blue));
+    float difference = high - low;
+    float lightness = (high + low) * 0.5f;
+    float saturation = 0.0f;
+    float hue = 0.0f;
+    if (difference > 0.00001f) {
+        saturation = difference / (1.0f - fabsf(2.0f * lightness - 1.0f));
+        if (high == red) hue = fmodf((green - blue) / difference, 6.0f);
+        else if (high == green) hue = (blue - red) / difference + 2.0f;
+        else hue = (red - green) / difference + 4.0f;
+        hue /= 6.0f;
+    }
+    hue = fmodf(hue + groundHue - 0.50f + 1.0f, 1.0f);
+    saturation = Clamp(saturation * groundSaturation * 2.0f, 0.0f, 1.0f);
+    lightness = Clamp(lightness * groundLightness * 2.0f, 0.0f, 1.0f);
+    if (saturation < 0.00001f) return (Color){ (unsigned char)(lightness * 255.0f + 0.5f),
+                                                (unsigned char)(lightness * 255.0f + 0.5f),
+                                                (unsigned char)(lightness * 255.0f + 0.5f), color.a };
+    float q = lightness < 0.5f ? lightness * (1.0f + saturation) :
+                                  lightness + saturation - lightness * saturation;
+    float p = 2.0f * lightness - q;
+    float components[3] = { hue + 1.0f / 3.0f, hue, hue - 1.0f / 3.0f };
+    float rgb[3];
+    for (int index = 0; index < 3; index++) {
+        float t = components[index];
+        if (t < 0.0f) t += 1.0f;
+        if (t > 1.0f) t -= 1.0f;
+        rgb[index] = t < 1.0f / 6.0f ? p + (q - p) * 6.0f * t :
+                     t < 0.5f ? q :
+                     t < 2.0f / 3.0f ? p + (q - p) * (2.0f / 3.0f - t) * 6.0f : p;
+    }
+    return (Color){ (unsigned char)(rgb[0] * 255.0f + 0.5f),
+                    (unsigned char)(rgb[1] * 255.0f + 0.5f),
+                    (unsigned char)(rgb[2] * 255.0f + 0.5f), color.a };
+}
+
+static bool RpgStage_DrawGroundTexturePart(Rectangle cell, Rectangle part, float brightness)
+{
+    if (groundTexture.id == 0 || cell.width <= 0.0f || cell.height <= 0.0f ||
+        part.width <= 0.0f || part.height <= 0.0f) return false;
+    Rectangle source = {
+        (part.x - cell.x) * (float)groundTexture.width / cell.width,
+        (part.y - cell.y) * (float)groundTexture.height / cell.height,
+        part.width * (float)groundTexture.width / cell.width,
+        part.height * (float)groundTexture.height / cell.height
+    };
+    bool needsAdjustment = fabsf(groundHue - 0.50f) > 0.001f ||
+                           fabsf(groundSaturation - 0.50f) > 0.001f ||
+                           fabsf(groundLightness - 0.50f) > 0.001f;
+    if (needsAdjustment && groundAdjustmentShader.id == 0) {
+        groundAdjustmentShader = LoadShaderFromMemory(NULL, groundAdjustmentFragmentShader);
+        if (groundAdjustmentShader.id != 0) {
+            groundHueLocation = GetShaderLocation(groundAdjustmentShader, "groundHue");
+            groundSaturationLocation = GetShaderLocation(groundAdjustmentShader, "groundSaturation");
+            groundLightnessLocation = GetShaderLocation(groundAdjustmentShader, "groundLightness");
+        }
+    }
+    if (needsAdjustment && groundAdjustmentShader.id != 0) {
+        if (groundHueLocation >= 0)
+            SetShaderValue(groundAdjustmentShader, groundHueLocation, &groundHue, SHADER_UNIFORM_FLOAT);
+        if (groundSaturationLocation >= 0)
+            SetShaderValue(groundAdjustmentShader, groundSaturationLocation, &groundSaturation, SHADER_UNIFORM_FLOAT);
+        if (groundLightnessLocation >= 0)
+            SetShaderValue(groundAdjustmentShader, groundLightnessLocation, &groundLightness, SHADER_UNIFORM_FLOAT);
+        BeginShaderMode(groundAdjustmentShader);
+    }
+    DrawTexturePro(groundTexture, source, part, (Vector2){ 0.0f, 0.0f }, 0.0f,
+                   ApplyBlockBrightness(WHITE, brightness));
+    if (needsAdjustment && groundAdjustmentShader.id != 0) EndShaderMode();
+    return true;
+}
+
 int RpgStage_GetHoleSolidParts(Rectangle cell, int blockType, Rectangle solidParts[2])
 {
     // 穴は縦・横とも中央20px。余白側の6pxずつだけを描画・衝突判定に使う。
@@ -1423,17 +1548,40 @@ int RpgStage_GetHoleSolidParts(Rectangle cell, int blockType, Rectangle solidPar
 
 void RpgStage_DrawBlockCell(Rectangle cell, int blockType, float brightness)
 {
-    Color color = ApplyBlockBrightness(RpgStage_GetBlockColor(blockType), brightness);
+    bool isGroundMaterial = (blockType >= 1 && blockType <= 10) ||
+                            blockType == RPG_BLOCK_HOLE_VERTICAL ||
+                            blockType == RPG_BLOCK_HOLE_HORIZONTAL ||
+                            RpgBlockInventory_IsOneWayPlatform(blockType);
+    Color baseColor = RpgStage_GetBlockColor(blockType);
+    if (isGroundMaterial) baseColor = RpgStage_AdjustGroundColor(baseColor);
+    Color color = ApplyBlockBrightness(baseColor, brightness);
     Rectangle solidParts[2];
     int solidPartCount = RpgStage_GetHoleSolidParts(cell, blockType, solidParts);
     // 穴ブロックは、衝突判定と同じ実体部分だけを描画する。
-    if (solidPartCount > 0) {
-        for (int index = 0; index < solidPartCount; index++) DrawRectangleRec(solidParts[index], color);
+    if (blockType == RPG_BLOCK_PUSH_BLOCK &&
+        RpgGimicSprites_Draw(RPG_GIMIC_SPRITE_BOX, cell, ApplyBlockBrightness(WHITE, brightness))) {
+        return;
+    } else if (blockType == RPG_BLOCK_METAL &&
+               RpgGimicSprites_Draw(RPG_GIMIC_SPRITE_STEEL, cell, ApplyBlockBrightness(WHITE, brightness))) {
+        return;
+    } else if ((blockType == RPG_BLOCK_EFFECT_MAGNET_OFF || blockType == RPG_BLOCK_EFFECT_MAGNET_ON) &&
+               RpgGimicSprites_Draw(RPG_GIMIC_SPRITE_MAGNET, cell,
+                   ApplyBlockBrightness(blockType == RPG_BLOCK_EFFECT_MAGNET_ON ? WHITE : LIGHTGRAY, brightness))) {
+        return;
+    } else if (blockType >= 1 && blockType <= 10 && groundTexture.id != 0) {
+        RpgStage_DrawGroundTexturePart(cell, cell, brightness);
+    } else if (solidPartCount > 0) {
+        for (int index = 0; index < solidPartCount; index++)
+            if (!RpgStage_DrawGroundTexturePart(cell, solidParts[index], brightness))
+                DrawRectangleRec(solidParts[index], color);
     } else if (RpgBlockInventory_IsOneWayPlatform(blockType)) {
         /* 1マスを埋めず、上辺だけを草と土の薄い床として描画する。 */
-        Color grass = ApplyBlockBrightness((Color){ 91, 130, 66, 255 }, brightness);
-        DrawRectangleRec((Rectangle){ cell.x, cell.y, cell.width, 3.0f }, grass);
-        DrawRectangleRec((Rectangle){ cell.x, cell.y + 3.0f, cell.width, 4.0f }, color);
+        Rectangle floorPart = { cell.x, cell.y, cell.width, 7.0f };
+        if (!RpgStage_DrawGroundTexturePart(cell, floorPart, brightness)) {
+            Color grass = ApplyBlockBrightness(RpgStage_AdjustGroundColor((Color){ 91, 130, 66, 255 }), brightness);
+            DrawRectangleRec((Rectangle){ cell.x, cell.y, cell.width, 3.0f }, grass);
+            DrawRectangleRec((Rectangle){ cell.x, cell.y + 3.0f, cell.width, 4.0f }, color);
+        }
     } else if (RpgStage_IsSolidBlock(blockType)) {
         DrawRectangleRec(cell, color);
     }

@@ -139,6 +139,11 @@ bool RpgStage_CheckSolidCircleCollision(const RpgStage *stage, Vector2 center, f
 bool RpgStage_FindSolidCircleCollisionCenter(const RpgStage *stage, Vector2 center, float radius,
                                              Vector2 *collisionCenter);
 Color RpgStage_GetBlockColor(int blockType);
+/* The caller owns the texture lifetime; RpgStage borrows it while drawing
+   ordinary ground blocks. */
+void RpgStage_SetGroundTexture(Texture2D texture);
+/* Values are normalized 0..1; 0.50 is the neutral hue/saturation/lightness. */
+void RpgStage_SetGroundAppearance(float hue, float saturation, float lightness);
 // 描画と衝突判定で共有する穴ブロックの実体部分。縦・横とも中央20pxを空洞にする。
 int RpgStage_GetHoleSolidParts(Rectangle cell, int blockType, Rectangle solidParts[2]);
 // ステージ・パレット共通の1マス描画。穴ブロックは上の実体部分だけを描画する。

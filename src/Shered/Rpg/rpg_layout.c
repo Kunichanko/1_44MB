@@ -30,6 +30,12 @@ static void NormalizeStageVisuals(RpgLayout *layout)
         layout->backgroundBrightness = 1.0f;
     if (layout->blockBrightness < 0.15f || layout->blockBrightness > 1.0f)
         layout->blockBrightness = 1.0f;
+    if (layout->groundHue < 0.0f || layout->groundHue > 1.0f)
+        layout->groundHue = 0.50f;
+    if (layout->groundSaturation < 0.0f || layout->groundSaturation > 1.0f)
+        layout->groundSaturation = 0.50f;
+    if (layout->groundLightness < 0.0f || layout->groundLightness > 1.0f)
+        layout->groundLightness = 0.50f;
     if (layout->zipperMaxCapacityKB == 0 || layout->zipperMaxCapacityKB > 1048576U)
         layout->zipperMaxCapacityKB = 10U;
 }
@@ -42,6 +48,7 @@ RpgLayout RpgLayout_Default(void)
                          .playerMoveSpeed = 180.0f, .playerScale = 1.0f, .npcScale = 1.0f,
                           .stage3IntroEnabled = true, .electricCellDelay = 0.15f, .magnetMetalSpeed = 160.0f,
                           .backgroundBrightness = 1.0f, .blockBrightness = 1.0f,
+                         .groundHue = 0.50f, .groundSaturation = 0.50f, .groundLightness = 0.50f,
                           .zipperMaxCapacityKB = 10U,
                          .zipperFolderReturnDuration = 0.45f, .zipperFolderReturnAnimationDelay = 0.0f,
                          .referenceFollowerScale = 0.50f };
@@ -65,14 +72,22 @@ bool RpgLayout_Load(const char *filePath, RpgLayout *layout)
                            &layout->npcScale, &stage3IntroEnabled, &layout->electricCellDelay,
                            &layout->zipperFolderReturnDuration, &layout->zipperFolderReturnAnimationDelay);
     layout->backgroundPath[0] = '\0';
+    layout->groundBlockPath[0] = '\0';
     layout->backgroundBrightness = 1.0f;
     layout->blockBrightness = 1.0f;
+    layout->groundHue = 0.50f;
+    layout->groundSaturation = 0.50f;
+    layout->groundLightness = 0.50f;
     layout->zipperMaxCapacityKB = 10U;
     char line[RPG_LAYOUT_BACKGROUND_PATH_LENGTH + 16];
     while (fgets(line, sizeof(line), file) != NULL) {
         if (sscanf(line, "background=%511[^\r\n]", layout->backgroundPath) == 1) continue;
+        if (sscanf(line, "ground_block=%511[^\r\n]", layout->groundBlockPath) == 1) continue;
         if (sscanf(line, "background_brightness=%f", &layout->backgroundBrightness) == 1) continue;
         if (sscanf(line, "block_brightness=%f", &layout->blockBrightness) == 1) continue;
+        if (sscanf(line, "ground_hue=%f", &layout->groundHue) == 1) continue;
+        if (sscanf(line, "ground_saturation=%f", &layout->groundSaturation) == 1) continue;
+        if (sscanf(line, "ground_lightness=%f", &layout->groundLightness) == 1) continue;
         (void)sscanf(line, "zipper_max_capacity_kb=%u", &layout->zipperMaxCapacityKB);
     }
     fclose(file);
@@ -104,8 +119,12 @@ bool RpgLayout_Save(const char *filePath, const RpgLayout *layout)
             layout->playerMoveSpeed, layout->playerScale, layout->npcScale,
             layout->stage3IntroEnabled ? 1 : 0);
     fprintf(file, "background=%s\n", layout->backgroundPath);
+    fprintf(file, "ground_block=%s\n", layout->groundBlockPath);
     fprintf(file, "background_brightness=%.2f\n", layout->backgroundBrightness);
     fprintf(file, "block_brightness=%.2f\n", layout->blockBrightness);
+    fprintf(file, "ground_hue=%.2f\n", layout->groundHue);
+    fprintf(file, "ground_saturation=%.2f\n", layout->groundSaturation);
+    fprintf(file, "ground_lightness=%.2f\n", layout->groundLightness);
     fprintf(file, "zipper_max_capacity_kb=%u\n", layout->zipperMaxCapacityKB);
     return fclose(file) == 0;
 }

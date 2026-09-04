@@ -1,6 +1,8 @@
 // 依存する自プロジェクト内ファイル: rpg_receiver.h, rpg_grid_path.h, rpg_stage.h
 #include "rpg_receiver.h"
 
+#include "rpg_gimic_sprites.h"
+
 #include <stdio.h>
 
 static bool RpgReceivers_IsCellInStage(RpgGridCell cell)
@@ -18,6 +20,15 @@ static Vector2 RpgReceivers_GetAnchor(const RpgReceiver *receiver, int firstColu
     else if (receiver->side == RPG_GRID_SIDE_BOTTOM) y += RPG_STAGE_TILE_SIZE * 0.5f;
     else x -= RPG_STAGE_TILE_SIZE * 0.5f;
     return (Vector2){ x, y };
+}
+
+static float RpgReceivers_GetRotation(RpgGridSide side)
+{
+    /* Attachment art uses down as its zero-degree orientation. */
+    if (side == RPG_GRID_SIDE_RIGHT) return 270.0f;
+    if (side == RPG_GRID_SIDE_BOTTOM) return 0.0f;
+    if (side == RPG_GRID_SIDE_LEFT) return 90.0f;
+    return 180.0f;
 }
 
 int RpgReceivers_FindAtCell(const RpgReceivers *receivers, RpgGridCell cell)
@@ -120,10 +131,11 @@ static void RpgReceivers_DrawWithOffset(const RpgReceivers *receivers, int first
         const RpgReceiver *receiver = &receivers->entries[index];
         if (receiver->cell.column < firstColumn || receiver->cell.column >= lastColumn) continue;
         Vector2 anchor = RpgStage_SnapRenderPoint(RpgReceivers_GetAnchor(receiver, firstColumn));
-        Rectangle recess = receiver->side == RPG_GRID_SIDE_TOP || receiver->side == RPG_GRID_SIDE_BOTTOM ?
-            (Rectangle){ anchor.x - 12.0f, anchor.y - 4.0f, 24.0f, 8.0f } :
-            (Rectangle){ anchor.x - 4.0f, anchor.y - 12.0f, 8.0f, 24.0f };
-        recess = RpgStage_SnapRenderRectangle(recess);
+        Rectangle recess = RpgStage_SnapRenderRectangle(
+            (Rectangle){ anchor.x - 8.0f, anchor.y - 8.0f, 16.0f, 16.0f });
+        if (RpgGimicSprites_DrawRotated(RPG_GIMIC_SPRITE_DATA_RECEIVER, recess,
+                                        RpgReceivers_GetRotation(receiver->side), WHITE))
+            continue;
         // ブロックの縁を掘り込んだように見せるため、外枠より暗い内側を描く。
         DrawRectangleRec(recess, DARKBROWN);
         DrawRectangleLinesEx(recess, 2.0f, GOLD);

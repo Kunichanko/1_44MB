@@ -57,18 +57,18 @@ RpgDataShots RpgDataShots_Default(void);
 // ファイル数・容量から実弾またはプレビュー弾の大きさと速度を同じ式で求める。
 void RpgDataShot_SetFileProperties(RpgDataShot *shot, const RpgAttachment *attachment,
                                    int fileCount, unsigned long long totalBytes);
-void RpgDataShots_Trigger(RpgDataShots *shots, const RpgAttachments *attachments, int attachmentIndex);
-void RpgDataShots_TriggerAll(RpgDataShots *shots, const RpgAttachments *attachments);
-void RpgDataShots_TriggerAllInMap(RpgDataShots *shots, const RpgAttachments *attachments,
+void RpgDataShots_Trigger(RpgDataShots *shots, RpgAttachments *attachments, int attachmentIndex);
+void RpgDataShots_TriggerAll(RpgDataShots *shots, RpgAttachments *attachments);
+void RpgDataShots_TriggerAllInMap(RpgDataShots *shots, RpgAttachments *attachments,
                                   int mapIndex);
 // ボタン押下通知を受信した場合だけ、各電波発生装置からデータ弾を射出する。
-void RpgDataShots_ConsumeButtonEvent(RpgDataShots *shots, const RpgAttachments *attachments,
+void RpgDataShots_ConsumeButtonEvent(RpgDataShots *shots, RpgAttachments *attachments,
                                      const RpgButtonEvent *buttonEvent);
 // プレビュー通知は見た目専用の弾を一回だけ生成し、ゲーム中のギミックへ作用させない。
-void RpgDataShots_ConsumePreviewEvent(RpgDataShots *shots, const RpgAttachments *attachments,
+void RpgDataShots_ConsumePreviewEvent(RpgDataShots *shots, RpgAttachments *attachments,
                                       const RpgPreviewEvent *previewEvent);
-void RpgDataShots_TriggerPreview(RpgDataShots *shots, const RpgAttachments *attachments, int target);
-void RpgDataShots_Update(RpgDataShots *shots, const RpgAttachments *attachments,
+void RpgDataShots_TriggerPreview(RpgDataShots *shots, RpgAttachments *attachments, int target);
+void RpgDataShots_Update(RpgDataShots *shots, RpgAttachments *attachments,
                          RpgStage *stage, const RpgReceivers *receivers,
                          const RpgWires *wires, float electricCellDelay,
                          const RpgMovingSolidSet *movingSolids,

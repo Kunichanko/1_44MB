@@ -40,6 +40,8 @@ enum { EDITOR_WM_CLOSE = 0x0010, EDITOR_GWLP_WNDPROC = -4 };
 #include "rpg_layout.h"
 #include "rpg_magnet.h"
 #include "rpg_stage_background.h"
+#include "rpg_stage_ground_texture.h"
+#include "rpg_gimic_sprites.h"
 #include "rpg_viewport.h"
 #include "rpg_game_window.h"
 #include "rpg_inspect.h"
@@ -282,6 +284,7 @@ typedef struct FunctionPreviewMoveState {
 static FunctionPreviewMoveState functionPreviewMoves[RPG_INSPECT_MAX_FUNCTIONS];
 static RpgStage *previewStage;
 static RpgStageBackground stageBackground;
+static RpgStageGroundTexture groundBlockTexture;
 /* 画像オブジェクトはFolderと独立して選択状態を保持する。 */
 static int selectedImageObjectIndex = -1;
 // 数値欄の編集中だけ入力を受け、ほかのエディター操作へ伝搬させない。
@@ -362,6 +365,10 @@ static bool LoadEditorStageState(int stageNumber, RpgLayout *layout, RpgCharacte
     *layout = stageLoadBuffer.layout;
     RpgLayout_LoadGlobalRuntime(layout);
     RpgStageBackground_Load(&stageBackground, layout->backgroundPath);
+    RpgStageGroundTexture_Load(&groundBlockTexture, layout->groundBlockPath);
+    RpgStage_SetGroundTexture(groundBlockTexture.texture);
+    RpgStage_SetGroundAppearance(layout->groundHue, layout->groundSaturation,
+                                 layout->groundLightness);
     *stage = stageLoadBuffer.stage;
     *items = stageLoadBuffer.items;
     *dialogue = stageLoadBuffer.dialogue;
@@ -470,7 +477,7 @@ static Rectangle GetInspectorBaseBounds(int selected)
 static float GetInspectorContentHeight(int selected)
 {
     if (selected == RPG_EDITOR_GLOBAL_SETTINGS_INSPECTOR) return 690.0f;
-    if (selected == RPG_EDITOR_STAGE_SETTINGS_INSPECTOR) return 684.0f;
+    if (selected == RPG_EDITOR_STAGE_SETTINGS_INSPECTOR) return 840.0f;
     if (selected == 6) return 430.0f;
     if (selected == 3) return 450.0f;
     if (selected == 2) return 310.0f;
@@ -2072,8 +2079,12 @@ static bool HasAnyUnsavedChanges(const EditorSaveSnapshot *snapshot, const RpgCh
                                  const RpgItems *items, const RpgItems *savedItems)
 {
     return strcmp(snapshot->layout.backgroundPath, layout->backgroundPath) != 0 ||
+            strcmp(snapshot->layout.groundBlockPath, layout->groundBlockPath) != 0 ||
             snapshot->layout.backgroundBrightness != layout->backgroundBrightness ||
             snapshot->layout.blockBrightness != layout->blockBrightness ||
+            snapshot->layout.groundHue != layout->groundHue ||
+            snapshot->layout.groundSaturation != layout->groundSaturation ||
+            snapshot->layout.groundLightness != layout->groundLightness ||
             snapshot->layout.electricCellDelay != layout->electricCellDelay ||
             snapshot->layout.magnetMetalSpeed != layout->magnetMetalSpeed ||
             snapshot->layout.zipperFolderReturnDuration != layout->zipperFolderReturnDuration ||
@@ -3331,9 +3342,13 @@ static void DrawStageSettingsPanel(const RpgLayout *layout, const RpgStage3Event
                        GetInspectorCloseButton(RPG_EDITOR_STAGE_SETTINGS_INSPECTOR));
     int stageIndex = RpgStageCatalog_FindIndex(&stageCatalogData, currentStageNumber);
     bool backgroundChanged = strcmp(layout->backgroundPath, savedSnapshot->layout.backgroundPath) != 0;
-    bool visualChanged = backgroundChanged ||
+    bool groundBlockChanged = strcmp(layout->groundBlockPath, savedSnapshot->layout.groundBlockPath) != 0;
+    bool visualChanged = backgroundChanged || groundBlockChanged ||
                           layout->backgroundBrightness != savedSnapshot->layout.backgroundBrightness ||
-                          layout->blockBrightness != savedSnapshot->layout.blockBrightness;
+                          layout->blockBrightness != savedSnapshot->layout.blockBrightness ||
+                          layout->groundHue != savedSnapshot->layout.groundHue ||
+                          layout->groundSaturation != savedSnapshot->layout.groundSaturation ||
+                          layout->groundLightness != savedSnapshot->layout.groundLightness;
     bool capacityChanged = layout->zipperMaxCapacityKB != savedSnapshot->layout.zipperMaxCapacityKB;
     DrawInspectorSectionTitle("STAGE", 716, 120, DARKBLUE);
     DrawRectangle(716, 150, 28, 26, GRAY);
@@ -3381,8 +3396,29 @@ static void DrawStageSettingsPanel(const RpgLayout *layout, const RpgStage3Event
     DrawText("-", 830, 587, 20, RAYWHITE);
     DrawRectangle(864, 586, 38, 24, DARKGREEN);
     DrawText("+", 877, 587, 20, RAYWHITE);
-    DrawText((visualChanged || capacityChanged) ? "Unsaved - Save all: S" : "Save all: S", 716, 634, 15,
-              (visualChanged || capacityChanged) ? MAROON : DARKGRAY);
+    DrawInspectorSectionTitle("GROUND BLOCK", 716, 632, DARKBLUE);
+    DrawText(layout->groundBlockPath[0] == '\0' ? "Unified color (no PNG)" : GetFileName(layout->groundBlockPath),
+              716, 662, 15, groundBlockChanged ? MAROON : DARKGRAY);
+    DrawRectangle(716, 678, 188, 28, DARKBLUE);
+    DrawText("Select ground PNG", 738, 684, 16, RAYWHITE);
+    DrawRectangle(716, 714, 188, 28, GRAY);
+    DrawText("Clear ground PNG", 744, 720, 16, RAYWHITE);
+    DrawInspectorSectionTitle("GROUND TONE", 716, 754, DARKBLUE);
+    DrawText(TextFormat("Hue: %.0f%%", layout->groundHue * 100.0f), 716, 784, 15,
+             visualChanged ? MAROON : DARKGRAY);
+    DrawText(TextFormat("Saturation: %.0f%%", layout->groundSaturation * 100.0f), 716, 820, 15,
+             visualChanged ? MAROON : DARKGRAY);
+    DrawText(TextFormat("Lightness: %.0f%%", layout->groundLightness * 100.0f), 716, 856, 15,
+             visualChanged ? MAROON : DARKGRAY);
+    for (int row = 0; row < 3; row++) {
+        int y = 776 + row * 36;
+        DrawRectangle(816, y, 38, 24, MAROON);
+        DrawText("-", 830, y + 1, 20, RAYWHITE);
+        DrawRectangle(864, y, 38, 24, DARKGREEN);
+        DrawText("+", 877, y + 1, 20, RAYWHITE);
+    }
+    DrawText((visualChanged || capacityChanged) ? "Unsaved - Save all: S" : "Save all: S", 716, 892, 15,
+             (visualChanged || capacityChanged) ? MAROON : DARKGRAY);
 }
 
 // 現在のエリアだけを対象にした管理パネル。削除操作はここに閉じ込める。
@@ -3765,6 +3801,8 @@ static void DrawEditor(const RpgCharacter *player, const RpgCharacter *npc, cons
          &savedInspect->functions[inspectFunctionIndex].dialogue : &emptySavedDialogue) :
         &savedSnapshot->dialogue;
     RpgViewport_BeginFrame();
+    RpgStage_SetGroundAppearance(layout->groundHue, layout->groundSaturation,
+                                 layout->groundLightness);
     ClearBackground(BLACK);
     Rectangle mapBounds = GetEditorMapContentBounds();
     Vector2 selectedMapWorldOrigin = GetEditorMapWorldOrigin(stage, mapIndex);
@@ -4143,6 +4181,11 @@ int main(void)
     RpgLayout layout = stageLoadBuffer.layout;
     stageBackground = RpgStageBackground_Default();
     RpgStageBackground_Load(&stageBackground, layout.backgroundPath);
+    groundBlockTexture = RpgStageGroundTexture_Default();
+    RpgStageGroundTexture_Load(&groundBlockTexture, layout.groundBlockPath);
+    RpgStage_SetGroundTexture(groundBlockTexture.texture);
+    RpgStage_SetGroundAppearance(layout.groundHue, layout.groundSaturation,
+                                 layout.groundLightness);
     static RpgStage stage;
     stage = stageLoadBuffer.stage;
     // 保存済みFileの日本語パスも、選択前から ? にならないようフォントへ登録する。
@@ -5166,6 +5209,42 @@ int main(void)
                 layout.blockBrightness = Clamp(layout.blockBrightness - 0.05f, 0.15f, 1.0f);
             } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 864, 586, 38, 24 })) {
                 layout.blockBrightness = Clamp(layout.blockBrightness + 0.05f, 0.15f, 1.0f);
+            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 678, 188, 28 })) {
+                char selectedGroundPath[RPG_LAYOUT_BACKGROUND_PATH_LENGTH] = { 0 };
+                if (FileDialog_SelectPng(selectedGroundPath, sizeof(selectedGroundPath))) {
+                    if (RpgStageGroundTexture_Load(&groundBlockTexture, selectedGroundPath)) {
+                        snprintf(layout.groundBlockPath, sizeof(layout.groundBlockPath), "%s", selectedGroundPath);
+                        RpgStage_SetGroundTexture(groundBlockTexture.texture);
+                        RpgStage_SetGroundAppearance(layout.groundHue, layout.groundSaturation,
+                                                     layout.groundLightness);
+                        message = "Ground PNG loaded";
+                    } else message = "Ground PNG load failed";
+                }
+            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 714, 188, 28 })) {
+                layout.groundBlockPath[0] = '\0';
+                RpgStageGroundTexture_Load(&groundBlockTexture, layout.groundBlockPath);
+                RpgStage_SetGroundTexture(groundBlockTexture.texture);
+                RpgStage_SetGroundAppearance(layout.groundHue, layout.groundSaturation,
+                                             layout.groundLightness);
+                message = "Ground PNG cleared";
+            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 816, 776, 38, 24 })) {
+                layout.groundHue = Clamp(layout.groundHue - 0.05f, 0.0f, 1.0f);
+                RpgStage_SetGroundAppearance(layout.groundHue, layout.groundSaturation, layout.groundLightness);
+            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 864, 776, 38, 24 })) {
+                layout.groundHue = Clamp(layout.groundHue + 0.05f, 0.0f, 1.0f);
+                RpgStage_SetGroundAppearance(layout.groundHue, layout.groundSaturation, layout.groundLightness);
+            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 816, 812, 38, 24 })) {
+                layout.groundSaturation = Clamp(layout.groundSaturation - 0.05f, 0.0f, 1.0f);
+                RpgStage_SetGroundAppearance(layout.groundHue, layout.groundSaturation, layout.groundLightness);
+            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 864, 812, 38, 24 })) {
+                layout.groundSaturation = Clamp(layout.groundSaturation + 0.05f, 0.0f, 1.0f);
+                RpgStage_SetGroundAppearance(layout.groundHue, layout.groundSaturation, layout.groundLightness);
+            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 816, 848, 38, 24 })) {
+                layout.groundLightness = Clamp(layout.groundLightness - 0.05f, 0.0f, 1.0f);
+                RpgStage_SetGroundAppearance(layout.groundHue, layout.groundSaturation, layout.groundLightness);
+            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 864, 848, 38, 24 })) {
+                layout.groundLightness = Clamp(layout.groundLightness + 0.05f, 0.0f, 1.0f);
+                RpgStage_SetGroundAppearance(layout.groundHue, layout.groundSaturation, layout.groundLightness);
             }
             if (targetStageNumber > 0 && LoadEditorStageState(targetStageNumber, &layout, &player, &npc,
                                                                &stage, &items, &dialogue, &stage3Event)) {
@@ -7087,6 +7166,9 @@ int main(void)
     UnloadTexture(zipperTexture);
     UnloadTexture(fileTexture);
     RpgStageBackground_Unload(&stageBackground);
+    RpgStage_SetGroundTexture((Texture2D){ 0 });
+    RpgStageGroundTexture_Unload(&groundBlockTexture);
+    RpgGimicSprites_Unload();
     RpgGameWindow_Uninstall();
     RpgViewport_Shutdown();
     RpgScene_Release(&editorScene);

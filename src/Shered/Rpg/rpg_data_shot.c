@@ -1,5 +1,6 @@
 // 依存する自プロジェクト内ファイル: rpg_data_shot.h, rpg_magnet.h
 #include "rpg_data_shot.h"
+#include "rpg_gimic_sprites.h"
 
 #include "rpg_magnet.h"
 
@@ -172,21 +173,22 @@ static void RpgDataShots_Spawn(RpgDataShots *shots, const RpgAttachments *attach
     }
 }
 
-void RpgDataShots_Trigger(RpgDataShots *shots, const RpgAttachments *attachments, int attachmentIndex)
+void RpgDataShots_Trigger(RpgDataShots *shots, RpgAttachments *attachments, int attachmentIndex)
 {
     if (attachmentIndex >= 0 && attachmentIndex < attachments->count &&
         !attachments->entries[attachmentIndex].isZipperHeld &&
-        attachments->entries[attachmentIndex].type == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER)
+        attachments->entries[attachmentIndex].type == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER &&
+        RpgAttachments_StartShooterAnimation(attachments, attachmentIndex))
         RpgDataShots_Spawn(shots, attachments, attachmentIndex, false);
 }
 
-void RpgDataShots_TriggerAll(RpgDataShots *shots, const RpgAttachments *attachments)
+void RpgDataShots_TriggerAll(RpgDataShots *shots, RpgAttachments *attachments)
 {
     for (int index = 0; index < attachments->count; index++)
         RpgDataShots_Trigger(shots, attachments, index);
 }
 
-void RpgDataShots_TriggerAllInMap(RpgDataShots *shots, const RpgAttachments *attachments,
+void RpgDataShots_TriggerAllInMap(RpgDataShots *shots, RpgAttachments *attachments,
                                   int mapIndex)
 {
     if (shots == NULL || attachments == NULL || mapIndex < 0) return;
@@ -197,14 +199,14 @@ void RpgDataShots_TriggerAllInMap(RpgDataShots *shots, const RpgAttachments *att
     }
 }
 
-void RpgDataShots_ConsumeButtonEvent(RpgDataShots *shots, const RpgAttachments *attachments,
+void RpgDataShots_ConsumeButtonEvent(RpgDataShots *shots, RpgAttachments *attachments,
                                      const RpgButtonEvent *buttonEvent)
 {
     if (RpgButtonEvent_Consume(buttonEvent, &shots->lastButtonEventSequence))
         RpgDataShots_TriggerAllInMap(shots, attachments, buttonEvent->sourceMapIndex);
 }
 
-void RpgDataShots_ConsumePreviewEvent(RpgDataShots *shots, const RpgAttachments *attachments,
+void RpgDataShots_ConsumePreviewEvent(RpgDataShots *shots, RpgAttachments *attachments,
                                       const RpgPreviewEvent *previewEvent)
 {
     if (shots == NULL || attachments == NULL ||
@@ -212,22 +214,24 @@ void RpgDataShots_ConsumePreviewEvent(RpgDataShots *shots, const RpgAttachments 
     RpgDataShots_TriggerPreview(shots, attachments, previewEvent->target);
 }
 
-void RpgDataShots_TriggerPreview(RpgDataShots *shots, const RpgAttachments *attachments, int target)
+void RpgDataShots_TriggerPreview(RpgDataShots *shots, RpgAttachments *attachments, int target)
 {
     if (shots == NULL || attachments == NULL) return;
     // 共通プレビュー通知では全装置、個別通知では指定装置だけを見た目専用で反応させる。
     for (int index = 0; index < attachments->count; index++)
         if (!attachments->entries[index].isZipperHeld && (target == -1 || target == index) &&
-            attachments->entries[index].type == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER)
+            attachments->entries[index].type == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER &&
+            RpgAttachments_StartShooterAnimation(attachments, index))
             RpgDataShots_Spawn(shots, attachments, index, true);
 }
 
-void RpgDataShots_Update(RpgDataShots *shots, const RpgAttachments *attachments,
+void RpgDataShots_Update(RpgDataShots *shots, RpgAttachments *attachments,
                          RpgStage *stage, const RpgReceivers *receivers,
                          const RpgWires *wires, float electricCellDelay,
                          const RpgMovingSolidSet *movingSolids,
                          float deltaTime, bool previewsOnly)
 {
+    RpgAttachments_UpdateShooterAnimations(attachments, deltaTime);
     for (int index = 0; index < RPG_DATA_SHOT_MAX_COUNT; index++) {
         RpgDataShot *shot = &shots->entries[index];
         if (!shot->active || shot->isZipperHeld || shot->attachmentIndex >= attachments->count) continue;
@@ -297,6 +301,16 @@ void RpgDataShots_Update(RpgDataShots *shots, const RpgAttachments *attachments,
     }
 }
 
+static void RpgDataShots_DrawVisual(Vector2 position, const RpgDataShot *shot)
+{
+    Rectangle bounds = { position.x - shot->size, position.y - shot->size,
+                         shot->size * 2.0f, shot->size * 2.0f };
+    if (RpgGimicSprites_Draw(RPG_GIMIC_SPRITE_CIRCLE, bounds, WHITE)) return;
+    DrawCircleV(position, shot->size, Fade(SKYBLUE, 0.3f));
+    DrawCircleV(position, shot->size * 0.62f, YELLOW);
+    DrawCircleLines((int)position.x, (int)position.y, shot->size, RAYWHITE);
+}
+
 void RpgDataShots_Draw(const RpgDataShots *shots)
 {
     for (int index = 0; index < RPG_DATA_SHOT_MAX_COUNT; index++) {
@@ -309,9 +323,7 @@ void RpgDataShots_Draw(const RpgDataShots *shots)
             DrawCircleLines((int)drawPosition.x, (int)drawPosition.y, 5.0f, RAYWHITE);
             continue;
         }
-        DrawCircleV(drawPosition, shot->size, Fade(SKYBLUE, 0.3f));
-        DrawCircleV(drawPosition, shot->size * 0.62f, YELLOW);
-        DrawCircleLines((int)drawPosition.x, (int)drawPosition.y, shot->size, RAYWHITE);
+        RpgDataShots_DrawVisual(drawPosition, shot);
         // 数字だけを上に表示し、フォルダのファイル数と合計容量をその場で確認できるようにする。
         // 表記はファイル数とバイト数に統一する。100Bなら100と表示する。
         DrawText(TextFormat("%d %llu", shot->fileCount, shot->totalBytes),
@@ -335,9 +347,7 @@ void RpgDataShots_DrawMap(const RpgDataShots *shots, int mapIndex)
             DrawCircleLines((int)localPosition.x, (int)localPosition.y, 5.0f, RAYWHITE);
             continue;
         }
-        DrawCircleV(localPosition, shot->size, Fade(SKYBLUE, 0.3f));
-        DrawCircleV(localPosition, shot->size * 0.62f, YELLOW);
-        DrawCircleLines((int)localPosition.x, (int)localPosition.y, shot->size, RAYWHITE);
+        RpgDataShots_DrawVisual(localPosition, shot);
         // エディターのローカル描画もゲーム本体と同じバイト表記を使う。
         DrawText(TextFormat("%d %llu", shot->fileCount, shot->totalBytes),
                  (int)(localPosition.x - 20.0f), (int)(localPosition.y - shot->size - 18.0f),

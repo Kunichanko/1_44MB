@@ -25,6 +25,35 @@ bool RpgFileIo_WideToUtf8(const wchar_t *source, char *destination, int destinat
                                NULL, NULL) > 0;
 }
 
+bool RpgFileIo_ResolveAssetPath(const char *assetDirectory, const char *storedPath,
+                                char *absolutePath, int absolutePathSize)
+{
+    wchar_t sourceWide[1200] = {0};
+    wchar_t assetWide[128] = {0};
+    wchar_t modulePath[1200] = {0};
+    wchar_t combinedPath[1200] = {0};
+    wchar_t resolvedPath[1200] = {0};
+    wchar_t *fileName;
+    if (assetDirectory == NULL || assetDirectory[0] == '\0' || storedPath == NULL ||
+        storedPath[0] == '\0' || absolutePath == NULL || absolutePathSize <= 0 ||
+        !RpgFileIo_Utf8ToWide(storedPath, sourceWide,
+                               (int)(sizeof(sourceWide) / sizeof(sourceWide[0]))) ||
+        !RpgFileIo_Utf8ToWide(assetDirectory, assetWide,
+                               (int)(sizeof(assetWide) / sizeof(assetWide[0])))) return false;
+    if (sourceWide[1] == L':' || (sourceWide[0] == L'\\' && sourceWide[1] == L'\\'))
+        return GetFullPathNameW(sourceWide, (DWORD)(sizeof(resolvedPath) / sizeof(resolvedPath[0])),
+                                resolvedPath, NULL) > 0 &&
+               RpgFileIo_WideToUtf8(resolvedPath, absolutePath, absolutePathSize);
+    if (GetModuleFileNameW(NULL, modulePath, (DWORD)(sizeof(modulePath) / sizeof(modulePath[0]))) == 0 ||
+        (fileName = wcsrchr(modulePath, L'\\')) == NULL) return false;
+    *fileName = L'\0';
+    if (swprintf(combinedPath, sizeof(combinedPath) / sizeof(combinedPath[0]), L"%ls\\..\\assets\\%ls\\%ls",
+                 modulePath, assetWide, sourceWide) < 0) return false;
+    return GetFullPathNameW(combinedPath, (DWORD)(sizeof(resolvedPath) / sizeof(resolvedPath[0])),
+                            resolvedPath, NULL) > 0 &&
+           RpgFileIo_WideToUtf8(resolvedPath, absolutePath, absolutePathSize);
+}
+
 bool RpgFileIo_ReadAllBytesUtf8(const char *path, size_t maximumSize,
                                 unsigned char **bytes, int *byteCount)
 {

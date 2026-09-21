@@ -17,5 +17,6 @@ bool RpgEditorDrag_Update(RpgEditorDrag *drag, Vector2 pointer);
 bool RpgEditorDrag_IsBusy(const RpgEditorDrag *drag);
 void RpgEditorDrag_End(RpgEditorDrag *drag);
 Vector2 RpgEditorDrag_SnapToGrid(Vector2 position, float tileSize);
+Rectangle RpgEditorDrag_GetPreviewBounds(const RpgEditorDrag *drag, float width, float height);
 
 #endif

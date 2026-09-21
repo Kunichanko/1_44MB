@@ -10,6 +10,12 @@
 
 typedef struct RpgObjectFolder { RpgGridCell cell; } RpgObjectFolder;
 
+typedef enum RpgZipperCommandRequest {
+    RPG_ZIPPER_COMMAND_NONE = 0,
+    RPG_ZIPPER_COMMAND_EAT,
+    RPG_ZIPPER_COMMAND_SPIT
+} RpgZipperCommandRequest;
+
 /* Zipper への格納先を返す。移動本体は通常Folder格納と同じ StoreFileInDirectory を使用する。 */
 bool RpgObjectFolder_GetZipperInboxDirectory(char *path, size_t pathSize);
 /* Zipper 内の実ファイル容量を byte 単位で返す。変更通知時だけ再走査する。 */
@@ -21,17 +27,25 @@ bool RpgObjectFolder_StoreFileInDirectory(const char *sourcePath, const char *de
 bool RpgObjectFolder_GetBlockDirectory(const RpgObjectFolder *folder, int blockType,
                                        char *path, size_t pathSize);
 bool RpgObjectFolder_OpenZipperDirectory(void);
-/* Folder を移動せずに Zipper 構造へ更新し、以後の Inbox と Explorer のルートに採用する。 */
+/* Creates and activates the runtime Zipper folder for an already
+   connected Zipper.  The caller must have an active stage build. */
+bool RpgObjectFolder_EnsureRuntimeZipperDirectory(void);
+/* Folder を移動せずに Zipper 構造へ更新し、以後の Zipper ルートとして採用する。 */
 bool RpgObjectFolder_ActivateReferenceFolderAsZipper(RpgStage *stage, RpgGridCell cell);
 void RpgObjectFolder_PrepareZipperAnimationCommand(void);
 // cmd の実行要求を一度だけ受け取る。アニメーション・ゲーム機能の内容は呼び出し側で独立して処理する。
 bool RpgObjectFolder_BeginZipperCommandRequest(void);
+RpgZipperCommandRequest RpgObjectFolder_GetPendingZipperCommandRequest(void);
 bool RpgObjectFolder_CompleteZipperCommandRequest(void);
 
-// Zipper 操作は複製ではなく、対象フォルダそのものを Inbox へ移動して行う。
+// Zipper 操作は複製ではなく、対象フォルダそのものを Zipper 直下へ移動して行う。
 bool RpgObjectFolder_MoveAttachmentToZipper(const RpgAttachment *attachment);
 bool RpgObjectFolder_MoveDataShotToZipper(RpgDataShot *shot);
 bool RpgObjectFolder_MoveBlockToZipper(const RpgObjectFolder *folder, int blockType);
+/* A file object owns the small runtime folder which contains its real file.
+   Move that folder as one unit so eat/spit never copies the file or creates a
+   missing terrain cell. */
+bool RpgObjectFolder_MoveReferenceFileToZipper(const RpgReferenceObject *object);
 /* 返却演出中は build の親（StageN）へ一時移動し、演出完了時に Return で build へ確定する。 */
 bool RpgObjectFolder_BeginReturnAttachmentFromZipper(const RpgAttachment *attachment);
 bool RpgObjectFolder_BeginReturnDataShotFromZipper(const RpgDataShot *shot);
@@ -39,6 +53,16 @@ bool RpgObjectFolder_BeginReturnBlockFromZipper(const RpgObjectFolder *folder, i
 bool RpgObjectFolder_ReturnAttachmentFromZipper(const RpgAttachment *attachment);
 bool RpgObjectFolder_ReturnDataShotFromZipper(const RpgDataShot *shot);
 bool RpgObjectFolder_ReturnBlockFromZipper(const RpgObjectFolder *folder, int blockType);
+bool RpgObjectFolder_BeginReturnReferenceFileFromZipper(const RpgReferenceObject *object);
+bool RpgObjectFolder_ReturnReferenceFileFromZipper(const RpgReferenceObject *object);
+/* Dynamic metal/push blocks own folders under build/objects, never under a
+   terrain cell. Their original cell is identity only; position is metadata. */
+bool RpgObjectFolder_EnsureDynamicBlock(RpgGridCell identityCell, int blockType, Vector2 position);
+bool RpgObjectFolder_MoveDynamicBlockToZipper(RpgGridCell identityCell, int blockType, Vector2 position);
+bool RpgObjectFolder_BeginReturnDynamicBlockFromZipper(RpgGridCell identityCell, int blockType,
+                                                        Vector2 position);
+bool RpgObjectFolder_ReturnDynamicBlockFromZipper(RpgGridCell identityCell, int blockType,
+                                                   Vector2 position);
 bool RpgObjectFolder_RestoreDataShotFromMetadata(RpgDataShot *shot);
 
 // フォルダ寿命はオブジェクト寿命と一致する。メタデータだけの通常ブロックには生成しない。
@@ -62,6 +86,10 @@ bool RpgObjectFolders_BeginStageBuild(int stageNumber, RpgStage *stage,
                                       char *buildPath, size_t buildPathSize);
 /* 続きから用。静的ステージを再生成せず、残っている本編用オブジェクトフォルダを操作対象に戻す。 */
 bool RpgObjectFolders_ResumeStageBuild(int stageNumber, RpgStage *stage, char *buildPath, size_t buildPathSize);
+/* Editor preview cache counterpart.  It reconnects the already prepared
+   Stage/editor/StageN runtime directory without recreating every cell. */
+bool RpgObjectFolders_ResumeEditorPreviewBuild(int stageNumber, RpgStage *stage,
+                                               char *buildPath, size_t buildPathSize);
 /* build/drops に残る File オブジェクトを、続きからの実行時オブジェクトへ復元する。 */
 void RpgObjectFolders_LoadReferenceDrops(RpgReferenceObjects *objects);
 bool RpgObjectFolders_IsStageBuildActive(void);
@@ -71,6 +99,9 @@ bool RpgObjectFolders_IsBuildCellAvailable(RpgGridCell cell);
 void RpgObjectFolders_RefreshBuildCellLinkedFiles(RpgGridCell cell);
 void RpgObjectFolders_ClearBuildCellLinkedFiles(void);
 void RpgObjectFolders_EndStageBuild(void);
+/* Editor preview stop: detach immediately.  Its generated artifacts are
+   cleared synchronously by the next preview build, not by the Stop click. */
+void RpgObjectFolders_AbandonStageBuild(void);
 void RpgObjectFolders_ClearSessionStorage(void);
 
 #endif

@@ -262,7 +262,7 @@ bool RpgStageBuild_CreateEditorPreview(int stageNumber, RpgStage *stage, const R
     return CreateStageBuild(stageNumber, stage, attachments, playerStartPosition, true);
 }
 
-bool RpgStageBuild_Resume(int stageNumber, RpgStage *stage)
+static bool ResumeStageBuildForKind(int stageNumber, RpgStage *stage, bool isEditorPreview)
 {
 #ifdef _WIN32
     char buildPath[1200];
@@ -270,7 +270,9 @@ bool RpgStageBuild_Resume(int stageNumber, RpgStage *stage)
     RpgStageBuild_Close();
     /* originalBlocks は静的定義なので、build の欠損状態を反映する前に控える。 */
     memcpy(watcher.originalBlocks, stage->blocks, sizeof(watcher.originalBlocks));
-    if (!RpgObjectFolders_ResumeStageBuild(stageNumber, stage, buildPath, sizeof(buildPath))) return false;
+    if (!(isEditorPreview ? RpgObjectFolders_ResumeEditorPreviewBuild(stageNumber, stage, buildPath,
+                                                                        sizeof(buildPath)) :
+          RpgObjectFolders_ResumeStageBuild(stageNumber, stage, buildPath, sizeof(buildPath)))) return false;
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++)
         watcher.compactCells[row][column] = RpgBuildCellStorage_UsesMetadataForBlock(watcher.originalBlocks[row][column]);
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++)
@@ -282,6 +284,16 @@ bool RpgStageBuild_Resume(int stageNumber, RpgStage *stage)
     (void)stage;
     return false;
 #endif
+}
+
+bool RpgStageBuild_Resume(int stageNumber, RpgStage *stage)
+{
+    return ResumeStageBuildForKind(stageNumber, stage, false);
+}
+
+bool RpgStageBuild_ResumeEditorPreview(int stageNumber, RpgStage *stage)
+{
+    return ResumeStageBuildForKind(stageNumber, stage, true);
 }
 
 void RpgStageBuild_Update(RpgStage *stage)

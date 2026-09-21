@@ -10,6 +10,10 @@
 #ifdef _WIN32
 bool RpgFileIo_Utf8ToWide(const char *source, wchar_t *destination, int destinationCount);
 bool RpgFileIo_WideToUtf8(const wchar_t *source, char *destination, int destinationCount);
+/* Resolves an absolute path unchanged, or a path stored relative to
+ * assets/<assetDirectory> beside the executable. */
+bool RpgFileIo_ResolveAssetPath(const char *assetDirectory, const char *storedPath,
+                                char *absolutePath, int absolutePathSize);
 #endif
 
 bool RpgFileIo_ReadAllBytesUtf8(const char *path, size_t maximumSize,

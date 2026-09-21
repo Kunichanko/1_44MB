@@ -27,7 +27,11 @@ enum { EDITOR_WM_CLOSE = 0x0010, EDITOR_GWLP_WNDPROC = -4 };
 #include <stdio.h>
 #include <stdlib.h>
 
+#define RPG_TEXT_ROUTE_RAYLIB_CALLS
 #include "game_font.h"
+#undef DrawText
+static void Editor_DrawText(const char *text, int x, int y, int fontSize, Color color);
+#define DrawText(text, x, y, fontSize, color) Editor_DrawText((text), (x), (y), (fontSize), (color))
 #include "../Editor/file_dialog.h"
 #include "rpg_character.h"
 #include "rpg_dialogue.h"
@@ -56,6 +60,7 @@ enum { EDITOR_WM_CLOSE = 0x0010, EDITOR_GWLP_WNDPROC = -4 };
 #include "rpg_object_folder.h"
 #include "rpg_explorer_launcher.h"
 #include "rpg_receiver.h"
+#include "rpg_static_object_drop.h"
 #include "rpg_stage3_event.h"
 #include "rpg_signal_block.h"
 #include "rpg_stage.h"
@@ -211,7 +216,6 @@ typedef struct ModalHistory {
 static const Rectangle playerInspectorBounds = { 700.0f, 80.0f, 220.0f, 164.0f };
 static const Rectangle npcInspectorBounds = { 700.0f, 80.0f, 220.0f, 226.0f };
 static const Rectangle dialogueEditorBounds = { 140.0f, 56.0f, 680.0f, 424.0f };
-static const Rectangle zipperInspectorBounds = { 700.0f, 218.0f, 220.0f, 230.0f };
 static const Rectangle doorInspectorBounds = { 700.0f, 80.0f, 220.0f, 300.0f };
 static bool isKeyDoorFailureEditing;
 static int keyDoorFailureCursorIndex;
@@ -221,11 +225,175 @@ static const Rectangle referenceInspectorBounds = { 700.0f, 80.0f, 220.0f, 336.0
 // 各サイドインスペクターの表示位置。内容は共通の座標系で描画して移動量だけを加える。
 enum { RPG_EDITOR_GLOBAL_SETTINGS_INSPECTOR = 8, RPG_EDITOR_AREA_SETTINGS_INSPECTOR = 9,
        RPG_EDITOR_STAGE_SETTINGS_INSPECTOR = 10, RPG_EDITOR_IMAGE_INSPECTOR = 11,
-       RPG_EDITOR_INSPECTOR_COUNT = 12 };
+       RPG_EDITOR_CONVEYOR_INSPECTOR = 12, RPG_EDITOR_PALETTE_INSPECTOR = 13,
+       RPG_EDITOR_INSPECTOR_COUNT = 14 };
 static Vector2 inspectorOffsets[RPG_EDITOR_INSPECTOR_COUNT];
 /* 共通インスペクターの見た目状態。内容座標は維持し、枠サイズとスクロールだけを共有する。 */
 static Vector2 inspectorSizeAdjustments[RPG_EDITOR_INSPECTOR_COUNT];
 static float inspectorScrollOffsets[RPG_EDITOR_INSPECTOR_COUNT];
+/* 全体/ステージ設定は通常の個別オブジェクト用インスペクターとは分離する。
+ * タブ定義へ名前と内容高を足すだけで、折りたたみ・並び・スクロール範囲を
+ * 同じ方式で増やせる。設定値そのものの保存先や保存形式はここでは変えない。 */
+typedef struct RpgEditorSettingsTabDefinition {
+    const char *label;
+    /* 描画とは別の測定パス。項目を増減しても、展開領域と実際の
+       内容が別々の固定値にならないようにする。 */
+    float (*measureContentHeight)(void);
+} RpgEditorSettingsTabDefinition;
+
+/* インスペクターは必ず「必要な矩形を予約する」段階を先に通す。
+   描画側はこの結果を参照するだけであり、領域を押し広げない。 */
+typedef struct RpgEditorInspectorReservation {
+    float contentTop;
+    float contentBottom;
+} RpgEditorInspectorReservation;
+
+static RpgEditorInspectorReservation BeginInspectorReservation(float contentTop)
+{
+    return (RpgEditorInspectorReservation){ contentTop, contentTop };
+}
+
+static void ReserveInspectorContent(RpgEditorInspectorReservation *reservation,
+                                    float top, float height)
+{
+    if (reservation == NULL || height <= 0.0f) return;
+    reservation->contentBottom = fmaxf(reservation->contentBottom, top + height);
+}
+
+static float FinishInspectorReservation(const RpgEditorInspectorReservation *reservation,
+                                        float bottomPadding)
+{
+    if (reservation == NULL) return 0.0f;
+    return reservation->contentBottom + fmaxf(0.0f, bottomPadding);
+}
+
+/* 各設定タブの描画と対応する領域予約。座標はタブ内容先頭からの相対値。 */
+static float MeasureGlobalBuildSettingsContent(void)
+{
+    RpgEditorInspectorReservation reservation = BeginInspectorReservation(0.0f);
+    ReserveInspectorContent(&reservation, 6.0f, 18.0f);
+    ReserveInspectorContent(&reservation, 20.0f, 28.0f);
+    ReserveInspectorContent(&reservation, 66.0f, 18.0f);
+    ReserveInspectorContent(&reservation, 82.0f, 28.0f);
+    return FinishInspectorReservation(&reservation, 14.0f);
+}
+
+static float MeasureGlobalRuntimeSettingsContent(void)
+{
+    RpgEditorInspectorReservation reservation = BeginInspectorReservation(0.0f);
+    ReserveInspectorContent(&reservation, 6.0f, 18.0f);
+    ReserveInspectorContent(&reservation, 28.0f, 26.0f);
+    ReserveInspectorContent(&reservation, 70.0f, 26.0f);
+    return FinishInspectorReservation(&reservation, 14.0f);
+}
+
+static float MeasureGlobalPlayerSettingsContent(void)
+{
+    RpgEditorInspectorReservation reservation = BeginInspectorReservation(0.0f);
+    ReserveInspectorContent(&reservation, 6.0f, 18.0f);
+    ReserveInspectorContent(&reservation, 28.0f, 26.0f);
+    ReserveInspectorContent(&reservation, 54.0f, 18.0f);
+    ReserveInspectorContent(&reservation, 76.0f, 26.0f);
+    ReserveInspectorContent(&reservation, 108.0f, 26.0f);
+    return FinishInspectorReservation(&reservation, 14.0f);
+}
+
+static float MeasureGlobalZipperSettingsContent(void)
+{
+    RpgEditorInspectorReservation reservation = BeginInspectorReservation(0.0f);
+    ReserveInspectorContent(&reservation, 6.0f, 18.0f);
+    ReserveInspectorContent(&reservation, 28.0f, 26.0f);
+    ReserveInspectorContent(&reservation, 60.0f, 26.0f);
+    ReserveInspectorContent(&reservation, 92.0f, 26.0f);
+    ReserveInspectorContent(&reservation, 124.0f, 26.0f);
+    ReserveInspectorContent(&reservation, 156.0f, 26.0f);
+    ReserveInspectorContent(&reservation, 188.0f, 26.0f);
+    ReserveInspectorContent(&reservation, 220.0f, 26.0f);
+    ReserveInspectorContent(&reservation, 252.0f, 26.0f);
+    ReserveInspectorContent(&reservation, 284.0f, 26.0f);
+    ReserveInspectorContent(&reservation, 316.0f, 26.0f);
+    ReserveInspectorContent(&reservation, 346.0f, 24.0f);
+    ReserveInspectorContent(&reservation, 378.0f, 26.0f);
+    return FinishInspectorReservation(&reservation, 14.0f);
+}
+
+static float MeasureStageSettingsContent(void)
+{
+    RpgEditorInspectorReservation reservation = BeginInspectorReservation(0.0f);
+    ReserveInspectorContent(&reservation, 6.0f, 18.0f);
+    ReserveInspectorContent(&reservation, 28.0f, 26.0f);
+    ReserveInspectorContent(&reservation, 60.0f, 26.0f);
+    ReserveInspectorContent(&reservation, 92.0f, 18.0f);
+    ReserveInspectorContent(&reservation, 118.0f, 26.0f);
+    return FinishInspectorReservation(&reservation, 14.0f);
+}
+
+static float MeasureStageEntryEventSettingsContent(void)
+{
+    RpgEditorInspectorReservation reservation = BeginInspectorReservation(0.0f);
+    ReserveInspectorContent(&reservation, 6.0f, 18.0f);
+    ReserveInspectorContent(&reservation, 30.0f, 24.0f);
+    ReserveInspectorContent(&reservation, 62.0f, 18.0f);
+    ReserveInspectorContent(&reservation, 82.0f, 26.0f);
+    return FinishInspectorReservation(&reservation, 14.0f);
+}
+
+static float MeasureStageBackgroundSettingsContent(void)
+{
+    RpgEditorInspectorReservation reservation = BeginInspectorReservation(0.0f);
+    ReserveInspectorContent(&reservation, 6.0f, 18.0f);
+    ReserveInspectorContent(&reservation, 28.0f, 26.0f);
+    ReserveInspectorContent(&reservation, 62.0f, 18.0f);
+    ReserveInspectorContent(&reservation, 84.0f, 26.0f);
+    ReserveInspectorContent(&reservation, 118.0f, 18.0f);
+    /* 相対PNGパスは複数行へ展開される。可変欄の後続操作が次タブへ
+       侵入しない上限を確保し、実際の短いパスでは余白だけになる。 */
+    ReserveInspectorContent(&reservation, 292.0f, 24.0f);
+    return FinishInspectorReservation(&reservation, 14.0f);
+}
+
+static float MeasureStageGroundBlockSettingsContent(void)
+{
+    RpgEditorInspectorReservation reservation = BeginInspectorReservation(0.0f);
+    ReserveInspectorContent(&reservation, 6.0f, 18.0f);
+    ReserveInspectorContent(&reservation, 28.0f, 26.0f);
+    ReserveInspectorContent(&reservation, 184.0f, 28.0f);
+    return FinishInspectorReservation(&reservation, 14.0f);
+}
+
+static float MeasureStageGroundToneSettingsContent(void)
+{
+    RpgEditorInspectorReservation reservation = BeginInspectorReservation(0.0f);
+    ReserveInspectorContent(&reservation, 6.0f, 18.0f);
+    ReserveInspectorContent(&reservation, 28.0f, 24.0f);
+    ReserveInspectorContent(&reservation, 52.0f, 24.0f);
+    ReserveInspectorContent(&reservation, 76.0f, 24.0f);
+    return FinishInspectorReservation(&reservation, 14.0f);
+}
+
+enum { RPG_GLOBAL_SETTINGS_TAB_BUILD, RPG_GLOBAL_SETTINGS_TAB_RUNTIME,
+       RPG_GLOBAL_SETTINGS_TAB_PLAYER, RPG_GLOBAL_SETTINGS_TAB_ZIPPER,
+       RPG_GLOBAL_SETTINGS_TAB_COUNT };
+enum { RPG_STAGE_SETTINGS_TAB_STAGE, RPG_STAGE_SETTINGS_TAB_ENTRY_EVENT,
+       RPG_STAGE_SETTINGS_TAB_BACKGROUND, RPG_STAGE_SETTINGS_TAB_GROUND_BLOCK,
+       RPG_STAGE_SETTINGS_TAB_GROUND_TONE, RPG_STAGE_SETTINGS_TAB_COUNT };
+
+static const RpgEditorSettingsTabDefinition globalSettingsTabs[RPG_GLOBAL_SETTINGS_TAB_COUNT] = {
+    { "エクスプローラーとビルド", MeasureGlobalBuildSettingsContent },
+    { "実行時", MeasureGlobalRuntimeSettingsContent },
+    { "プレイヤー", MeasureGlobalPlayerSettingsContent },
+    { "ジッパー", MeasureGlobalZipperSettingsContent }
+};
+static const RpgEditorSettingsTabDefinition stageSettingsTabs[RPG_STAGE_SETTINGS_TAB_COUNT] = {
+    { "ステージ", MeasureStageSettingsContent },
+    { "ビルド開始イベント", MeasureStageEntryEventSettingsContent },
+    { "背景", MeasureStageBackgroundSettingsContent },
+    { "地面ブロック", MeasureStageGroundBlockSettingsContent },
+    { "地面色調", MeasureStageGroundToneSettingsContent }
+};
+/* 設定を開くたび初期状態へ戻す。普段はすべて折りたたまれた状態にする。 */
+static bool globalSettingsTabExpanded[RPG_GLOBAL_SETTINGS_TAB_COUNT];
+static bool stageSettingsTabExpanded[RPG_STAGE_SETTINGS_TAB_COUNT];
 static bool isInspectorResizing;
 static int resizingInspector = 0;
 static bool isInspectorResizeHorizontal;
@@ -242,7 +410,6 @@ static const Rectangle stageSettingsButtonBounds = { 108.0f, 486.0f, 78.0f, 26.0
 static const Rectangle stageSettingsPanelBounds = { 700.0f, 80.0f, 220.0f, 440.0f };
 static const Rectangle areaInspectorButtonBounds = { 192.0f, 486.0f, 66.0f, 26.0f };
 /* Zipper はステージ上の配置物ではなく、専用設定から管理する。 */
-static const Rectangle zipperSettingsButtonBounds = { 264.0f, 486.0f, 76.0f, 26.0f };
 static const Rectangle areaInspectorPanelBounds = { 700.0f, 80.0f, 220.0f, 224.0f };
 static const Rectangle editorPlayToggleBounds = { 346.0f, 486.0f, 72.0f, 26.0f };
 static RpgInspect npcInspectData;
@@ -253,6 +420,8 @@ static RpgAreaEntryEvents areaEntryEvents;
 static RpgStage3Event *currentStageEntryEvent;
 static RpgWires wires;
 static RpgWires savedWires;
+static int selectedConveyorIndex = -1;
+static float conveyorPreviewRemaining = 0.0f;
 static RpgReceivers receivers;
 static RpgReceivers savedReceivers;
 static RpgAttachments attachments;
@@ -268,6 +437,17 @@ static RpgStageCatalog stageCatalogData;
 /* ステージは参照パスを含み大きいため、起動時スタックを圧迫しない静的領域で受け渡す。 */
 static RpgStageData stageLoadBuffer;
 static RpgStageData stageSaveBuffer;
+/* StageData is deliberately kept out of the editor entry-point stack.  It
+   contains the complete world and is used here only as the idle-sync diff
+   snapshot/work buffer. */
+static RpgStageData stageFolderSyncBuffer;
+static RpgStageData lastStageFolderSync;
+/* A full stage contains the world-sized reference-path matrix.  Comparing a
+   fresh copy every render frame is needless work while the editor is idle. */
+static double nextStageFolderComparisonTime;
+/* The editor preview is generated from this isolated copy.  Build preparation
+   rewrites runtime reference paths, so it must never mutate the edit model. */
+static RpgStage editorPreviewBuildStage;
 /* Function列プレビューの退避先。実行中だけ実オブジェクトを動かし、終了時に必ず復元する。 */
 static RpgStage functionPreviewStageSnapshot;
 static RpgCharacter functionPreviewPlayerSnapshot;
@@ -325,6 +505,45 @@ static Vector2 referenceDragPointer;
 static bool isImageObjectDragPreviewVisible;
 static Vector2 imageObjectDragPointer;
 static unsigned int imageObjectDragPreviewId;
+
+/* FILE/FOLDER are movable reference objects now.  Keep editor hit testing in
+   the same world-space model used by rendering/runtime instead of reviving
+   the old "reference block in a cell" representation. */
+static Vector2 GetEditorReferenceWorldPosition(const RpgStage *stage, int mapIndex,
+                                                Vector2 localPosition)
+{
+    if (stage == NULL || mapIndex < 0 || mapIndex >= RPG_STAGE_MAP_COUNT)
+        return localPosition;
+    return (Vector2){ stage->mapGridX[mapIndex] * RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE + localPosition.x,
+                      -stage->mapGridY[mapIndex] * RPG_STAGE_ROWS * RPG_STAGE_TILE_SIZE + localPosition.y };
+}
+
+static int FindEditorReferenceObjectAtMapPoint(const RpgStage *stage, int mapIndex,
+                                                Vector2 localPosition)
+{
+    Vector2 worldPosition;
+    if (stage == NULL || !RpgStage_IsMapActive(stage, mapIndex)) return -1;
+    worldPosition = GetEditorReferenceWorldPosition(stage, mapIndex, localPosition);
+    /* The last entry is drawn last, so it is the topmost selectable object. */
+    for (int index = stage->referenceObjects.count - 1; index >= 0; index--) {
+        const RpgReferenceObject *object = &stage->referenceObjects.entries[index];
+        float size = RPG_STAGE_TILE_SIZE * (object->drawScale > 0.0f ? object->drawScale : 1.0f);
+        Rectangle bounds = { object->position.x - size * 0.5f, object->position.y - size * 0.5f,
+                             size, size };
+        if (CheckCollisionPointRec(worldPosition, bounds)) return index;
+    }
+    return -1;
+}
+
+static bool RemoveEditorReferenceObjectAt(RpgReferenceObjects *objects, int index)
+{
+    if (objects == NULL || index < 0 || index >= objects->count) return false;
+    if (index + 1 < objects->count)
+        memmove(&objects->entries[index], &objects->entries[index + 1],
+                (size_t)(objects->count - index - 1) * sizeof(objects->entries[0]));
+    objects->count--;
+    return true;
+}
 /* キャラクターもPNGと同じく、実体を離すまで保持し半透明プレビューだけを追従させる。 */
 static bool isCharacterDragPreviewVisible;
 static Vector2 characterDragPointer;
@@ -356,6 +575,23 @@ static const RpgInspect *GetSavedActiveInspect(const EditorSaveSnapshot *snapsho
     return &snapshot->npcInspectSnapshot;
 }
 
+/* Relative paths are data, so register them whenever a stage becomes current.
+ * This keeps saved Japanese image/key/reference names out of the fallback '?'. */
+static void RegisterStageFilePickerText(const RpgStage *stage)
+{
+    if (stage == NULL) return;
+    GameFont_BeginTextBatch();
+    for (int index = 0; index < stage->referenceObjects.count; index++) {
+        GameFont_AddText(stage->referenceObjects.entries[index].path);
+        GameFont_AddText(stage->referenceObjects.entries[index].sourcePath);
+    }
+    for (int index = 0; index < stage->imageObjects.count; index++)
+        GameFont_AddText(stage->imageObjects.entries[index].path);
+    for (int index = 0; index < stage->keyDoorCount; index++)
+        GameFont_AddText(stage->keyDoors[index].keyPath);
+    GameFont_EndTextBatch();
+}
+
 // ステージ番号だけを入口にして、編集対象の一式を同じ保存フォルダから切り替える。
 static bool LoadEditorStageState(int stageNumber, RpgLayout *layout, RpgCharacter *player,
                                  RpgCharacter *npc, RpgStage *stage, RpgItems *items,
@@ -370,6 +606,7 @@ static bool LoadEditorStageState(int stageNumber, RpgLayout *layout, RpgCharacte
     RpgStage_SetGroundAppearance(layout->groundHue, layout->groundSaturation,
                                  layout->groundLightness);
     *stage = stageLoadBuffer.stage;
+    RegisterStageFilePickerText(stage);
     *items = stageLoadBuffer.items;
     *dialogue = stageLoadBuffer.dialogue;
     *stage3Event = stageLoadBuffer.stage3Event;
@@ -462,10 +699,11 @@ static Rectangle GetInspectorBaseBounds(int selected)
 {
     if (selected == 1) return playerInspectorBounds;
     if (selected == 2) return npcInspectorBounds;
-    if (selected == 3) return zipperInspectorBounds;
     if (selected == 5) return doorInspectorBounds;
     if (selected == 7) return referenceInspectorBounds;
     if (selected == RPG_EDITOR_IMAGE_INSPECTOR) return referenceInspectorBounds;
+    if (selected == RPG_EDITOR_CONVEYOR_INSPECTOR) return (Rectangle){ 700.0f, 80.0f, 220.0f, 372.0f };
+    if (selected == RPG_EDITOR_PALETTE_INSPECTOR) return (Rectangle){ 700.0f, 80.0f, 220.0f, 268.0f };
     if (selected == 6) return (Rectangle){ 700.0f, 80.0f, 220.0f, 350.0f };
     if (selected == RPG_EDITOR_GLOBAL_SETTINGS_INSPECTOR) return globalSettingsPanelBounds;
     if (selected == RPG_EDITOR_AREA_SETTINGS_INSPECTOR) return areaInspectorPanelBounds;
@@ -474,37 +712,204 @@ static Rectangle GetInspectorBaseBounds(int selected)
                            (Rectangle){ 700.0f, 80.0f, 220.0f, 220.0f };
 }
 
+enum { RPG_EDITOR_SETTINGS_TAB_HEADER_HEIGHT = 28 };
+static const float settingsTabsTop = 118.0f;
+
+static float GetSettingsTabTop(const RpgEditorSettingsTabDefinition *tabs, const bool *expanded,
+                               int tabCount, int tabIndex)
+{
+    float y = settingsTabsTop;
+    for (int index = 0; index < tabIndex && index < tabCount; index++) {
+        y += RPG_EDITOR_SETTINGS_TAB_HEADER_HEIGHT;
+        if (expanded[index] && tabs[index].measureContentHeight != NULL)
+            y += tabs[index].measureContentHeight();
+    }
+    return y;
+}
+
+static Rectangle GetSettingsTabHeaderBounds(const RpgEditorSettingsTabDefinition *tabs, const bool *expanded,
+                                            int tabCount, int tabIndex)
+{
+    return (Rectangle){ 708.0f, GetSettingsTabTop(tabs, expanded, tabCount, tabIndex),
+                        196.0f, RPG_EDITOR_SETTINGS_TAB_HEADER_HEIGHT };
+}
+
+static float GetSettingsTabContentTop(const RpgEditorSettingsTabDefinition *tabs, const bool *expanded,
+                                      int tabCount, int tabIndex)
+{
+    return GetSettingsTabTop(tabs, expanded, tabCount, tabIndex) + RPG_EDITOR_SETTINGS_TAB_HEADER_HEIGHT;
+}
+
+static float GetSettingsTabsBottom(const RpgEditorSettingsTabDefinition *tabs, const bool *expanded,
+                                   int tabCount)
+{
+    float bottom = settingsTabsTop;
+    for (int index = 0; index < tabCount; index++) {
+        bottom += RPG_EDITOR_SETTINGS_TAB_HEADER_HEIGHT;
+        if (expanded[index] && tabs[index].measureContentHeight != NULL)
+            bottom += tabs[index].measureContentHeight();
+    }
+    return bottom;
+}
+
+static bool IsInspectorTextContext(void);
+static void DrawSettingsText(const char *text, float x, float y, float fontSize, Color color);
+static Color GetBlockInventoryBorderColor(RpgBlockInventoryBorderColor color);
+
+static int FindSettingsTabAtPoint(const RpgEditorSettingsTabDefinition *tabs, const bool *expanded,
+                                  int tabCount, Vector2 point)
+{
+    for (int index = 0; index < tabCount; index++)
+        if (CheckCollisionPointRec(point, GetSettingsTabHeaderBounds(tabs, expanded, tabCount, index)))
+            return index;
+    return -1;
+}
+
+static void DrawSettingsTabHeader(const RpgEditorSettingsTabDefinition *tabs, const bool *expanded,
+                                  int tabCount, int tabIndex)
+{
+    Rectangle bounds = GetSettingsTabHeaderBounds(tabs, expanded, tabCount, tabIndex);
+    bool open = expanded[tabIndex];
+    DrawRectangleRec(bounds, open ? Fade(DARKBLUE, 0.15f) : Fade(LIGHTGRAY, 0.62f));
+    DrawRectangleLinesEx(bounds, 1.0f, Fade(DARKBLUE, open ? 0.78f : 0.42f));
+    DrawText(open ? "v" : ">", (int)bounds.x + 8, (int)bounds.y + 5, 17, DARKBLUE);
+    DrawSettingsText(tabs[tabIndex].label, bounds.x + 28.0f, bounds.y + 6.0f, 15.0f, DARKBLUE);
+}
+
+static void ResetSettingsTabs(bool *expanded, int tabCount)
+{
+    for (int index = 0; index < tabCount; index++) expanded[index] = false;
+}
+
+/* 設定パネルは日本語を含むため、raylib既定フォントではなく既存の動的Font atlasで描く。 */
+static void DrawSettingsText(const char *text, float x, float y, float fontSize, Color color)
+{
+    (void)color;
+    GameFont_DrawPreset(RPG_TEXT_PRESET_UI, text, x, y,
+                        GameFont_GetPresetScale(RPG_TEXT_PRESET_UI, fontSize));
+}
+
+/* インスペクターは背景色や状態色に依存せず、本文・操作ラベルを常に黒で描く。 */
+static bool IsInspectorTextContext(void)
+{
+    return inspectorDrawingSelected > 0;
+}
+
+static void Editor_DrawText(const char *text, int x, int y, int fontSize, Color color)
+{
+    RpgTextPreset preset = IsInspectorTextContext() ? RPG_TEXT_PRESET_UI :
+                           RpgText_PresetFromLegacyColor(color);
+    GameFont_DrawPreset(preset, text, (float)x, (float)y,
+                        GameFont_GetPresetScale(preset, (float)fontSize));
+}
+
+static void RegisterSettingsUiText(void)
+{
+    static const char *const labels[] = {
+        "エクスプローラーとビルド", "実行時", "プレイヤー", "ジッパー",
+        "ステージ", "ビルド開始イベント", "背景", "地面ブロック", "地面色調",
+        "全体設定", "ステージ設定", "エリア設定", "仮想", "本物", "ビルド", "簡易", "全フォルダ",
+        "導線遅延", "磁石速度", "移動速度", "拡大率", "フォルダ返却", "返却アニメーション遅延",
+        "ファイル追従倍率", "射出速度", "帰還速度", "追従速度", "プレビュー：オン", "プレビュー：オフ",
+        "ステージを追加", "ステージを削除", "ジッパー容量", "ビルド後に一度実行", "機能を編集",
+        "PNG未選択", "PNGを選択", "背景を消去", "背景の明るさ", "ブロックの明るさ", "基底", "assets/Sprite", "assets/Files",
+        "単色（PNGなし）", "地面PNGを選択", "地面PNGを消去", "色相", "彩度", "明度",
+        "エリア", "このエリアを削除", "最初の入場イベント", "保存", "保存済み", "保存失敗", "戻す", "オン", "オフ", "機能",
+        "キャラクター設定", "会話", "会話を編集", "アイテム設定", "名前", "未保存 - Sキーで全て保存", "Sキーで全て保存",
+        "コンベア設定", "コンベアの終点を選択", "軌道ブロック", "回転速度", "方向", "軌道に沿って正方向", "軌道に沿って逆方向", "外側の床・壁", "有効", "無効", "最小滑落角", "秒プレビュー", "プレビュー",
+        "フォルダー設定", "ファイル設定", "フォルダー名", "ファイル", "フォルダー", "パスを指定", "フォルダーを開く", "ファイルを選択", "フォルダー名を変更",
+        "画像オブジェクト設定", "PNG未選択", "拡大率", "描画レイヤー", "背景", "中間", "ブロック前・キャラ後", "前景", "見た目",
+        "ドア設定", "鍵ドア", "開放", "施錠", "鍵ファイル", "鍵ファイル未選択", "失敗時の文章", "状態", "閉鎖", "開く", "閉じる",
+        "信号ブロック設定", "信号を受けるたび状態を切替", "時間", "初期：展開", "初期：縮小", "信号をプレビュー", "クリック：回転 / ドラッグ：移動",
+        "旗設定", "ボタン設定", "ブロック設置部品", "射出装置設定", "旗ID", "この地点からエディタープレイ", "この旗からプレイ", "ジッパー：接続状態", "停止するとこのエリアへ戻る",
+        "対象：射出装置", "ブロックの辺に接続", "一度だけ実行（プレビューのみ）", "上面ブロック設置部品", "可動ブロックを真上へ設置", "信号：ブロック設置（エリア内のみ）", "右側の光", "透明度", "左端は対応する負角度を使用", "設置したブロックは固定されます",
+        "実際の弾：フォルダー連動", "起動：データボタン", "1ファイルの大きさ", "弾をプレビュー", "プレビュー用ファイル数", "ブロックモード：軌道をドラッグ", "プレイヤー設定", "移動速度",
+        "調べる機能", "キャラクター設定 - 会話", "文字", "会話機能の設定", "話者", "会話行を選択", "ドラッグ：順序 右クリック：削除", "右クリック：削除 ホイール：スクロール", "削除済み", "会話", "行", "個の機能", "会話機能を追加", "会話行を追加",
+        "タイトル", "移動", "待機", "描画レイヤー", "機能を追加", "プレビュー実行中", "全機能をプレビュー", "機能の種類を選択", "描画レイヤー変更",
+        "移動機能", "対象", "対象を選択", "移動軸", "歩行", "速度", "歩行アニメーション：利用不可", "補間", "終点", "パネル外をクリックして設定", "プレビューは選択した対象から開始", "時間", "次の機能まで", "プレビューを停止", "待機機能", "待機時間", "待機が終わると次の機能を開始します。", "対象画像", "別の画像を選択", "画像オブジェクトを選択", "新しいレイヤー", "一番手前の画像オブジェクトをクリック", "機能の順番で直ちにレイヤーを変更します。"
+    };
+    GameFont_BeginTextBatch();
+    for (int index = 0; index < (int)(sizeof(labels) / sizeof(labels[0])); index++)
+        GameFont_AddText(labels[index]);
+    GameFont_AddText("パレット設定");
+    GameFont_AddText("パレット");
+    GameFont_AddText("囲い色");
+    GameFont_AddText("編集");
+    GameFont_AddText("白");
+    GameFont_AddText("赤");
+    GameFont_AddText("青");
+    GameFont_AddText("黄");
+    GameFont_EndTextBatch();
+}
+
+/* 個別インスペクターの描画コードから独立した予約パス。
+   ここに最後の項目の下端を登録すれば、枠・クリップ・スクロールが同じ
+   必要高さを使う。可変長の設定タブは上の測定関数が都度高さを返す。 */
+static float MeasureInspectorRequiredHeight(int selected)
+{
+    RpgEditorInspectorReservation reservation = BeginInspectorReservation(0.0f);
+    if (selected == RPG_EDITOR_GLOBAL_SETTINGS_INSPECTOR)
+        return GetSettingsTabsBottom(globalSettingsTabs, globalSettingsTabExpanded,
+                                     RPG_GLOBAL_SETTINGS_TAB_COUNT) - globalSettingsPanelBounds.y + 16.0f;
+    if (selected == RPG_EDITOR_STAGE_SETTINGS_INSPECTOR)
+        return GetSettingsTabsBottom(stageSettingsTabs, stageSettingsTabExpanded,
+                                     RPG_STAGE_SETTINGS_TAB_COUNT) - stageSettingsPanelBounds.y + 16.0f;
+    switch (selected) {
+    case 1: ReserveInspectorContent(&reservation, 0.0f, 164.0f); break;
+    case 2: ReserveInspectorContent(&reservation, 0.0f, 310.0f); break;
+    case 4: ReserveInspectorContent(&reservation, 0.0f, 150.0f); break;
+    case 5: ReserveInspectorContent(&reservation, 0.0f, 400.0f); break;
+    case 6: ReserveInspectorContent(&reservation, 0.0f, 430.0f); break;
+    case 7: ReserveInspectorContent(&reservation, 0.0f, 336.0f); break;
+    case RPG_EDITOR_IMAGE_INSPECTOR:
+        /* PNG相対パスは複数行になるため、最長表示でも後続の設定を
+           クリップせず収められる高さを予約する。 */
+        ReserveInspectorContent(&reservation, 0.0f, 450.0f); break;
+    case RPG_EDITOR_CONVEYOR_INSPECTOR:
+        ReserveInspectorContent(&reservation, 0.0f, 372.0f); break;
+    case RPG_EDITOR_PALETTE_INSPECTOR:
+        ReserveInspectorContent(&reservation, 0.0f, 268.0f); break;
+    case RPG_EDITOR_AREA_SETTINGS_INSPECTOR:
+        ReserveInspectorContent(&reservation, 0.0f, 320.0f); break;
+    default:
+        ReserveInspectorContent(&reservation, 0.0f, GetInspectorBaseBounds(selected).height); break;
+    }
+    return FinishInspectorReservation(&reservation, 0.0f);
+}
+
+static bool IsAutoHeightInspector(int selected)
+{
+    return selected == RPG_EDITOR_GLOBAL_SETTINGS_INSPECTOR ||
+           selected == RPG_EDITOR_STAGE_SETTINGS_INSPECTOR;
+}
+
 static float GetInspectorContentHeight(int selected)
 {
-    if (selected == RPG_EDITOR_GLOBAL_SETTINGS_INSPECTOR) return 690.0f;
-    if (selected == RPG_EDITOR_STAGE_SETTINGS_INSPECTOR) return 840.0f;
-    if (selected == 6) return 430.0f;
-    if (selected == 3) return 450.0f;
-    if (selected == 2) return 310.0f;
-    if (selected == 5) return 290.0f;
-    if (selected == RPG_EDITOR_IMAGE_INSPECTOR) return 330.0f;
-    return GetInspectorBaseBounds(selected).height;
+    return MeasureInspectorRequiredHeight(selected);
 }
 
 static float GetInspectorScrollMaximum(int selected)
 {
     Rectangle bounds = GetInspectorBounds(selected);
-    float viewportHeight = bounds.height - RPG_EDITOR_INSPECTOR_HEADER_HEIGHT;
-    return fmaxf(0.0f, GetInspectorContentHeight(selected) - viewportHeight);
+    return fmaxf(0.0f, MeasureInspectorRequiredHeight(selected) - bounds.height);
 }
 
 static Rectangle GetInspectorCloseButton(int selected)
 {
     Rectangle bounds = GetInspectorBounds(selected);
-    return (Rectangle){ bounds.x + bounds.width - 26.0f, bounds.y + 8.0f + inspectorScrollOffsets[selected], 18.0f, 18.0f };
+    return (Rectangle){ bounds.x + bounds.width - 26.0f,
+                        bounds.y + 8.0f + inspectorScrollOffsets[selected], 18.0f, 18.0f };
 }
 
 static Rectangle GetInspectorBounds(int selected)
 {
     Rectangle bounds = GetInspectorBaseBounds(selected);
     if (selected >= 1 && selected < RPG_EDITOR_INSPECTOR_COUNT) {
+        float requiredHeight = MeasureInspectorRequiredHeight(selected);
+        float automaticHeight = IsAutoHeightInspector(selected) ? requiredHeight :
+                                fmaxf(bounds.height, requiredHeight);
         bounds.width = Clamp(bounds.width + inspectorSizeAdjustments[selected].x, 220.0f, 520.0f);
-        bounds.height = Clamp(bounds.height + inspectorSizeAdjustments[selected].y, 140.0f, 480.0f);
+        bounds.height = Clamp(automaticHeight + inspectorSizeAdjustments[selected].y, 140.0f, 480.0f);
     }
     return bounds;
 }
@@ -561,55 +966,35 @@ static bool IsInspectorControlPoint(int selected, Vector2 point)
                               CheckCollisionPointRec(point, (Rectangle){ 716, 204, 188, 26 });
     if (selected == 2) return CheckCollisionPointRec(point, (Rectangle){ 800, 136, 100, 26 }) ||
                               CheckCollisionPointRec(point, (Rectangle){ 716, 170, 188, 102 });
-    if (selected == 3) return CheckCollisionPointRec(point, (Rectangle){ 800, 262, 100, 26 }) ||
-                              CheckCollisionPointRec(point, (Rectangle){ 800, 284, 100, 26 }) ||
-                              CheckCollisionPointRec(point, (Rectangle){ 800, 306, 100, 26 }) ||
-                              CheckCollisionPointRec(point, (Rectangle){ 800, 328, 100, 26 }) ||
-                              CheckCollisionPointRec(point, (Rectangle){ 716, 352, 188, 90 });
     if (selected == 4) return CheckCollisionPointRec(point, (Rectangle){ 716, 144, 188, 28 });
     if (selected == 5) return CheckCollisionPointRec(point, (Rectangle){ 716, 144, 188, 112 });
-    if (selected == 7) return CheckCollisionPointRec(point, (Rectangle){ 716, 144, 188, 28 }) ||
-                              CheckCollisionPointRec(point, (Rectangle){ 716, 180, 188, 28 });
+    if (selected == 7)
+        return CheckCollisionPointRec(point, (Rectangle){ 716, 122, 188, 220 });
     if (selected == RPG_EDITOR_IMAGE_INSPECTOR)
-        return CheckCollisionPointRec(point, (Rectangle){ 716, 174, 188, 28 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 816, 212, 32, 26 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 854, 212, 50, 26 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 716, 268, 60, 28 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 780, 268, 60, 28 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 844, 268, 60, 28 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 716, 336, 58, 26 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 778, 336, 62, 26 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 844, 336, 60, 26 });
+        /* 可変長のファイル欄により後続行が下がっても、内容域をパネル
+           ドラッグとして誤認しない。個別の実操作判定は同じlayoutから行う。 */
+        return CheckCollisionPointRec(point, (Rectangle){ 716, 122, 188, 340 });
+    if (selected == RPG_EDITOR_CONVEYOR_INSPECTOR)
+        return CheckCollisionPointRec(point, (Rectangle){ 716, 182, 42, 26 }) ||
+               CheckCollisionPointRec(point, (Rectangle){ 862, 182, 42, 26 }) ||
+               CheckCollisionPointRec(point, (Rectangle){ 716, 246, 188, 26 }) ||
+               CheckCollisionPointRec(point, (Rectangle){ 716, 306, 188, 26 }) ||
+               CheckCollisionPointRec(point, (Rectangle){ 716, 366, 42, 26 }) ||
+               CheckCollisionPointRec(point, (Rectangle){ 862, 366, 42, 26 }) ||
+               CheckCollisionPointRec(point, (Rectangle){ 716, 406, 188, 26 });
+    if (selected == RPG_EDITOR_PALETTE_INSPECTOR)
+        return CheckCollisionPointRec(point, (Rectangle){ 716, 162, 188, 28 }) ||
+               CheckCollisionPointRec(point, (Rectangle){ 716, 224, 188, 26 });
     if (selected == 6) return CheckCollisionPointRec(point, (Rectangle){ 716, 114, 188, 250 });
-    if (selected == RPG_EDITOR_GLOBAL_SETTINGS_INSPECTOR)
-        return CheckCollisionPointRec(point, (Rectangle){ 716, 166, 88, 28 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 812, 166, 92, 28 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 716, 226, 88, 28 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 812, 226, 92, 28 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 716, 314, 44, 26 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 772, 314, 44, 26 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 716, 402, 44, 26 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 772, 402, 44, 26 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 716, 448, 44, 26 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 772, 448, 44, 26 });
-    if (selected == RPG_EDITOR_STAGE_SETTINGS_INSPECTOR)
-        return CheckCollisionPointRec(point, (Rectangle){ 716, 150, 28, 26 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 876, 150, 28, 26 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 716, 196, 188, 26 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 716, 230, 188, 26 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 796, 262, 70, 26 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 816, 330, 88, 24 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 716, 374, 188, 26 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 716, 484, 188, 28 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 716, 520, 188, 28 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 816, 546, 38, 24 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 864, 546, 38, 24 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 816, 586, 38, 24 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 864, 586, 38, 24 });
+    /* 設定パネル内はタブ見出し・将来追加する項目を含めて常に操作領域。
+       パネル移動はタイトルバーだけから開始する。 */
+    if (selected == RPG_EDITOR_GLOBAL_SETTINGS_INSPECTOR ||
+        selected == RPG_EDITOR_STAGE_SETTINGS_INSPECTOR)
+        return CheckCollisionPointRec(point, (Rectangle){ 708, settingsTabsTop, 196, 1000 });
     if (selected == RPG_EDITOR_AREA_SETTINGS_INSPECTOR)
         return CheckCollisionPointRec(point, (Rectangle){ 716, 178, 188, 26 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 816, 212, 88, 24 }) ||
-               CheckCollisionPointRec(point, (Rectangle){ 716, 246, 188, 26 });
+               CheckCollisionPointRec(point, (Rectangle){ 716, 236, 188, 24 }) ||
+               CheckCollisionPointRec(point, (Rectangle){ 716, 288, 188, 26 });
     return false;
 }
 
@@ -630,7 +1015,7 @@ static void DrawInspectorFrame(Rectangle bounds, const char *title, Color accent
     DrawRectangleRec(titleBar, Fade(accent, 0.08f));
     DrawLine((int)titleBar.x, (int)(titleBar.y + titleBar.height),
              (int)(titleBar.x + titleBar.width), (int)(titleBar.y + titleBar.height), Fade(accent, 0.36f));
-    DrawText(title, (int)bounds.x + 16, (int)bounds.y + 9, 19, accent);
+    GameFont_Draw(title, bounds.x + 16.0f, bounds.y + 9.0f, 19.0f, BLACK);
     DrawRectangleRec(closeButton, Fade(MAROON, 0.88f));
     DrawText("x", (int)closeButton.x + 5, (int)closeButton.y + 1, 16, RAYWHITE);
     Rectangle contentBounds = GetInspectorScreenBounds(inspectorDrawingSelected);
@@ -778,22 +1163,26 @@ static EditorSaveState GetSaveState(const char *message)
 
 static void DrawSaveButton(Rectangle bounds, EditorSaveState saveState)
 {
-    const char *label = saveState == EDITOR_SAVE_SUCCEEDED ? "Saved!" :
-                        saveState == EDITOR_SAVE_FAILED ? "Save failed" : "Save";
+    const char *label = saveState == EDITOR_SAVE_SUCCEEDED ? "保存済み" :
+                        saveState == EDITOR_SAVE_FAILED ? "保存失敗" : "保存";
     Color color = saveState == EDITOR_SAVE_SUCCEEDED ? DARKGREEN :
                   saveState == EDITOR_SAVE_FAILED ? MAROON : DARKBLUE;
     int fontSize = 17;
     DrawRectangleRec(bounds, color);
-    DrawText(label, (int)(bounds.x + (bounds.width - MeasureText(label, fontSize)) * 0.5f),
-             (int)(bounds.y + (bounds.height - fontSize) * 0.5f), fontSize, RAYWHITE);
+    Vector2 labelSize = GameFont_MeasureText(label, (float)fontSize);
+    GameFont_Draw(label, bounds.x + (bounds.width - labelSize.x) * 0.5f,
+                  bounds.y + (bounds.height - labelSize.y) * 0.5f, (float)fontSize,
+                  IsInspectorTextContext() ? BLACK : RAYWHITE);
 }
 
 static void DrawRevertButton(Rectangle bounds)
 {
     const int fontSize = 15;
+    float scale = GameFont_GetPresetScale(RPG_TEXT_PRESET_UI, (float)fontSize);
     DrawRectangleRec(bounds, MAROON);
-    DrawText("Revert", (int)(bounds.x + (bounds.width - MeasureText("Revert", fontSize)) * 0.5f),
-             (int)(bounds.y + (bounds.height - fontSize) * 0.5f), fontSize, RAYWHITE);
+    Vector2 labelSize = GameFont_MeasurePreset(RPG_TEXT_PRESET_UI, "戻す", scale);
+    GameFont_DrawPreset(RPG_TEXT_PRESET_UI, "戻す", bounds.x + (bounds.width - labelSize.x) * 0.5f,
+                        bounds.y + (bounds.height - labelSize.y) * 0.5f, scale);
 }
 
 static int GetVisibleDialogueLines(int blockHeight)
@@ -1379,6 +1768,157 @@ static EditorMapObjectHit GetTopmostEditableObject(const RpgStage *stage,
     return hitImage >= 0 ? EDITOR_MAP_OBJECT_HIT_IMAGE : EDITOR_MAP_OBJECT_HIT_NONE;
 }
 
+static void ComposeEditorStageData(RpgStageData *destination, const RpgLayout *layout,
+                                   const RpgStage *stage, const RpgDialogue *dialogue,
+                                   const RpgStage3Event *stage3Event, const RpgItems *items)
+{
+    if (destination == NULL || layout == NULL || stage == NULL || dialogue == NULL ||
+        stage3Event == NULL || items == NULL) return;
+    memset(destination, 0, sizeof(*destination));
+    destination->layout = *layout;
+    destination->stage = *stage;
+    destination->dialogue = *dialogue;
+    destination->stage3Event = *stage3Event;
+    destination->areaEntryEvents = areaEntryEvents;
+    destination->npcInspectData = npcInspectData;
+    destination->items = *items;
+    destination->wires = wires;
+    destination->receivers = receivers;
+    destination->attachments = attachments;
+    destination->signalBlocks = signalBlocks;
+    destination->mapEvents = mapEvents;
+}
+
+/* The editor preview cache is a copy of the static stage.  Do not let runtime
+ * animation and play-progress fields make the idle synchronizer rebuild that
+ * cache repeatedly.  These members are deliberately omitted by their normal
+ * serializers as well; normalising them here makes the in-memory comparison
+ * match the actual saved-stage contract. */
+static void NormalizeEditorPreviewSyncData(RpgStageData *data)
+{
+    if (data == NULL) return;
+    memset(data->stage.socketSignalActive, 0, sizeof(data->stage.socketSignalActive));
+    data->stage.spatialReferenceMap = 0;
+    for (int index = 0; index < data->stage.referenceObjects.count; index++) {
+        RpgReferenceObject *object = &data->stage.referenceObjects.entries[index];
+        object->legacySourceRow = -1;
+        object->legacySourceColumn = -1;
+        object->isFalling = false;
+        object->fallSpeed = 0.0f;
+        object->followsPlayer = false;
+        object->drawScale = 0.0f;
+        object->isCompressing = false;
+        object->isCompressed = false;
+        object->compressionElapsed = 0.0f;
+    }
+    for (int index = 0; index < data->attachments.count; index++) {
+        RpgAttachment *attachment = &data->attachments.entries[index];
+        attachment->flagRaised = false;
+        attachment->shooterAnimationElapsed = 0.0f;
+        attachment->isZipperHeld = false;
+    }
+    for (int index = 0; index < data->signalBlocks.count; index++) {
+        data->signalBlocks.entries[index].activeRemaining = 0.0f;
+        data->signalBlocks.entries[index].previewRemaining = 0.0f;
+    }
+    data->signalBlocks.lastSignalSequence = 0;
+    for (int index = 0; index < data->wires.count; index++)
+        data->wires.entries[index].conveyorPreviewElapsed = 0.0f;
+    for (int index = 0; index < data->items.count; index++)
+        data->items.entries[index].collected = false;
+    for (int index = 0; index < data->mapEvents.count; index++)
+        data->mapEvents.entries[index].triggered = false;
+    for (int index = 0; index < data->stage.imageObjects.count; index++) {
+        RpgImageObject *object = &data->stage.imageObjects.entries[index];
+        object->runtimeX = 0.0f;
+        object->runtimeY = 0.0f;
+        object->hasRuntimePosition = false;
+    }
+}
+
+/* Keep the expensive package/build preparation off the input frame.  The
+ * editor records the current composed static stage and publishes it only
+ * after input has been idle for this short debounce interval.  This does not
+ * touch the user's saved/revert snapshot. */
+static bool BuildEditorPreviewCache(int stageNumber, const RpgLayout *layout, const RpgStage *stage)
+{
+    bool built;
+    if (layout == NULL || stage == NULL || stageNumber <= 0) return false;
+    editorPreviewBuildStage = *stage;
+    built = RpgStageBuild_CreateEditorPreview(stageNumber, &editorPreviewBuildStage, &attachments,
+                                               layout->playerPosition);
+    /* A cache must not own the active watcher while the user is editing.  The
+       generated editor runtime directory remains and Play reconnects it. */
+    RpgStageBuild_Close();
+    RpgObjectFolders_AbandonStageBuild();
+    return built;
+}
+
+static void SyncEditorStageFolderWhenIdle(const RpgLayout *layout, const RpgStage *stage,
+                                          const RpgDialogue *dialogue, const RpgStage3Event *stage3Event,
+                                          const RpgItems *items, int stageNumber,
+                                          RpgStageData *lastPublished, bool *hasLastPublished,
+                                          int *lastPublishedStageNumber, double *nextComparisonTime,
+                                          double *nextSyncTime,
+                                          bool *previewBuildDirty, bool *previewBuildReady,
+                                          int *previewBuildStageNumber)
+{
+    enum { EDITOR_STAGE_FOLDER_COMPARE_INTERVAL_MS = 200,
+           EDITOR_STAGE_FOLDER_SYNC_DELAY_MS = 700 };
+    bool stageChanged;
+    double now;
+    if (layout == NULL || stage == NULL || dialogue == NULL || stage3Event == NULL || items == NULL ||
+        lastPublished == NULL || hasLastPublished == NULL || nextComparisonTime == NULL ||
+        nextSyncTime == NULL || previewBuildDirty == NULL ||
+        previewBuildReady == NULL || previewBuildStageNumber == NULL || stageNumber <= 0) return;
+    if (lastPublishedStageNumber == NULL) return;
+    now = GetTime();
+    /* Do not copy and memcmp the complete editor stage at the display refresh
+       rate.  A 200 ms observation interval is still much shorter than the
+       700 ms idle debounce used before publishing the preview package. */
+    if (*hasLastPublished && now < *nextComparisonTime &&
+        (!*previewBuildDirty || now < *nextSyncTime)) return;
+    *nextComparisonTime = now + (double)EDITOR_STAGE_FOLDER_COMPARE_INTERVAL_MS / 1000.0;
+    ComposeEditorStageData(&stageFolderSyncBuffer, layout, stage, dialogue, stage3Event, items);
+    NormalizeEditorPreviewSyncData(&stageFolderSyncBuffer);
+    if (!*hasLastPublished || *lastPublishedStageNumber != stageNumber) {
+        *lastPublished = stageFolderSyncBuffer;
+        *hasLastPublished = true;
+        *lastPublishedStageNumber = stageNumber;
+        *previewBuildDirty = true;
+        *previewBuildReady = false;
+        *nextSyncTime = now + (double)EDITOR_STAGE_FOLDER_SYNC_DELAY_MS / 1000.0;
+        return;
+    }
+    stageChanged = memcmp(lastPublished, &stageFolderSyncBuffer, sizeof(stageFolderSyncBuffer)) != 0;
+    if (stageChanged) {
+        *previewBuildDirty = true;
+        /* The package is built after edits have actually gone quiet, rather
+           than competing with continuous editing input. */
+        *nextSyncTime = now + (double)EDITOR_STAGE_FOLDER_SYNC_DELAY_MS / 1000.0;
+    }
+    if (!stageChanged && !*previewBuildDirty) { *nextSyncTime = 0.0; return; }
+    if (*nextSyncTime <= 0.0) {
+        *nextSyncTime = now + (double)EDITOR_STAGE_FOLDER_SYNC_DELAY_MS / 1000.0;
+        return;
+    }
+    if (now < *nextSyncTime) return;
+    if (stageChanged && !RpgStageStorage_SaveStage(stageNumber, &stageFolderSyncBuffer)) {
+        /* Retry later without blocking every editing frame on a transient IO error. */
+        *nextSyncTime = now + (double)EDITOR_STAGE_FOLDER_SYNC_DELAY_MS / 1000.0;
+        return;
+    }
+    if (stageChanged) *lastPublished = stageFolderSyncBuffer;
+    if (BuildEditorPreviewCache(stageNumber, layout, stage)) {
+        *previewBuildDirty = false;
+        *previewBuildReady = true;
+        *previewBuildStageNumber = stageNumber;
+        *nextSyncTime = 0.0;
+    } else {
+        *nextSyncTime = now + (double)EDITOR_STAGE_FOLDER_SYNC_DELAY_MS / 1000.0;
+    }
+}
+
 static bool SaveEditorData(RpgLayout *layout, const RpgCharacter *player,
                            const RpgCharacter *npc, RpgStage *stage,
                            const RpgDialogue *dialogue, const RpgStage3Event *stage3Event,
@@ -1398,18 +1938,7 @@ static bool SaveEditorData(RpgLayout *layout, const RpgCharacter *player,
     bool globalRuntimeSaved = RpgLayout_SaveGlobalRuntime(layout);
     // 保存バッファは静的領域にある。巨大な複合リテラルをスタックへ作らず、
     // 各要素を直接更新して保存時のスタックオーバーフローを防ぐ。
-    stageSaveBuffer.layout = *layout;
-    stageSaveBuffer.stage = *stage;
-    stageSaveBuffer.dialogue = *dialogue;
-    stageSaveBuffer.stage3Event = *stage3Event;
-    stageSaveBuffer.areaEntryEvents = areaEntryEvents;
-    stageSaveBuffer.npcInspectData = npcInspectData;
-    stageSaveBuffer.items = *items;
-    stageSaveBuffer.wires = wires;
-    stageSaveBuffer.receivers = receivers;
-    stageSaveBuffer.attachments = attachments;
-    stageSaveBuffer.signalBlocks = signalBlocks;
-    stageSaveBuffer.mapEvents = mapEvents;
+    ComposeEditorStageData(&stageSaveBuffer, layout, stage, dialogue, stage3Event, items);
     bool stageFolderSaved = RpgStageStorage_SaveStage(currentStageNumber, &stageSaveBuffer);
     if (stageFolderSaved) {
         savedMapEvents = mapEvents;
@@ -1595,12 +2124,12 @@ static bool PlaceItemProperty(BlockPropertyPlacementContext *context, RpgGridCel
     return true;
 }
 
-static bool PlaceWireProperty(BlockPropertyPlacementContext *context, RpgGridCell cell,
-                              const char **message)
+static bool PlaceConveyorProperty(BlockPropertyPlacementContext *context, RpgGridCell cell,
+                                  const char **message)
 {
-    if (!RpgWires_AddAdjacent(context->wires, context->stage, cell.row, cell.column)) return false;
+    if (!RpgWires_AddAdjacentConveyor(context->wires, context->stage, cell.row, cell.column)) return false;
     PushWireAddedHistory(context->history, context->wires->count - 1);
-    *message = "Wire start and adjacent endpoint added";
+    *message = "Conveyor path start and adjacent endpoint added";
     return true;
 }
 
@@ -1617,7 +2146,7 @@ static bool PlaceReceiverProperty(BlockPropertyPlacementContext *context, RpgGri
 
 static const BlockPropertyPlacementDefinition blockPropertyPlacements[] = {
     { RPG_BLOCK_PROPERTY_ITEM, PlaceItemProperty },
-    { RPG_BLOCK_PROPERTY_WIRE, PlaceWireProperty },
+    { RPG_BLOCK_PROPERTY_CONVEYOR, PlaceConveyorProperty },
     { RPG_BLOCK_PROPERTY_RECEIVER, PlaceReceiverProperty }
 };
 
@@ -2299,45 +2828,6 @@ static bool SaveEditedDialogue(bool isInspectDialogueEditing, bool isStage3Dialo
     return true;
 }
 
-static void AppendUtf8(char *text, size_t capacity, int codepoint)
-{
-    char encoded[5] = { 0 };
-    int length = 0;
-    size_t used = strlen(text);
-    if (codepoint <= 0x7f) { encoded[0] = (char)codepoint; length = 1; }
-    else if (codepoint <= 0x7ff) {
-        encoded[0] = (char)(0xc0 | (codepoint >> 6));
-        encoded[1] = (char)(0x80 | (codepoint & 0x3f)); length = 2;
-    } else if (codepoint <= 0xffff) {
-        encoded[0] = (char)(0xe0 | (codepoint >> 12));
-        encoded[1] = (char)(0x80 | ((codepoint >> 6) & 0x3f));
-        encoded[2] = (char)(0x80 | (codepoint & 0x3f)); length = 3;
-    } else {
-        encoded[0] = (char)(0xf0 | (codepoint >> 18));
-        encoded[1] = (char)(0x80 | ((codepoint >> 12) & 0x3f));
-        encoded[2] = (char)(0x80 | ((codepoint >> 6) & 0x3f));
-        encoded[3] = (char)(0x80 | (codepoint & 0x3f)); length = 4;
-    }
-    if (used + (size_t)length < capacity) memcpy(text + used, encoded, (size_t)length + 1);
-}
-
-static void RemoveLastUtf8Character(char *text)
-{
-    size_t length = strlen(text);
-    if (length == 0) return;
-    length--;
-    while (length > 0 && ((unsigned char)text[length] & 0xc0) == 0x80) length--;
-    text[length] = '\0';
-}
-
-static int GetPreviousUtf8Index(const char *text, int index)
-{
-    if (index <= 0) return 0;
-    index--;
-    while (index > 0 && ((unsigned char)text[index] & 0xc0) == 0x80) index--;
-    return index;
-}
-
 static int GetNextUtf8Index(const char *text, int index)
 {
     int byteCount = 0;
@@ -2345,35 +2835,6 @@ static int GetNextUtf8Index(const char *text, int index)
     GetCodepointNext(text + index, &byteCount);
     return index + byteCount;
 }
-
-static void InsertUtf8AtCursor(char *text, size_t capacity, int *cursorIndex, int codepoint)
-{
-    char suffix[RPG_STAGE_REFERENCE_PATH_LENGTH];
-    size_t originalLength = strlen(text);
-    strcpy(suffix, text + *cursorIndex);
-    text[*cursorIndex] = '\0';
-    AppendUtf8(text, capacity, codepoint);
-    if (strlen(text) + strlen(suffix) < capacity) {
-        *cursorIndex = (int)strlen(text);
-        strcat(text, suffix);
-    } else {
-        memcpy(text + *cursorIndex, suffix, originalLength - (size_t)*cursorIndex + 1);
-    }
-}
-
-static void RemoveBeforeCursor(char *text, int *cursorIndex)
-{
-    if (*cursorIndex <= 0) return;
-    if (text[*cursorIndex] == '\0') {
-        RemoveLastUtf8Character(text);
-        *cursorIndex = (int)strlen(text);
-        return;
-    }
-    int previousIndex = GetPreviousUtf8Index(text, *cursorIndex);
-    memmove(text + previousIndex, text + *cursorIndex, strlen(text + *cursorIndex) + 1);
-    *cursorIndex = previousIndex;
-}
-
 
 static void DrawWrappedDialogueText(const char *text, int x, int y, float fontSize, Color color)
 {
@@ -2388,74 +2849,21 @@ static void DrawWrappedDialogueText(const char *text, int x, int y, float fontSi
         if (index > lineStart && GameFont_MeasureText(part, fontSize).x > 590.0f) {
             memcpy(part, text + lineStart, (size_t)(index - lineStart));
             part[index - lineStart] = '\0';
-            GameFont_Draw(part, (float)x, (float)drawY, fontSize, color);
+            GameFont_Draw(part, (float)x, (float)drawY, fontSize,
+                          IsInspectorTextContext() ? BLACK : color);
             drawY += (int)fontSize + 2;
             lineStart = index;
         } else index = nextIndex;
     }
-    GameFont_Draw(text + lineStart, (float)x, (float)drawY, fontSize, color);
-}
-
-static bool DeleteSelectedText(char *text, int *cursorIndex, int *selectionAnchor,
-                               int *selectionEnd)
-{
-    int start = *selectionAnchor < *selectionEnd ? *selectionAnchor : *selectionEnd;
-    int end = *selectionAnchor < *selectionEnd ? *selectionEnd : *selectionAnchor;
-    if (start == end) return false;
-    memmove(text + start, text + end, strlen(text + end) + 1);
-    *cursorIndex = start;
-    *selectionAnchor = start;
-    *selectionEnd = start;
-    return true;
+    GameFont_Draw(text + lineStart, (float)x, (float)drawY, fontSize,
+                  IsInspectorTextContext() ? BLACK : color);
 }
 
 // 会話・話者・短い名称で共通のUTF-8テキスト編集操作を使う。
 static void UpdateTextInput(char *text, size_t capacity, int *cursorIndex,
                             int *selectionAnchor, int *selectionEnd)
 {
-    int textLength = (int)strlen(text);
-    if (*cursorIndex > textLength) *cursorIndex = textLength;
-    if (IsKeyPressed(KEY_LEFT)) *cursorIndex = GetPreviousUtf8Index(text, *cursorIndex);
-    if (IsKeyPressed(KEY_RIGHT)) *cursorIndex = GetNextUtf8Index(text, *cursorIndex);
-    if (IsKeyPressed(KEY_HOME)) *cursorIndex = 0;
-    if (IsKeyPressed(KEY_END)) *cursorIndex = textLength;
-    if (IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_HOME) || IsKeyPressed(KEY_END)) {
-        *selectionAnchor = *cursorIndex;
-        *selectionEnd = *cursorIndex;
-    }
-    if (IsKeyPressed(KEY_BACKSPACE) && !DeleteSelectedText(text, cursorIndex, selectionAnchor, selectionEnd)) {
-        RemoveBeforeCursor(text, cursorIndex);
-    }
-    if (IsKeyPressed(KEY_DELETE) && !DeleteSelectedText(text, cursorIndex, selectionAnchor, selectionEnd) && text[*cursorIndex] != '\0') {
-        int nextIndex = GetNextUtf8Index(text, *cursorIndex);
-        memmove(text + *cursorIndex, text + nextIndex, strlen(text + nextIndex) + 1);
-    }
-    bool isPasteShortcut = (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) && IsKeyPressed(KEY_V);
-    if (isPasteShortcut) {
-        const char *clipboard = GetClipboardText();
-        DeleteSelectedText(text, cursorIndex, selectionAnchor, selectionEnd);
-        while (clipboard != NULL && *clipboard != '\0') {
-            int byteCount = 0;
-            int codepoint = GetCodepointNext(clipboard, &byteCount);
-            if (byteCount <= 0) break;
-            if (codepoint >= 32) InsertUtf8AtCursor(text, capacity, cursorIndex, codepoint);
-            clipboard += byteCount;
-        }
-        *selectionAnchor = *cursorIndex;
-        *selectionEnd = *cursorIndex;
-        // 貼り付けた日本語も、通常の入力と同じく描画用の文字セットへ登録する。
-        GameFont_AddText(text);
-    }
-    int codepoint = GetCharPressed();
-    while (codepoint > 0) {
-        if (!isPasteShortcut && codepoint >= 32) {
-            DeleteSelectedText(text, cursorIndex, selectionAnchor, selectionEnd);
-            InsertUtf8AtCursor(text, capacity, cursorIndex, codepoint);
-            // 入力済み文字をフォントへ加え、任意の日本語を ? で表示しないようにする。
-            GameFont_AddText(text);
-        }
-        codepoint = GetCharPressed();
-    }
+    RpgEditorText_UpdateInput(text, capacity, cursorIndex, selectionAnchor, selectionEnd);
 }
 
 static void UpdateDialogueText(RpgDialogue *dialogue, int activeLine, int *cursorIndex,
@@ -2492,17 +2900,17 @@ static void DrawNpcInspector(const RpgDialogue *dialogue, int scroll, int active
     int textStartX = isExamineFunctionEditor ? 280 : 200;
     DrawRectangleRec(dialogueEditorBounds, Fade(RAYWHITE, 0.98f));
     DrawRectangleLinesEx(dialogueEditorBounds, 2.0f, PURPLE);
-    DrawText(isExamineFunctionEditor ? "Examine Functions" : "NPC Inspector - Dialogue", 156, 68, 22, PURPLE);
+    DrawSettingsText(isExamineFunctionEditor ? "調べる機能" : "キャラクター設定 - 会話", 156, 68, 22, BLACK);
     DrawRectangleRec(GetDialogueEditorCloseButton(), Fade(MAROON, 0.88f));
     DrawText("x", 797, 65, 16, RAYWHITE);
-    DrawText(TextFormat("Font: %d", fontSize), 590, 68, 16, DARKGRAY);
+    DrawSettingsText(TextFormat("文字: %d", fontSize), 590, 68, 16, BLACK);
     DrawRectangleLines(680, 64, 42, 22, MAROON);
     DrawRectangleLines(730, 64, 42, 22, DARKGREEN);
     DrawText("-", 695, 67, 18, MAROON);
     DrawText("+", 745, 67, 18, DARKGREEN);
-    DrawText(isExamineFunctionEditor ? "Dialogue function settings" : "Speaker", 156, 101, 16, DARKGRAY);
-    DrawRectangle(224, 96, 260, 26, isSpeakerEditing ? Fade(SKYBLUE, 0.45f) : Fade(LIGHTGRAY, 0.55f));
-    DrawRectangleLines(224, 96, 260, 26, isSpeakerEditing ? PURPLE : GRAY);
+    DrawSettingsText(isExamineFunctionEditor ? "会話機能の設定" : "話者", 156, 101, 16, BLACK);
+    DrawRectangle(224, 96, 260, 26, Fade(LIGHTGRAY, 0.55f));
+    DrawRectangleLines(224, 96, 260, 26, isSpeakerEditing ? BLUE : GRAY);
     if (activeLine >= 0) {
         bool isActiveLineDirty = IsDialogueLineDifferent(dialogue, savedDialogue, activeLine);
         if (isSpeakerEditing && speakerSelectionAnchor != speakerSelectionEnd) {
@@ -2518,7 +2926,7 @@ static void DrawNpcInspector(const RpgDialogue *dialogue, int scroll, int active
             DrawRectangle(startX, 99, endX - startX, 20, Fade(SKYBLUE, 0.65f));
         }
         GameFont_Draw(dialogue->speakers[activeLine], 232, 101, 17,
-                      isActiveLineDirty ? MAROON : DARKBLUE);
+                      IsInspectorTextContext() ? BLACK : (isActiveLineDirty ? MAROON : DARKBLUE));
         if (isSpeakerEditing) {
             char prefix[RPG_DIALOGUE_SPEAKER_LENGTH];
             memcpy(prefix, dialogue->speakers[activeLine], (size_t)speakerCursorIndex);
@@ -2526,8 +2934,8 @@ static void DrawNpcInspector(const RpgDialogue *dialogue, int scroll, int active
             int cursorX = 232 + (int)GameFont_MeasureText(prefix, 17.0f).x;
             DrawTextCaret(cursorX, 99, 21);
         }
-    } else DrawText("Select a dialogue line", 232, 102, 16, GRAY);
-    DrawText(isExamineFunctionEditor ? "Drag: order  Right click: delete" : "Right click: delete  Wheel: scroll", 500, 101, 14, DARKGRAY);
+    } else DrawSettingsText("会話行を選択", 232, 102, 16, GRAY);
+    DrawSettingsText(isExamineFunctionEditor ? "ドラッグ：順序 右クリック：削除" : "右クリック：削除 ホイール：スクロール", 500, 101, 12, BLACK);
 
     int visibleLineCount = GetVisibleDialogueLines(blockHeight);
     for (int visibleIndex = 0; visibleIndex < visibleLineCount; visibleIndex++) {
@@ -2538,8 +2946,8 @@ static void DrawNpcInspector(const RpgDialogue *dialogue, int scroll, int active
             if (lineIndex < savedDialogue->lineCount) {
                 DrawRectangle(154, lineY, 652, blockHeight, Fade(MAROON, 0.06f));
                 DrawRectangleLines(154, lineY, 652, blockHeight, Fade(MAROON, 0.32f));
-                DrawText(TextFormat("%02d  Deleted", lineIndex + 1), 160,
-                         lineY + (blockHeight - 14) / 2, 14, Fade(MAROON, 0.45f));
+                DrawSettingsText(TextFormat("%02d  削除済み", lineIndex + 1), 160,
+                                 lineY + (blockHeight - 14) / 2, 14, Fade(MAROON, 0.45f));
             }
             continue;
         }
@@ -2551,8 +2959,8 @@ static void DrawNpcInspector(const RpgDialogue *dialogue, int scroll, int active
         DrawRectangle(154, lineY, 652, blockHeight, background);
         DrawRectangleLines(154, lineY, 652, blockHeight, lineIndex == draggedLine ? ORANGE :
                            isLineDirty ? MAROON : lineIndex == activeLine ? PURPLE : GRAY);
-        DrawText(isExamineFunctionEditor ? TextFormat("%02d  Dialogue", lineIndex + 1) : TextFormat("%02d", lineIndex + 1),
-                 160, lineY + (blockHeight - 14) / 2, 14, DARKGRAY);
+        DrawSettingsText(isExamineFunctionEditor ? TextFormat("%02d  会話", lineIndex + 1) : TextFormat("%02d", lineIndex + 1),
+                         160, lineY + (blockHeight - 14) / 2, 14, BLACK);
         if (lineIndex == activeLine && selectionAnchor != selectionEnd) {
             int start = selectionAnchor < selectionEnd ? selectionAnchor : selectionEnd;
             int end = selectionAnchor < selectionEnd ? selectionEnd : selectionAnchor;
@@ -2569,7 +2977,7 @@ static void DrawNpcInspector(const RpgDialogue *dialogue, int scroll, int active
                                 textStartX, lineY + 4, (float)fontSize, isLineDirty ? MAROON : DARKBLUE);
         if (deletedIndex >= 0) {
             DrawRectangle(724, lineY + 3, 78, 14, Fade(MAROON, 0.14f));
-            DrawText(TextFormat("Deleted #%d", deletedIndex + 1), 727, lineY + 4, 10, Fade(MAROON, 0.65f));
+            DrawSettingsText(TextFormat("削除済み #%d", deletedIndex + 1), 727, lineY + 4, 10, Fade(MAROON, 0.65f));
         }
         if (lineIndex == activeLine) {
             char prefix[RPG_DIALOGUE_LINE_LENGTH];
@@ -2579,9 +2987,9 @@ static void DrawNpcInspector(const RpgDialogue *dialogue, int scroll, int active
             DrawTextCaret(cursorX, lineY + 3, blockHeight - 6);
         }
     }
-    DrawText(isExamineFunctionEditor ? TextFormat("%d functions", dialogue->lineCount) : TextFormat("%d lines", dialogue->lineCount), 156, 386, 16, DARKGRAY);
+    DrawSettingsText(isExamineFunctionEditor ? TextFormat("%d 個の機能", dialogue->lineCount) : TextFormat("%d 行", dialogue->lineCount), 156, 386, 16, BLACK);
     DrawRectangle(156, 414, 210, 32, PURPLE);
-    DrawText(isExamineFunctionEditor ? "Add Dialogue function" : "Add dialogue line", 182, 422, 18, RAYWHITE);
+    DrawSettingsText(isExamineFunctionEditor ? "会話機能を追加" : "会話行を追加", 182, 422, 18, RAYWHITE);
     DrawSaveButton((Rectangle){ 382, 414, 116, 32 }, saveState);
     DrawRevertButton((Rectangle){ 510, 414, 116, 32 });
 }
@@ -2589,14 +2997,14 @@ static void DrawNpcInspector(const RpgDialogue *dialogue, int scroll, int active
 static void DrawNpcSummaryInspector(const RpgDialogue *dialogue, const RpgCharacter *npc,
                                     const RpgCharacter *savedNpc, EditorSaveState saveState)
 {
-    DrawInspectorFrame(npcInspectorBounds, "NPC Inspector", PURPLE, GetInspectorCloseButton(2));
-    DrawText(TextFormat("Dialogue: %d lines", dialogue->lineCount), 716, 122, 16, DARKGRAY);
-    DrawText(TextFormat("Scale: %.1f", npc->scale), 716, 144, 16,
-             npc->scale != savedNpc->scale ? MAROON : DARKGRAY);
+    DrawInspectorFrame(npcInspectorBounds, "キャラクター設定", PURPLE, GetInspectorCloseButton(2));
+    DrawSettingsText(TextFormat("会話: %d行", dialogue->lineCount), 716, 122, 16, BLACK);
+    DrawSettingsText(TextFormat("拡大率: %.1f", npc->scale), 716, 144, 16,
+                     npc->scale != savedNpc->scale ? MAROON : BLACK);
     DrawText("[-]", 812, 144, 16, MAROON);
     DrawText("[+]", 864, 144, 16, DARKGREEN);
     DrawRectangle(716, 170, 188, 32, PURPLE);
-    DrawText("Edit dialogue", 750, 178, 18, RAYWHITE);
+    DrawSettingsText("会話を編集", 750, 178, 18, RAYWHITE);
     DrawSaveButton((Rectangle){ 716, 208, 90, 26 }, saveState);
     DrawRevertButton((Rectangle){ 814, 208, 90, 26 });
 }
@@ -2727,29 +3135,6 @@ static void DrawMovePreviewSprite(Texture2D zipperTexture, const RpgCharacter *p
     }
 }
 
-static void DrawZipperInspector(const RpgZipper *zipper, const RpgZipper *savedZipper,
-                                EditorSaveState saveState)
-{
-    DrawInspectorFrame(zipperInspectorBounds, "Zipper Settings", ORANGE, GetInspectorCloseButton(3));
-    DrawText("Zipper is managed outside areas.", 716, 248, 14, DARKGRAY);
-    DrawText(TextFormat("Launch speed: %.0f", zipper->launchSpeed), 716, 272, 16,
-             zipper->launchSpeed != savedZipper->launchSpeed ? MAROON : DARKGRAY);
-    DrawText("[-]", 812, 272, 16, MAROON);
-    DrawText("[+]", 864, 272, 16, DARKGREEN);
-    DrawText(TextFormat("Return speed: %.0f", zipper->returnSpeed), 716, 294, 16,
-             zipper->returnSpeed != savedZipper->returnSpeed ? MAROON : DARKGRAY);
-    DrawText("[-]", 812, 294, 16, MAROON);
-    DrawText("[+]", 864, 294, 16, DARKGREEN);
-    DrawText(TextFormat("Follow speed: %.0f", zipper->followSpeed), 716, 316, 16,
-             zipper->followSpeed != savedZipper->followSpeed ? MAROON : DARKGRAY);
-    DrawText("[-]", 812, 316, 16, MAROON);
-    DrawText("[+]", 864, 316, 16, DARKGREEN);
-    DrawRectangle(716, 340, 188, 28, zipper->launchPreviewEnabled ? DARKGREEN : GRAY);
-    DrawText(zipper->launchPreviewEnabled ? "Preview: ON" : "Preview: OFF", 754, 346, 16, RAYWHITE);
-    DrawSaveButton((Rectangle){ 716, 382, 90, 26 }, saveState);
-    DrawRevertButton((Rectangle){ 814, 382, 90, 26 });
-}
-
 enum { EDITOR_FUNCTION_LIST_VISIBLE_ROWS = 6, EDITOR_FUNCTION_LIST_ROW_HEIGHT = 34 };
 
 static void DrawExamineFunctionList(const RpgInspect *inspect, int selectedIndex, int scrollIndex,
@@ -2761,12 +3146,12 @@ static void DrawExamineFunctionList(const RpgInspect *inspect, int selectedIndex
     DrawRectangle(0, 0, RPG_EDITOR_WIDTH, RPG_EDITOR_HEIGHT, Fade(BLACK, 0.62f));
     DrawRectangleRec(panel, Fade(RAYWHITE, 0.98f));
     DrawRectangleLinesEx(panel, 2.0f, DARKBLUE);
-    DrawText("Examine Functions", 212, 104, 24, DARKBLUE);
+    DrawSettingsText("調べる機能", 212, 104, 24, BLACK);
     DrawRectangle(648, 100, 78, 24, inspect->enabled ? DARKGREEN : GRAY);
     DrawText(inspect->enabled ? "ON" : "OFF", 672, 104, 16, RAYWHITE);
-    DrawText("Title", 212, 136, 16, DARKGRAY);
-    DrawRectangle(260, 132, 368, 24, isTitleEditing ? Fade(SKYBLUE, 0.55f) : Fade(LIGHTGRAY, 0.65f));
-    DrawRectangleLines(260, 132, 368, 24, isTitleEditing ? PURPLE : GRAY);
+    DrawSettingsText("タイトル", 212, 136, 16, BLACK);
+    DrawRectangle(260, 132, 368, 24, Fade(LIGHTGRAY, 0.65f));
+    DrawRectangleLines(260, 132, 368, 24, isTitleEditing ? BLUE : GRAY);
     bool isSelectedDirty = selectedIndex >= savedInspect->functionCount ||
                            IsInspectFunctionDifferent(&inspect->functions[selectedIndex],
                                                       &savedInspect->functions[selectedIndex]);
@@ -2782,7 +3167,7 @@ static void DrawExamineFunctionList(const RpgInspect *inspect, int selectedIndex
         DrawRectangle(startX, 134, width + 1, 19, Fade(SKYBLUE, 0.7f));
     }
     GameFont_Draw(inspect->functions[selectedIndex].title, 268, 135, 16,
-                  isSelectedDirty ? MAROON : DARKBLUE);
+                  IsInspectorTextContext() ? BLACK : (isSelectedDirty ? MAROON : BLACK));
     if (isTitleEditing) {
         char prefix[RPG_INSPECT_TITLE_LENGTH];
         memcpy(prefix, inspect->functions[selectedIndex].title, (size_t)titleCursorIndex);
@@ -2805,15 +3190,15 @@ static void DrawExamineFunctionList(const RpgInspect *inspect, int selectedIndex
         DrawRectangleLines(212, y, 536, 28, index == draggedIndex ? ORANGE : isFunctionDirty ? MAROON : GRAY);
         const RpgInspectFunction *function = &inspect->functions[index];
         char detail[48];
-        if (function->type == RPG_INSPECT_MOVE) snprintf(detail, sizeof(detail), "Move");
-        else if (function->type == RPG_INSPECT_WAIT) snprintf(detail, sizeof(detail), "Wait %.1fs", function->wait.duration);
-        else if (function->type == RPG_INSPECT_LAYER_CHANGE) snprintf(detail, sizeof(detail), "Draw layer");
-        else snprintf(detail, sizeof(detail), "%d lines", function->dialogue.lineCount);
-        DrawText(TextFormat("%02d  %s  (%s)", index + 1, function->title, detail), 226, y + 6, 17,
-                 isFunctionDirty ? MAROON : DARKBLUE);
+        if (function->type == RPG_INSPECT_MOVE) snprintf(detail, sizeof(detail), "移動");
+        else if (function->type == RPG_INSPECT_WAIT) snprintf(detail, sizeof(detail), "待機 %.1f秒", function->wait.duration);
+        else if (function->type == RPG_INSPECT_LAYER_CHANGE) snprintf(detail, sizeof(detail), "描画レイヤー");
+        else snprintf(detail, sizeof(detail), "%d行", function->dialogue.lineCount);
+        DrawSettingsText(TextFormat("%02d  %s  （%s）", index + 1, function->title, detail), 226, y + 6, 17,
+                         isFunctionDirty ? MAROON : BLACK);
         if (deletedIndex >= 0) {
             DrawRectangle(662, y + 4, 82, 18, Fade(MAROON, 0.14f));
-            DrawText(TextFormat("Deleted #%d", deletedIndex + 1), 665, y + 7, 10, Fade(MAROON, 0.65f));
+            DrawSettingsText(TextFormat("削除済み #%d", deletedIndex + 1), 665, y + 7, 10, Fade(MAROON, 0.65f));
         }
     }
     // 現在の同じインデックスが空の場合だけ、保存前に存在した削除Functionを表示する。
@@ -2822,12 +3207,12 @@ static void DrawExamineFunctionList(const RpgInspect *inspect, int selectedIndex
         int y = 166 + (index - firstVisibleIndex) * EDITOR_FUNCTION_LIST_ROW_HEIGHT;
         DrawRectangle(212, y, 536, 28, Fade(MAROON, 0.06f));
         DrawRectangleLines(212, y, 536, 28, Fade(MAROON, 0.32f));
-        DrawText(TextFormat("%02d  Deleted", index + 1), 226, y + 6, 17, Fade(MAROON, 0.45f));
+        DrawSettingsText(TextFormat("%02d  削除済み", index + 1), 226, y + 6, 17, Fade(MAROON, 0.45f));
     }
     DrawRectangle(212, 394, 210, 30, PURPLE);
-    DrawText("Add function", 260, 401, 17, RAYWHITE);
+    DrawSettingsText("機能を追加", 260, 401, 17, RAYWHITE);
     DrawRectangle(430, 394, 210, 30, isFunctionPreviewPlaying ? MAROON : DARKGREEN);
-    DrawText(isFunctionPreviewPlaying ? "Preview running" : "Preview all functions", 448, 401, 17, RAYWHITE);
+    DrawSettingsText(isFunctionPreviewPlaying ? "プレビュー実行中" : "全機能をプレビュー", 448, 401, 16, RAYWHITE);
     DrawText(TextFormat("%d-%d / %d", firstVisibleIndex + 1, lastVisibleIndex, inspect->functionCount),
              638, 139, 12, DARKGRAY);
     DrawRectangle(730, 96, 24, 24, MAROON);
@@ -2840,16 +3225,16 @@ static void DrawFunctionTypeList(void)
     DrawRectangle(0, 0, RPG_EDITOR_WIDTH, RPG_EDITOR_HEIGHT, Fade(BLACK, 0.62f));
     DrawRectangleRec(panel, Fade(RAYWHITE, 0.98f));
     DrawRectangleLinesEx(panel, 2.0f, DARKBLUE);
-    DrawText("Add Function", 324, 172, 24, DARKBLUE);
-    DrawText("Select a function type", 324, 204, 16, DARKGRAY);
+    DrawSettingsText("機能を追加", 324, 172, 24, BLACK);
+    DrawSettingsText("機能の種類を選択", 324, 204, 16, BLACK);
     DrawRectangle(324, 236, 312, 36, PURPLE);
-    DrawText("Dialogue", 344, 245, 20, RAYWHITE);
+    DrawSettingsText("会話", 344, 245, 20, RAYWHITE);
     DrawRectangle(324, 280, 312, 36, DARKBLUE);
-    DrawText("Move", 344, 289, 20, RAYWHITE);
+    DrawSettingsText("移動", 344, 289, 20, RAYWHITE);
     DrawRectangle(324, 324, 312, 36, DARKGREEN);
-    DrawText("Wait", 344, 333, 20, RAYWHITE);
+    DrawSettingsText("待機", 344, 333, 20, RAYWHITE);
     DrawRectangle(324, 368, 312, 36, MAROON);
-    DrawText("Change draw layer", 344, 377, 20, RAYWHITE);
+    DrawSettingsText("描画レイヤー変更", 344, 377, 18, RAYWHITE);
     DrawRectangle(620, 140, 22, 22, MAROON);
     DrawText("x", 625, 142, 17, RAYWHITE);
 }
@@ -2866,54 +3251,54 @@ static void DrawMoveFunctionEditor(const RpgInspectMove *move, bool isPreviewPla
     const int x = (int)movePanelBounds.x, y = (int)movePanelBounds.y;
     DrawRectangleRec(movePanelBounds, Fade(RAYWHITE, 0.96f));
     DrawRectangleLinesEx(movePanelBounds, 2.0f, PURPLE);
-    DrawText("Move Function", x + 16, y + 16, 21, PURPLE);
+    DrawSettingsText("移動機能", x + 16, y + 16, 21, BLACK);
     DrawRectangleRec(GetMovePanelControl(250, 10, 20, 20), MAROON);
     DrawText("x", x + 255, y + 12, 16, RAYWHITE);
-    DrawText("Target", x + 16, y + 50, 17, DARKGRAY);
+    DrawSettingsText("対象", x + 16, y + 50, 17, BLACK);
     DrawRectangleRec(GetMovePanelControl(16, 74, 244, 28), isMoveDirty ? MAROON : PURPLE);
-    DrawText(TextFormat("Select target: %s", targetName), x + 30, y + 80, 16, RAYWHITE);
-    DrawText("Axes", x + 16, y + 112, 17, DARKGRAY);
+    DrawSettingsText(TextFormat("対象を選択: %s", targetName), x + 30, y + 80, 16, RAYWHITE);
+    DrawSettingsText("移動軸", x + 16, y + 112, 17, BLACK);
     for (int axis = 0; axis < RPG_INSPECT_MOVE_AXIS_COUNT; axis++) {
         Rectangle button = GetMovePanelControl(16.0f + axis * 82.0f, 136.0f, 78.0f, 24.0f);
         DrawRectangleRec(button, axis == (int)move->axis ? PURPLE : DARKBLUE);
         DrawText(RpgInspect_MoveAxisName((RpgInspectMoveAxis)axis), (int)button.x + 7, (int)button.y + 4, 13, RAYWHITE);
     }
     if (move->target == RPG_INSPECT_MOVE_PLAYER) {
-        DrawText("Walk", x + 16, y + 168, 17, DARKGRAY);
+        DrawSettingsText("歩行", x + 16, y + 168, 17, BLACK);
         DrawRectangleRec(GetMovePanelControl(66, 164, 62, 24), move->walkAnimationEnabled ? DARKGREEN : GRAY);
         DrawText(move->walkAnimationEnabled ? "ON" : "OFF", x + 82, y + 169, 14, RAYWHITE);
-        DrawText("Speed", x + 142, y + 168, 15, DARKGRAY);
+        DrawSettingsText("速度", x + 142, y + 168, 15, BLACK);
         DrawRectangleRec(GetMovePanelControl(194, 164, 26, 24), MAROON);
         DrawText("-", x + 203, y + 167, 18, RAYWHITE);
         DrawRectangleRec(GetMovePanelControl(230, 164, 26, 24), DARKGREEN);
         DrawText("+", x + 238, y + 167, 18, RAYWHITE);
-        DrawText(TextFormat("%.1fx", move->walkAnimationSpeed), x + 145, y + 186, 14, DARKBLUE);
+        DrawSettingsText(TextFormat("%.1fx", move->walkAnimationSpeed), x + 145, y + 186, 14, BLACK);
     } else {
-        DrawText("Walk animation: unavailable", x + 16, y + 174, 14, GRAY);
+        DrawSettingsText("歩行アニメーション：利用不可", x + 16, y + 174, 14, GRAY);
     }
-    DrawText("Easing", x + 16, y + 204, 17, DARKGRAY);
+    DrawSettingsText("補間", x + 16, y + 204, 17, BLACK);
     DrawRectangleRec(GetMovePanelControl(16, 228, 244, 26), DARKBLUE);
     DrawText(RpgInspect_MoveEasingName(move->easing), x + 28, y + 233, 15, RAYWHITE);
-    DrawText("Destination", x + 16, y + 264, 17, DARKGRAY);
-    DrawText(TextFormat("X %.0f   Y %.0f", move->destinationX, move->destinationY),
-             x + 16, y + 286, 18, isMoveDirty ? MAROON : DARKBLUE);
-    DrawText("Click outside this panel to set", x + 16, y + 308, 14, DARKGRAY);
-    DrawText("Preview starts from the selected object", x + 16, y + 326, 14, DARKGRAY);
-    DrawText("Duration", x + 16, y + 342, 17, DARKGRAY);
+    DrawSettingsText("終点", x + 16, y + 264, 17, BLACK);
+    DrawSettingsText(TextFormat("X %.0f   Y %.0f", move->destinationX, move->destinationY),
+                     x + 16, y + 286, 18, isMoveDirty ? MAROON : BLACK);
+    DrawSettingsText("パネル外をクリックして設定", x + 16, y + 308, 14, BLACK);
+    DrawSettingsText("プレビューは選択した対象から開始", x + 16, y + 326, 14, BLACK);
+    DrawSettingsText("時間", x + 16, y + 342, 17, BLACK);
     DrawRectangleRec(GetMovePanelControl(16, 366, 38, 28), MAROON);
     DrawText("-", x + 29, y + 369, 21, RAYWHITE);
-    DrawText(TextFormat("%.1f sec", move->duration), x + 66, y + 371, 19, isMoveDirty ? MAROON : DARKBLUE);
+    DrawSettingsText(TextFormat("%.1f秒", move->duration), x + 66, y + 371, 19, isMoveDirty ? MAROON : BLACK);
     DrawRectangleRec(GetMovePanelControl(152, 366, 38, 28), DARKGREEN);
     DrawText("+", x + 165, y + 369, 21, RAYWHITE);
-    DrawText("Next function after", x + 16, y + 402, 17, DARKGRAY);
+    DrawSettingsText("次の機能まで", x + 16, y + 402, 17, BLACK);
     DrawRectangleRec(GetMovePanelControl(16, 426, 38, 28), MAROON);
     DrawText("-", x + 29, y + 429, 21, RAYWHITE);
-    DrawText(TextFormat("%.1f sec", move->nextFunctionDelay), x + 66, y + 431, 19,
-             isMoveDirty ? MAROON : DARKBLUE);
+    DrawSettingsText(TextFormat("%.1f秒", move->nextFunctionDelay), x + 66, y + 431, 19,
+                     isMoveDirty ? MAROON : BLACK);
     DrawRectangleRec(GetMovePanelControl(152, 426, 38, 28), DARKGREEN);
     DrawText("+", x + 165, y + 429, 21, RAYWHITE);
     DrawRectangleRec(GetMovePanelControl(16, 462, 244, 22), isPreviewPlaying ? MAROON : DARKGREEN);
-    DrawText(isPreviewPlaying ? "Stop preview" : TextFormat("Play preview: %s", targetName), x + 54, y + 464, 16, RAYWHITE);
+    DrawSettingsText(isPreviewPlaying ? "プレビューを停止" : TextFormat("プレビュー: %s", targetName), x + 54, y + 464, 16, RAYWHITE);
     DrawSaveButton(GetMovePanelControl(16, 492, 116, 24), saveState);
     DrawRevertButton(GetMovePanelControl(144, 492, 116, 24));
     /* 補間一覧は最後に描画し、背後の設定表示に隠れないようにする。 */
@@ -2934,16 +3319,16 @@ static void DrawWaitFunctionEditor(const RpgInspectWait *wait, EditorSaveState s
     int x = (int)movePanelBounds.x, y = (int)movePanelBounds.y;
     DrawRectangleRec(movePanelBounds, Fade(RAYWHITE, 0.96f));
     DrawRectangleLinesEx(movePanelBounds, 2.0f, DARKGREEN);
-    DrawText("Wait Function", x + 16, y + 16, 21, DARKGREEN);
+    DrawSettingsText("待機機能", x + 16, y + 16, 21, BLACK);
     DrawRectangleRec(GetMovePanelControl(250, 10, 20, 20), MAROON);
     DrawText("x", x + 255, y + 12, 16, RAYWHITE);
-    DrawText("Wait duration", x + 16, y + 70, 18, DARKGRAY);
+    DrawSettingsText("待機時間", x + 16, y + 70, 18, BLACK);
     DrawRectangleRec(GetMovePanelControl(16, 98, 42, 30), MAROON);
     DrawText("-", x + 31, y + 102, 22, RAYWHITE);
-    DrawText(TextFormat("%.1f sec", wait->duration), x + 76, y + 104, 21, isDirty ? MAROON : DARKBLUE);
+    DrawSettingsText(TextFormat("%.1f秒", wait->duration), x + 76, y + 104, 21, isDirty ? MAROON : BLACK);
     DrawRectangleRec(GetMovePanelControl(186, 98, 42, 30), DARKGREEN);
     DrawText("+", x + 199, y + 102, 22, RAYWHITE);
-    DrawText("The next function begins after this wait.", x + 16, y + 150, 14, DARKGRAY);
+    DrawSettingsText("待機が終わると次の機能を開始します。", x + 16, y + 150, 14, BLACK);
     DrawSaveButton(GetMovePanelControl(16, 492, 116, 24), saveState);
     DrawRevertButton(GetMovePanelControl(144, 492, 116, 24));
 }
@@ -2956,20 +3341,20 @@ static void DrawLayerChangeFunctionEditor(const RpgInspectLayerChange *change, c
     int imageIndex = RpgImageObjects_FindById(&stage->imageObjects, change->targetImageObjectId);
     DrawRectangleRec(movePanelBounds, Fade(RAYWHITE, 0.96f));
     DrawRectangleLinesEx(movePanelBounds, 2.0f, MAROON);
-    DrawText("Change Draw Layer", x + 16, y + 16, 21, MAROON);
+    DrawSettingsText("描画レイヤー変更", x + 16, y + 16, 21, BLACK);
     DrawRectangleRec(GetMovePanelControl(250, 10, 20, 20), MAROON);
     DrawText("x", x + 255, y + 12, 16, RAYWHITE);
-    DrawText("Target image", x + 16, y + 66, 17, DARKGRAY);
+    DrawSettingsText("対象画像", x + 16, y + 66, 17, BLACK);
     DrawRectangleRec(GetMovePanelControl(16, 90, 244, 28), isDirty ? MAROON : DARKBLUE);
-    DrawText(imageIndex >= 0 ? "Select another image" : "Select image object", x + 56, y + 96, 16, RAYWHITE);
-    DrawText("New layer", x + 16, y + 146, 17, DARKGRAY);
+    DrawSettingsText(imageIndex >= 0 ? "別の画像を選択" : "画像オブジェクトを選択", x + 56, y + 96, 16, RAYWHITE);
+    DrawSettingsText("新しいレイヤー", x + 16, y + 146, 17, BLACK);
     for (int layer = 0; layer < 3; layer++) {
         Rectangle button = GetMovePanelControl(16, 174 + layer * 34, 244, 28);
         DrawRectangleRec(button, layer == change->layer ? MAROON : DARKBLUE);
         DrawText(layerNames[layer], x + 30, (int)button.y + 6, 16, RAYWHITE);
     }
-    DrawText(isPicking ? "Click the topmost image object" : "Layer changes immediately in the Function sequence.",
-             x + 16, y + 292, 14, DARKGRAY);
+    DrawSettingsText(isPicking ? "一番手前の画像オブジェクトをクリック" : "機能の順番で直ちにレイヤーを変更します。",
+                     x + 16, y + 292, 14, BLACK);
     DrawSaveButton(GetMovePanelControl(16, 492, 116, 24), saveState);
     DrawRevertButton(GetMovePanelControl(144, 492, 116, 24));
 }
@@ -3005,11 +3390,11 @@ static void DrawItemInspector(const RpgItems *items, const RpgItems *savedItems,
                          item->position.x != savedItems->entries[selectedItemIndex].position.x ||
                          item->position.y != savedItems->entries[selectedItemIndex].position.y ||
                          strcmp(item->name, savedItems->entries[selectedItemIndex].name) != 0;
-    Color itemTextColor = isItemUnsaved ? MAROON : DARKBLUE;
-    DrawInspectorFrame((Rectangle){ 700, 80, 220, 150 }, "Item Inspector", GOLD, GetInspectorCloseButton(4));
-    DrawText("Name", 716, 122, 16, isItemUnsaved ? MAROON : DARKGRAY);
-    DrawRectangle(716, 144, 188, 28, isNameEditing ? Fade(SKYBLUE, 0.55f) : Fade(LIGHTGRAY, 0.65f));
-    DrawRectangleLines(716, 144, 188, 28, isItemUnsaved ? MAROON : (isNameEditing ? PURPLE : GRAY));
+    Color itemTextColor = isItemUnsaved ? MAROON : BLACK;
+    DrawInspectorFrame((Rectangle){ 700, 80, 220, 150 }, "アイテム設定", GOLD, GetInspectorCloseButton(4));
+    DrawSettingsText("名前", 716, 122, 16, isItemUnsaved ? MAROON : BLACK);
+    DrawRectangle(716, 144, 188, 28, Fade(LIGHTGRAY, 0.65f));
+    DrawRectangleLines(716, 144, 188, 28, isItemUnsaved ? MAROON : (isNameEditing ? BLUE : GRAY));
     if (isNameEditing && selectionAnchor != selectionEnd) {
         int start = selectionAnchor < selectionEnd ? selectionAnchor : selectionEnd;
         int end = selectionAnchor < selectionEnd ? selectionEnd : selectionAnchor;
@@ -3021,7 +3406,8 @@ static void DrawItemInspector(const RpgItems *items, const RpgItems *savedItems,
         float width = GameFont_MeasureText(selectedText, 17.0f).x;
         DrawRectangle((int)startX, 148, (int)width + 1, 19, Fade(SKYBLUE, 0.7f));
     }
-    GameFont_Draw(item->name, 724, 149, 17, itemTextColor);
+    GameFont_Draw(item->name, 724, 149, 17,
+                  IsInspectorTextContext() ? BLACK : itemTextColor);
     if (isNameEditing) {
         char prefix[RPG_ITEM_NAME_LENGTH];
         memcpy(prefix, item->name, (size_t)cursorIndex);
@@ -3029,8 +3415,97 @@ static void DrawItemInspector(const RpgItems *items, const RpgItems *savedItems,
         int cursorX = 724 + (int)GameFont_MeasureText(prefix, 17.0f).x;
         DrawTextCaret(cursorX, 147, 22);
     }
-    DrawText(isItemUnsaved ? "Unsaved - Save all: S" : "Save all: S", 716, 188, 16,
-             isItemUnsaved ? MAROON : DARKGRAY);
+    DrawSettingsText(isItemUnsaved ? "未保存 - Sキーで全て保存" : "Sキーで全て保存", 716, 188, 16,
+                     isItemUnsaved ? MAROON : BLACK);
+}
+
+static void DrawConveyorInspector(int wireIndex, float previewRemaining)
+{
+    Rectangle bounds = GetInspectorBounds(RPG_EDITOR_CONVEYOR_INSPECTOR);
+    DrawInspectorFrame(bounds, "コンベア設定", GOLD,
+                       GetInspectorCloseButton(RPG_EDITOR_CONVEYOR_INSPECTOR));
+    if (wireIndex < 0 || wireIndex >= wires.count || !RpgWires_IsConveyor(&wires.entries[wireIndex])) {
+        DrawSettingsText("コンベアの終点を選択", 716, 132, 15, BLACK);
+        return;
+    }
+    const RpgWire *conveyor = &wires.entries[wireIndex];
+    DrawSettingsText(TextFormat("軌道ブロック: %d", conveyor->path.cellCount), 716, 126, 16, BLACK);
+    DrawSettingsText("回転速度", 716, 158, 16, BLACK);
+    DrawRectangle(716, 182, 42, 26, DARKGRAY);
+    DrawRectangle(764, 182, 92, 26, Fade(GOLD, 0.80f));
+    DrawRectangle(862, 182, 42, 26, DARKGRAY);
+    DrawText("-", 731, 186, 20, RAYWHITE);
+    DrawSettingsText(TextFormat("%.0f px/秒", conveyor->conveyorSpeed), 774, 188, 15, BLACK);
+    DrawText("+", 878, 186, 20, RAYWHITE);
+    DrawSettingsText("方向", 716, 222, 16, BLACK);
+    DrawRectangle(716, 246, 188, 26, conveyor->conveyorDirection >= 0 ? DARKBLUE : MAROON);
+    DrawSettingsText(conveyor->conveyorDirection >= 0 ? "軌道に沿って正方向" : "軌道に沿って逆方向",
+                     735, 252, 13, RAYWHITE);
+    DrawSettingsText("外側の床・壁", 716, 282, 16, BLACK);
+    DrawRectangle(716, 306, 188, 26, conveyor->conveyorHasFloor ? DARKGREEN : DARKGRAY);
+    DrawSettingsText(conveyor->conveyorHasFloor ? "有効" : "無効", 774, 312, 16, RAYWHITE);
+    DrawSettingsText("最小滑落角", 716, 342, 16, BLACK);
+    DrawRectangle(716, 366, 42, 26, DARKGRAY);
+    DrawRectangle(764, 366, 92, 26, Fade(GOLD, 0.80f));
+    DrawRectangle(862, 366, 42, 26, DARKGRAY);
+    DrawText("-", 731, 370, 20, RAYWHITE);
+    DrawSettingsText(TextFormat("%.0f度", conveyor->conveyorSlideAngleDegrees), 779, 372, 15, BLACK);
+    DrawText("+", 878, 370, 20, RAYWHITE);
+    DrawRectangle(716, 406, 188, 26, previewRemaining > 0.0f ? MAROON : DARKGREEN);
+    DrawSettingsText(previewRemaining > 0.0f ? TextFormat("プレビュー %.1f秒", previewRemaining) : "3秒プレビュー",
+                     746, 412, 15, RAYWHITE);
+}
+
+/* パレットはエディター専用の表示設定として、ブロック選択UIから独立した
+ * インスペクターで編集する。ブロック種別配列そのものは今回変更しない。 */
+static void DrawPaletteInspector(int paletteIndex, bool isNameEditing, int nameCursorIndex,
+                                 int nameSelectionAnchor, int nameSelectionEnd)
+{
+    const RpgBlockInventory *inventory = RpgBlockInventory_Get(paletteIndex);
+    static const char *const colorLabels[RPG_BLOCK_INVENTORY_BORDER_COLOR_COUNT] =
+        { "白", "赤", "青", "黄" };
+    DrawInspectorFrame(GetInspectorBounds(RPG_EDITOR_PALETTE_INSPECTOR), "パレット設定",
+                       GetBlockInventoryBorderColor(inventory->borderColor),
+                       GetInspectorCloseButton(RPG_EDITOR_PALETTE_INSPECTOR));
+    DrawSettingsText(TextFormat("パレット %d", paletteIndex + 1), 716.0f, 120.0f, 16.0f, BLACK);
+    DrawSettingsText("名前", 716.0f, 142.0f, 16.0f, BLACK);
+    Rectangle nameBounds = { 716.0f, 162.0f, 188.0f, 28.0f };
+    DrawRectangleRec(nameBounds, Fade(RAYWHITE, 0.90f));
+    DrawRectangleLinesEx(nameBounds, isNameEditing ? 2.0f : 1.0f,
+                         isNameEditing ? BLUE : GetBlockInventoryBorderColor(inventory->borderColor));
+    if (isNameEditing && nameSelectionAnchor != nameSelectionEnd) {
+        int start = nameSelectionAnchor < nameSelectionEnd ? nameSelectionAnchor : nameSelectionEnd;
+        int end = nameSelectionAnchor < nameSelectionEnd ? nameSelectionEnd : nameSelectionAnchor;
+        char prefix[RPG_BLOCK_INVENTORY_NAME_LENGTH];
+        memcpy(prefix, inventory->name, (size_t)start);
+        prefix[start] = '\0';
+        float startX = nameBounds.x + 8.0f + GameFont_MeasureText(prefix, 15.0f).x;
+        memcpy(prefix, inventory->name, (size_t)end);
+        prefix[end] = '\0';
+        float endX = nameBounds.x + 8.0f + GameFont_MeasureText(prefix, 15.0f).x;
+        DrawRectangleRec((Rectangle){ startX, nameBounds.y + 4.0f, endX - startX, 20.0f },
+                         Fade(SKYBLUE, 0.65f));
+    }
+    GameFont_DrawPreset(RPG_TEXT_PRESET_UI, inventory->name, nameBounds.x + 8.0f, nameBounds.y + 6.0f,
+                        GameFont_GetPresetScale(RPG_TEXT_PRESET_UI, 15.0f));
+    if (isNameEditing) {
+        char prefix[RPG_BLOCK_INVENTORY_NAME_LENGTH];
+        int safeCursor = Clamp(nameCursorIndex, 0, (int)strlen(inventory->name));
+        memcpy(prefix, inventory->name, (size_t)safeCursor);
+        prefix[safeCursor] = '\0';
+        DrawTextCaret((int)(nameBounds.x + 8.0f + GameFont_MeasureText(prefix, 15.0f).x),
+                      (int)nameBounds.y + 4, 20);
+    }
+    DrawSettingsText("囲い色", 716.0f, 202.0f, 16.0f, BLACK);
+    for (int colorIndex = 0; colorIndex < RPG_BLOCK_INVENTORY_BORDER_COLOR_COUNT; colorIndex++) {
+        RpgBlockInventoryBorderColor color = (RpgBlockInventoryBorderColor)colorIndex;
+        Rectangle colorBounds = { 716.0f + colorIndex * 47.0f, 224.0f, 43.0f, 26.0f };
+        DrawRectangleRec(colorBounds, GetBlockInventoryBorderColor(color));
+        DrawRectangleLinesEx(colorBounds, inventory->borderColor == color ? 3.0f : 1.0f,
+                             inventory->borderColor == color ? BLACK : GRAY);
+        DrawSettingsText(colorLabels[colorIndex], colorBounds.x + 13.0f, colorBounds.y + 5.0f,
+                         14.0f, BLACK);
+    }
 }
 
 static const char *GetReferenceLeafName(const char *path)
@@ -3041,22 +3516,245 @@ static const char *GetReferenceLeafName(const char *path)
     return slash != NULL && slash + 1 > leaf ? slash + 1 : leaf;
 }
 
+/* Legacy objects predate sourcePath.  They have only a working build path, so
+ * use this as a read-only fallback until the author selects a source again. */
+static const char *GetReferenceRelativeDisplayPath(const char *path)
+{
+    const char *referenceFiles = path == NULL ? NULL : strstr(path, "\\reference_files\\");
+    const char *folderDefinitions = path == NULL ? NULL : strstr(path, "\\folder_defs\\");
+    if (referenceFiles != NULL) return referenceFiles + 1;
+    if (folderDefinitions != NULL) return folderDefinitions + 1;
+    if (path != NULL && ((path[0] != '\0' && path[1] == ':') ||
+                         (path[0] == '\\' && path[1] == '\\')))
+        return GetReferenceLeafName(path);
+    return path != NULL ? path : "";
+}
+
+/* Every inspector uses the same picker model: the caller owns the base
+ * directory/filter/title, while this shared view owns the surrounding UI. */
+typedef struct RpgEditorFilePickerLayout {
+    float baseY;
+    Rectangle valueBounds;
+    Rectangle selectBounds;
+    float contentBottom;
+} RpgEditorFilePickerLayout;
+
+/* Folder の名前欄と操作ボタンは、描画と入力判定で必ず同じ矩形を使う。
+ * ファイル用ピッカーが可変高になっても Folder の操作領域へ影響しない。 */
+typedef struct RpgEditorFolderInspectorLayout {
+    Rectangle nameBounds;
+    Rectangle openBounds;
+    Rectangle renameBounds;
+    float statusY;
+} RpgEditorFolderInspectorLayout;
+
+static RpgEditorFolderInspectorLayout GetFolderInspectorLayout(void)
+{
+    return (RpgEditorFolderInspectorLayout){
+        .nameBounds = { 716.0f, 144.0f, 188.0f, 28.0f },
+        .openBounds = { 716.0f, 180.0f, 188.0f, 28.0f },
+        .renameBounds = { 716.0f, 214.0f, 188.0f, 28.0f },
+        .statusY = 258.0f
+    };
+}
+
+/* 文字と操作ボタンを同じ行で奪い合わない共通行。長い説明はlabelBoundsの
+   中だけを使い、操作は常にその下のactionBoundsへ置く。 */
+typedef struct RpgEditorInspectorActionRow {
+    Rectangle labelBounds;
+    Rectangle actionBounds;
+    float contentBottom;
+} RpgEditorInspectorActionRow;
+
+static RpgEditorInspectorActionRow MakeInspectorActionRow(float x, float y, float width,
+                                                           float actionHeight)
+{
+    const float labelHeight = 18.0f;
+    const float rowGap = 6.0f;
+    RpgEditorInspectorActionRow row = {
+        { x, y, width, labelHeight },
+        { x, y + labelHeight + rowGap, width, actionHeight },
+        y + labelHeight + rowGap + actionHeight
+    };
+    return row;
+}
+
+static int GetUtf8CharacterSize(unsigned char leadingByte)
+{
+    if ((leadingByte & 0x80u) == 0) return 1;
+    if ((leadingByte & 0xe0u) == 0xc0u) return 2;
+    if ((leadingByte & 0xf0u) == 0xe0u) return 3;
+    if ((leadingByte & 0xf8u) == 0xf0u) return 4;
+    return 1;
+}
+
+static int GetInspectorWrappedLineCount(const char *text, float fontSize, float availableWidth)
+{
+    if (text == NULL || text[0] == '\0') return 1;
+    if (availableWidth <= 1.0f) return 1;
+    char line[RPG_STAGE_REFERENCE_PATH_LENGTH] = { 0 };
+    int lineLength = 0;
+    int lineCount = 1;
+    for (int index = 0; text[index] != '\0'; ) {
+        int charSize = GetUtf8CharacterSize((unsigned char)text[index]);
+        if (charSize > (int)sizeof(line) - lineLength - 1) charSize = 1;
+        memcpy(line + lineLength, text + index, (size_t)charSize);
+        line[lineLength + charSize] = '\0';
+        if (lineLength > 0 && GameFont_MeasureText(line, fontSize).x > availableWidth) {
+            lineCount++;
+            lineLength = 0;
+            memcpy(line, text + index, (size_t)charSize);
+            line[charSize] = '\0';
+            lineLength = charSize;
+        } else lineLength += charSize;
+        index += charSize;
+    }
+    return lineCount;
+}
+
+static void DrawInspectorWrappedText(const char *text, Rectangle bounds, float fontSize, Color color)
+{
+    if (text == NULL || text[0] == '\0') return;
+    const float lineHeight = fontSize + 3.0f;
+    const float availableWidth = fmaxf(1.0f, bounds.width);
+    char line[RPG_STAGE_REFERENCE_PATH_LENGTH] = { 0 };
+    int lineLength = 0;
+    float y = bounds.y;
+    for (int index = 0; ; ) {
+        bool atEnd = text[index] == '\0';
+        int charSize = atEnd ? 0 : GetUtf8CharacterSize((unsigned char)text[index]);
+        if (!atEnd && charSize > (int)sizeof(line) - lineLength - 1) charSize = 1;
+        if (!atEnd) {
+            memcpy(line + lineLength, text + index, (size_t)charSize);
+            line[lineLength + charSize] = '\0';
+        }
+        if (atEnd || (lineLength > 0 && GameFont_MeasureText(line, fontSize).x > availableWidth)) {
+            if (!atEnd && lineLength > 0) {
+                line[lineLength] = '\0';
+                GameFont_Draw(line, bounds.x, y, fontSize, color);
+                y += lineHeight;
+                lineLength = 0;
+                continue;
+            }
+            if (lineLength > 0) GameFont_Draw(line, bounds.x, y, fontSize, color);
+            break;
+        }
+        lineLength += charSize;
+        index += charSize;
+    }
+}
+
+/* 呼び出し側は最小の入力欄だけ指定する。実際のパス表示量から欄高と
+   選択ボタンの位置を決めるので、長い相対パスが後続UIへ重ならない。 */
+static RpgEditorFilePickerLayout ResolveInspectorFilePickerLayout(
+    const RpgEditorFilePickerLayout *requested, const char *displayText)
+{
+    RpgEditorFilePickerLayout resolved = *requested;
+    float innerWidth = fmaxf(1.0f, requested->valueBounds.width - 16.0f);
+    int lines = GetInspectorWrappedLineCount(displayText, 14.0f, innerWidth);
+    float textHeight = 12.0f + (float)lines * 17.0f;
+    float selectGap = requested->selectBounds.y -
+                      (requested->valueBounds.y + requested->valueBounds.height);
+    if (selectGap < 2.0f) selectGap = 8.0f;
+    resolved.valueBounds.height = fmaxf(requested->valueBounds.height, textHeight);
+    resolved.selectBounds.y = resolved.valueBounds.y + resolved.valueBounds.height + selectGap;
+    resolved.contentBottom = resolved.selectBounds.y + resolved.selectBounds.height;
+    return resolved;
+}
+
+static RpgEditorFilePickerLayout GetImageInspectorFilePickerLayout(const RpgImageObject *object)
+{
+    RpgEditorFilePickerLayout requested = { 122.0f, { 716.0f, 140.0f, 188.0f, 26.0f },
+                                             { 716.0f, 174.0f, 188.0f, 28.0f }, 0.0f };
+    return ResolveInspectorFilePickerLayout(&requested,
+                                            object != NULL ? object->path : "PNG未選択");
+}
+
+static float GetImageInspectorControlsTop(const RpgImageObject *object)
+{
+    return GetImageInspectorFilePickerLayout(object).contentBottom + 10.0f;
+}
+
+static RpgEditorFilePickerLayout GetKeyDoorFilePickerLayout(const RpgKeyDoor *door)
+{
+    RpgEditorFilePickerLayout requested = { 148.0f, { 716.0f, 198.0f, 188.0f, 22.0f },
+                                             { 716.0f, 166.0f, 188.0f, 26.0f }, 0.0f };
+    return ResolveInspectorFilePickerLayout(&requested,
+                                            door != NULL ? door->keyPath : "鍵ファイル未選択");
+}
+
+static FileDialogRequest MakeSpriteFileDialogRequest(const char *title)
+{
+    return (FileDialogRequest){ TextFormat("%s../assets/Sprite", GetApplicationDirectory()),
+                                FILE_DIALOG_FILTER_PNG, title, "assets/Sprite" };
+}
+
+static FileDialogRequest MakeFilesFileDialogRequest(const char *title)
+{
+    return (FileDialogRequest){ TextFormat("%s../assets/Files", GetApplicationDirectory()),
+                                FILE_DIALOG_FILTER_ALL_FILES, title, "assets/Files" };
+}
+
+static RpgEditorFilePickerLayout DrawInspectorFilePicker(const FileDialogRequest *request,
+                                                         const RpgEditorFilePickerLayout *requestedLayout,
+                                                         const char *relativePath, const char *emptyText,
+                                                         const char *selectText, bool isUnsaved, bool isEditing)
+{
+    const char *displayText = relativePath != NULL && relativePath[0] != '\0' ? relativePath : emptyText;
+    RpgEditorFilePickerLayout layout = ResolveInspectorFilePickerLayout(requestedLayout, displayText);
+    Color fieldColor = Fade(LIGHTGRAY, 0.65f);
+    Color borderColor = isUnsaved ? MAROON : (isEditing ? BLUE : GRAY);
+    const char *baseLabel = request != NULL && request->baseLabel != NULL ? request->baseLabel : "";
+    DrawSettingsText(TextFormat("基底: %s", baseLabel), layout.valueBounds.x,
+                     layout.baseY, 11.0f, DARKGRAY);
+    DrawRectangleRec(layout.valueBounds, fieldColor);
+    DrawRectangleLinesEx(layout.valueBounds, 1.0f, borderColor);
+    DrawInspectorWrappedText(displayText,
+                             (Rectangle){ layout.valueBounds.x + 8.0f, layout.valueBounds.y + 6.0f,
+                                          layout.valueBounds.width - 16.0f, layout.valueBounds.height - 10.0f },
+                             14.0f, IsInspectorTextContext() ? BLACK :
+                             (relativePath != NULL && relativePath[0] != '\0' ? (isUnsaved ? MAROON : BLACK) : GRAY));
+    DrawRectangleRec(layout.selectBounds, DARKBLUE);
+    Vector2 labelSize = GameFont_MeasureText(selectText, 15.0f);
+    DrawSettingsText(selectText, layout.selectBounds.x + (layout.selectBounds.width - labelSize.x) * 0.5f,
+                     layout.selectBounds.y + 5.0f, 15.0f, RAYWHITE);
+    return layout;
+}
+
 // FILE.pngとFolderの参照先を、同じインスペクター表示・テキスト入力方式で編集する。
-static void DrawReferenceInspector(const RpgStage *stage, const RpgStage *savedStage, int row, int column,
+static void DrawReferenceInspector(const RpgStage *stage, const RpgStage *savedStage, int referenceIndex,
                                    bool isPathEditing, int cursorIndex, int selectionAnchor, int selectionEnd,
                                    const char *folderName)
 {
-    if (row < 0 || row >= RPG_STAGE_ROWS || column < 0 || column >= RPG_STAGE_WORLD_COLUMNS ||
-        !RpgBlockInventory_IsReferenceObject(stage->blocks[row][column])) return;
-    const char *path = RpgStage_GetReferencePathAtCell(stage, row, column);
-    bool isFolder = RpgBlockInventory_IsReferenceFolder(stage->blocks[row][column]);
-    const char *displayText = isFolder ? folderName : path;
-    bool isUnsaved = strcmp(path, RpgStage_GetReferencePathAtCell(savedStage, row, column)) != 0;
-    DrawInspectorFrame(referenceInspectorBounds, isFolder ? "Folder Inspector" : "File Inspector",
+    if (stage == NULL || referenceIndex < 0 || referenceIndex >= stage->referenceObjects.count) return;
+    const RpgReferenceObject *object = &stage->referenceObjects.entries[referenceIndex];
+    int savedIndex = -1;
+    for (int index = 0; index < savedStage->referenceObjects.count; index++)
+        if (savedStage->referenceObjects.entries[index].id == object->id) { savedIndex = index; break; }
+    const char *path = object->path;
+    bool isFolder = object->objectKind == RPG_REFERENCE_OBJECT_FOLDER;
+    const char *displayText = isFolder ? folderName :
+                              (object->sourcePath[0] != '\0' ? object->sourcePath :
+                               GetReferenceRelativeDisplayPath(path));
+    RpgEditorFolderInspectorLayout folderLayout = GetFolderInspectorLayout();
+    bool isUnsaved = savedIndex < 0 ||
+                     memcmp(object, &savedStage->referenceObjects.entries[savedIndex], sizeof(*object)) != 0;
+    FileDialogRequest fileRequest = MakeFilesFileDialogRequest("ファイルを選択");
+    RpgEditorFilePickerLayout filePicker = { 142.0f, { 716.0f, 156.0f, 188.0f, 28.0f },
+                                              { 716.0f, 192.0f, 188.0f, 28.0f } };
+    DrawInspectorFrame(referenceInspectorBounds, isFolder ? "フォルダー設定" : "ファイル設定",
                        DARKBLUE, GetInspectorCloseButton(7));
-    DrawText(isFolder ? "Folder name" : "File", 716, 122, 16, isUnsaved ? MAROON : DARKGRAY);
-    DrawRectangle(716, 144, 188, 28, isPathEditing ? Fade(SKYBLUE, 0.55f) : Fade(LIGHTGRAY, 0.65f));
-    DrawRectangleLines(716, 144, 188, 28, isUnsaved ? MAROON : (isPathEditing ? PURPLE : GRAY));
+    DrawSettingsText(isFolder ? "フォルダー名" : "ファイル", 716, 122, 16, isUnsaved ? MAROON : BLACK);
+    if (!isFolder)
+        filePicker = DrawInspectorFilePicker(&fileRequest, &filePicker, displayText, "パスを指定", "ファイルを選択",
+                                             isUnsaved, isPathEditing);
+    else {
+        DrawRectangleRec(folderLayout.nameBounds, Fade(LIGHTGRAY, 0.65f));
+        DrawRectangleLinesEx(folderLayout.nameBounds, 1.0f,
+                             isUnsaved ? MAROON : (isPathEditing ? BLUE : GRAY));
+    }
+    float pathTextY = isFolder ? 150.0f : 162.0f;
+    float pathCaretY = isFolder ? 147.0f : 159.0f;
     if (isPathEditing && selectionAnchor != selectionEnd) {
         int start = selectionAnchor < selectionEnd ? selectionAnchor : selectionEnd;
         int end = selectionAnchor < selectionEnd ? selectionEnd : selectionAnchor;
@@ -3065,24 +3763,32 @@ static void DrawReferenceInspector(const RpgStage *stage, const RpgStage *savedS
         memcpy(prefix, displayText, (size_t)start); prefix[start] = '\0';
         memcpy(selectedText, displayText + start, (size_t)(end - start)); selectedText[end - start] = '\0';
         float startX = 724.0f + GameFont_MeasureText(prefix, 15.0f).x;
-        DrawRectangle((int)startX, 149, (int)GameFont_MeasureText(selectedText, 15.0f).x + 1, 17,
+        DrawRectangle((int)startX, (int)pathTextY - 1,
+                      (int)GameFont_MeasureText(selectedText, 15.0f).x + 1, 17,
                       Fade(SKYBLUE, 0.7f));
     }
-    GameFont_Draw(displayText[0] != '\0' ? displayText : (isFolder ? "Folder" : "Click to set a path"), 724, 150, 15,
-                  displayText[0] != '\0' ? (isUnsaved ? MAROON : DARKBLUE) : GRAY);
+    if (isFolder || isPathEditing)
+        GameFont_Draw(displayText[0] != '\0' ? displayText : (isFolder ? "フォルダー" : "パスを指定"), 724, pathTextY, 15,
+                      IsInspectorTextContext() ? BLACK :
+                      (displayText[0] != '\0' ? (isUnsaved ? MAROON : BLACK) : GRAY));
     if (isPathEditing) {
         char prefix[RPG_STAGE_REFERENCE_PATH_LENGTH];
         memcpy(prefix, displayText, (size_t)cursorIndex); prefix[cursorIndex] = '\0';
-        DrawTextCaret(724 + (int)GameFont_MeasureText(prefix, 15.0f).x, 147, 22);
+        DrawTextCaret(724 + (int)GameFont_MeasureText(prefix, 15.0f).x, (int)pathCaretY, 22);
     }
-    DrawRectangle(716, 180, 188, 28, DARKBLUE);
-    DrawText(isFolder ? "Open folder" : "Select file", isFolder ? 765 : 764, 186, 16, RAYWHITE);
     if (isFolder) {
-        DrawRectangle(716, 214, 188, 28, DARKGREEN);
-        DrawText("Rename folder", 758, 220, 16, RAYWHITE);
+        DrawRectangleRec(folderLayout.openBounds, DARKBLUE);
+        DrawSettingsText("フォルダーを開く", folderLayout.openBounds.x + 26.0f,
+                         folderLayout.openBounds.y + 6.0f, 14, RAYWHITE);
     }
-    DrawText(isUnsaved ? "Unsaved - Save all: S" : "Save all: S", 716, isFolder ? 258 : 222, 16,
-             isUnsaved ? MAROON : DARKGRAY);
+    if (isFolder) {
+        DrawRectangleRec(folderLayout.renameBounds, DARKGREEN);
+        DrawSettingsText("フォルダー名を変更", folderLayout.renameBounds.x + 22.0f,
+                         folderLayout.renameBounds.y + 6.0f, 14, RAYWHITE);
+    }
+    DrawSettingsText(isUnsaved ? "未保存 - Sキーで全て保存" : "Sキーで全て保存", 716,
+                     isFolder ? folderLayout.statusY : filePicker.contentBottom + 10.0f, 16,
+                     isUnsaved ? MAROON : BLACK);
 }
 
 /* PNG見た目専用の画像オブジェクトを、Folderとは別のInspectorで編集する。 */
@@ -3093,35 +3799,35 @@ static void DrawImageObjectInspector(const RpgStage *stage, const RpgStage *save
     int savedIndex = RpgImageObjects_FindById(&savedStage->imageObjects, object->id);
     bool isUnsaved = savedIndex < 0 || memcmp(object, &savedStage->imageObjects.entries[savedIndex],
                                                sizeof(*object)) != 0;
-    DrawInspectorFrame(referenceInspectorBounds, "Image Object Inspector", DARKPURPLE,
+    FileDialogRequest imageRequest = MakeSpriteFileDialogRequest("画像PNGを選択");
+    RpgEditorFilePickerLayout imagePicker = GetImageInspectorFilePickerLayout(object);
+    DrawInspectorFrame(referenceInspectorBounds, "画像オブジェクト設定", DARKPURPLE,
                        GetInspectorCloseButton(RPG_EDITOR_IMAGE_INSPECTOR));
-    DrawText("PNG", 716, 122, 16, isUnsaved ? MAROON : DARKGRAY);
-    GameFont_Draw(GetReferenceLeafName(object->path[0] != '\0' ? object->path : "No PNG selected"),
-                  716, 146, 14, object->path[0] != '\0' ? DARKBLUE : GRAY);
-    DrawRectangle(716, 174, 188, 28, DARKBLUE);
-    DrawText("Select PNG", 766, 180, 16, RAYWHITE);
-    DrawText("Scale", 716, 220, 16, isUnsaved ? MAROON : DARKGRAY);
-    DrawRectangle(816, 212, 32, 26, MAROON);
-    DrawText("-", 827, 213, 20, RAYWHITE);
-    DrawRectangle(854, 212, 50, 26, DARKGREEN);
-    DrawText(TextFormat("%.2fx", object->scale), 858, 218, 14, RAYWHITE);
-    DrawText("Draw layer", 716, 246, 16, isUnsaved ? MAROON : DARKGRAY);
-    DrawRectangle(716, 268, 60, 28, object->layer == RPG_IMAGE_OBJECT_LAYER_BACK ? DARKPURPLE : GRAY);
-    DrawText("Back", 727, 274, 14, RAYWHITE);
-    DrawRectangle(780, 268, 60, 28,
+    imagePicker = DrawInspectorFilePicker(&imageRequest, &imagePicker, object->path, "PNG未選択", "PNGを選択",
+                                           isUnsaved, false);
+    float controlsY = imagePicker.contentBottom + 10.0f;
+    DrawSettingsText("拡大率", 716, controlsY + 8.0f, 16, isUnsaved ? MAROON : BLACK);
+    DrawRectangle(816, (int)controlsY, 32, 26, MAROON);
+    DrawText("-", 827, (int)controlsY + 1, 20, RAYWHITE);
+    DrawRectangle(854, (int)controlsY, 50, 26, DARKGREEN);
+    DrawSettingsText(TextFormat("%.2fx", object->scale), 858, controlsY + 6.0f, 14, RAYWHITE);
+    DrawSettingsText("描画レイヤー", 716, controlsY + 34.0f, 16, isUnsaved ? MAROON : BLACK);
+    DrawRectangle(716, (int)controlsY + 56, 60, 28, object->layer == RPG_IMAGE_OBJECT_LAYER_BACK ? DARKPURPLE : GRAY);
+    DrawSettingsText("背景", 727, controlsY + 62.0f, 14, RAYWHITE);
+    DrawRectangle(780, (int)controlsY + 56, 60, 28,
                   object->layer == RPG_IMAGE_OBJECT_LAYER_BLOCK_FRONT_CHARACTER_BACK ? DARKPURPLE : GRAY);
-    DrawText("Middle", 782, 274, 13, RAYWHITE);
-    DrawRectangle(844, 268, 60, 28, object->layer == RPG_IMAGE_OBJECT_LAYER_FRONT ? DARKPURPLE : GRAY);
-    DrawText("Front", 852, 274, 14, RAYWHITE);
-    DrawText("Appearance", 716, 314, 16, isUnsaved ? MAROON : DARKGRAY);
-    DrawRectangle(716, 336, 58, 26, object->appearance == RPG_IMAGE_OBJECT_APPEARANCE_PNG ? DARKPURPLE : GRAY);
-    DrawText("PNG", 730, 341, 14, RAYWHITE);
-    DrawRectangle(778, 336, 62, 26, object->appearance == RPG_IMAGE_OBJECT_APPEARANCE_SHELL_FOLDER ? DARKPURPLE : GRAY);
-    DrawText("Folder", 782, 341, 13, RAYWHITE);
-    DrawRectangle(844, 336, 60, 26, object->appearance == RPG_IMAGE_OBJECT_APPEARANCE_SHELL_FILE ? DARKPURPLE : GRAY);
-    DrawText("File", 857, 341, 14, RAYWHITE);
-    DrawText(isUnsaved ? "Unsaved - Save all: S" : "Save all: S", 716, 376, 16,
-             isUnsaved ? MAROON : DARKGRAY);
+    DrawSettingsText("中間", 785, controlsY + 62.0f, 13, RAYWHITE);
+    DrawRectangle(844, (int)controlsY + 56, 60, 28, object->layer == RPG_IMAGE_OBJECT_LAYER_FRONT ? DARKPURPLE : GRAY);
+    DrawSettingsText("前景", 852, controlsY + 62.0f, 14, RAYWHITE);
+    DrawSettingsText("見た目", 716, controlsY + 102.0f, 16, isUnsaved ? MAROON : BLACK);
+    DrawRectangle(716, (int)controlsY + 124, 58, 26, object->appearance == RPG_IMAGE_OBJECT_APPEARANCE_PNG ? DARKPURPLE : GRAY);
+    DrawSettingsText("PNG", 730, controlsY + 129.0f, 14, RAYWHITE);
+    DrawRectangle(778, (int)controlsY + 124, 62, 26, object->appearance == RPG_IMAGE_OBJECT_APPEARANCE_SHELL_FOLDER ? DARKPURPLE : GRAY);
+    DrawSettingsText("フォルダー", 780, controlsY + 129.0f, 11, RAYWHITE);
+    DrawRectangle(844, (int)controlsY + 124, 60, 26, object->appearance == RPG_IMAGE_OBJECT_APPEARANCE_SHELL_FILE ? DARKPURPLE : GRAY);
+    DrawSettingsText("ファイル", 849, controlsY + 129.0f, 12, RAYWHITE);
+    DrawSettingsText(isUnsaved ? "未保存 - Sキーで全て保存" : "Sキーで全て保存", 716, controlsY + 164.0f, 16,
+                     isUnsaved ? MAROON : BLACK);
 }
 
 static void DrawDoorInspector(const RpgStage *stage, const RpgStage *savedStage, int row, int column)
@@ -3131,42 +3837,42 @@ static void DrawDoorInspector(const RpgStage *stage, const RpgStage *savedStage,
     bool isOpen = RpgBlockInventory_IsDoorOpen(stage->blocks[row][column]);
     bool isUnsaved = stage->blocks[row][column] != savedStage->blocks[row][column];
     const RpgKeyDoor *keyDoor = RpgStage_GetKeyDoorAtCellConst(stage, row, column);
-    DrawInspectorFrame(doorInspectorBounds, "Door Inspector", BROWN, GetInspectorCloseButton(5));
+    DrawInspectorFrame(doorInspectorBounds, "ドア設定", BROWN, GetInspectorCloseButton(5));
     if (keyDoor != NULL) {
         const RpgKeyDoor *savedDoor = RpgStage_GetKeyDoorAtCellConst(savedStage, row, column);
         bool isKeyUnsaved = savedDoor == NULL || strcmp(keyDoor->keyPath, savedDoor->keyPath) != 0 ||
                             strcmp(keyDoor->failureText, savedDoor->failureText) != 0;
-        const char *keyName = strrchr(keyDoor->keyPath, '\\');
-        if (keyName == NULL) keyName = strrchr(keyDoor->keyPath, '/');
-        keyName = keyName != NULL ? keyName + 1 : keyDoor->keyPath;
-        DrawText(isOpen ? "Key door: Open" : "Key door: Locked", 716, 122, 16,
-                 (isUnsaved || isKeyUnsaved) ? MAROON : DARKGRAY);
-        DrawText("Key file", 716, 148, 14, DARKGRAY);
-        DrawRectangle(716, 166, 188, 26, DARKBLUE);
-        DrawText("Select file", 766, 171, 16, RAYWHITE);
-        DrawText(keyName[0] != '\0' ? keyName : "No key selected", 716, 198, 14,
-                 keyName[0] != '\0' ? DARKBLUE : MAROON);
-        DrawText("Failure text", 716, 220, 14, DARKGRAY);
-        DrawRectangle(716, 238, 188, 30, isKeyDoorFailureEditing ? Fade(SKYBLUE, 0.55f) : Fade(LIGHTGRAY, 0.65f));
-        DrawRectangleLines(716, 238, 188, 30, isKeyDoorFailureEditing ? PURPLE : GRAY);
-        GameFont_Draw(keyDoor->failureText, 722, 245, 15, isKeyUnsaved ? MAROON : DARKBLUE);
+        FileDialogRequest keyRequest = MakeFilesFileDialogRequest("鍵ファイルを選択");
+        RpgEditorFilePickerLayout keyPicker = GetKeyDoorFilePickerLayout(keyDoor);
+        DrawSettingsText(isOpen ? "鍵ドア: 開放" : "鍵ドア: 施錠", 716, 122, 16,
+                         (isUnsaved || isKeyUnsaved) ? MAROON : BLACK);
+        keyPicker = DrawInspectorFilePicker(&keyRequest, &keyPicker, keyDoor->keyPath, "鍵ファイル未選択",
+                                             "ファイルを選択", isUnsaved || isKeyUnsaved, false);
+        float failureLabelY = keyPicker.contentBottom + 12.0f;
+        Rectangle failureBounds = { 716.0f, failureLabelY + 18.0f, 188.0f, 30.0f };
+        DrawSettingsText("失敗時の文章", 716, failureLabelY, 14, BLACK);
+        DrawRectangleRec(failureBounds, Fade(LIGHTGRAY, 0.65f));
+        DrawRectangleLinesEx(failureBounds, 1.0f, isKeyDoorFailureEditing ? BLUE : GRAY);
+        GameFont_Draw(keyDoor->failureText, 722, failureBounds.y + 7.0f, 15,
+                      IsInspectorTextContext() ? BLACK : (isKeyUnsaved ? MAROON : BLACK));
         if (isKeyDoorFailureEditing) {
             char prefix[RPG_KEY_DOOR_FAILURE_TEXT_LENGTH];
             memcpy(prefix, keyDoor->failureText, (size_t)keyDoorFailureCursorIndex);
             prefix[keyDoorFailureCursorIndex] = '\0';
-            DrawTextCaret(722 + (int)GameFont_MeasureText(prefix, 15.0f).x, 242, 20);
+            DrawTextCaret(722 + (int)GameFont_MeasureText(prefix, 15.0f).x, (int)failureBounds.y + 4, 20);
         }
-        DrawText((isUnsaved || isKeyUnsaved) ? "Unsaved - Save all: S" : "Save all: S", 716, 278, 16,
-                 (isUnsaved || isKeyUnsaved) ? MAROON : DARKGRAY);
+        DrawSettingsText((isUnsaved || isKeyUnsaved) ? "未保存 - Sキーで全て保存" : "Sキーで全て保存", 716,
+                         failureBounds.y + failureBounds.height + 10.0f, 16,
+                         (isUnsaved || isKeyUnsaved) ? MAROON : BLACK);
         return;
     }
-    DrawText(isOpen ? "State: Open" : "State: Closed", 716, 122, 17, isUnsaved ? MAROON : DARKGRAY);
+    DrawSettingsText(isOpen ? "状態: 開放" : "状態: 閉鎖", 716, 122, 17, isUnsaved ? MAROON : BLACK);
     DrawRectangle(716, 144, 86, 28, isOpen ? DARKGREEN : GRAY);
-    DrawText("Open", 738, 150, 16, RAYWHITE);
+    DrawSettingsText("開く", 744, 150, 16, RAYWHITE);
     DrawRectangle(818, 144, 86, 28, isOpen ? GRAY : MAROON);
-    DrawText("Close", 836, 150, 16, RAYWHITE);
-    DrawText(isUnsaved ? "Unsaved - Save all: S" : "Save all: S", 716, 188, 16,
-             isUnsaved ? MAROON : DARKGRAY);
+    DrawSettingsText("閉じる", 830, 150, 16, RAYWHITE);
+    DrawSettingsText(isUnsaved ? "未保存 - Sキーで全て保存" : "Sキーで全て保存", 716, 188, 16,
+                     isUnsaved ? MAROON : BLACK);
 }
 
 static void DrawSignalShrinkInspector(int index)
@@ -3177,20 +3883,20 @@ static void DrawSignalShrinkInspector(int index)
                      block->column != savedSignalBlocks.entries[index].column ||
                      block->duration != savedSignalBlocks.entries[index].duration ||
                      block->startsExpanded != savedSignalBlocks.entries[index].startsExpanded;
-    DrawInspectorFrame(doorInspectorBounds, "Signal Shrink Inspector", PURPLE, GetInspectorCloseButton(5));
-    DrawText("Signal switches to the opposite state", 716, 122, 14, isUnsaved ? MAROON : DARKGRAY);
-    DrawText(TextFormat("Duration: %.1fs", block->duration), 716, 150, 16, isUnsaved ? MAROON : DARKGRAY);
+    DrawInspectorFrame(doorInspectorBounds, "信号ブロック設定", PURPLE, GetInspectorCloseButton(5));
+    DrawSettingsText("信号を受けるたび状態を切替", 716, 122, 14, isUnsaved ? MAROON : BLACK);
+    DrawSettingsText(TextFormat("時間: %.1f秒", block->duration), 716, 150, 16, isUnsaved ? MAROON : BLACK);
     DrawRectangle(816, 144, 38, 24, MAROON);
     DrawText("-", 830, 145, 20, RAYWHITE);
     DrawRectangle(864, 144, 38, 24, DARKGREEN);
     DrawText("+", 877, 145, 20, RAYWHITE);
     DrawRectangle(716, 180, 188, 26, block->startsExpanded ? DARKBLUE : DARKPURPLE);
-    DrawText(block->startsExpanded ? "Default: Expanded" : "Default: Shrunk", 752, 185, 16, RAYWHITE);
+    DrawSettingsText(block->startsExpanded ? "初期：展開" : "初期：縮小", 752, 185, 16, RAYWHITE);
     DrawRectangle(716, 212, 188, 26, DARKBLUE);
-    DrawText("Preview signal", 754, 217, 16, RAYWHITE);
-    DrawText("Click: rotate / drag: move", 716, 250, 14, DARKGRAY);
-    DrawText(isUnsaved ? "Unsaved - Save all: S" : "Save all: S", 716, 270, 15,
-             isUnsaved ? MAROON : DARKGRAY);
+    DrawSettingsText("信号をプレビュー", 754, 217, 16, RAYWHITE);
+    DrawSettingsText("クリック：回転 / ドラッグ：移動", 716, 250, 13, BLACK);
+    DrawSettingsText(isUnsaved ? "未保存 - Sキーで全て保存" : "Sキーで全て保存", 716, 270, 15,
+                     isUnsaved ? MAROON : BLACK);
 }
 
 static void DrawAttachmentInspector(int attachmentIndex, bool isPathEditing)
@@ -3202,44 +3908,66 @@ static void DrawAttachmentInspector(int attachmentIndex, bool isPathEditing)
     Rectangle bounds = { 700, 80, 220, 350 };
     bool isButton = attachment->type == RPG_BLOCK_ATTACHMENT_DATA_BUTTON;
     bool isSaveFlag = attachment->type == RPG_BLOCK_ATTACHMENT_SAVE_FLAG;
-    DrawInspectorFrame(bounds, isSaveFlag ? "Save Flag Inspector" :
-                       (isButton ? "Button Inspector" : "Emitter Inspector"), SKYBLUE,
+    bool isBlockSocket = attachment->type == RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET;
+    DrawInspectorFrame(bounds, isSaveFlag ? "旗設定" :
+                       (isButton ? "ボタン設定" :
+                        (isBlockSocket ? "ブロック設置部品" : "射出装置設定")), SKYBLUE,
                        GetInspectorCloseButton(6));
     if (isSaveFlag) {
-        DrawText(TextFormat("Flag ID: %d", attachment->folderId), 716, 122, 16,
-                 isUnsaved ? MAROON : DARKGRAY);
-        DrawText("Start editor play here", 716, 150, 16, DARKGRAY);
+        DrawSettingsText(TextFormat("旗ID: %d", attachment->folderId), 716, 122, 16,
+                         isUnsaved ? MAROON : BLACK);
+        DrawSettingsText("この地点からエディタープレイ", 716, 150, 15, BLACK);
         DrawRectangle(716, 176, 188, 28, DARKGREEN);
         DrawRectangleLinesEx((Rectangle){ 716, 176, 188, 28 }, 1.0f, RAYWHITE);
-        DrawText("Play from this flag", 744, 181, 16, RAYWHITE);
-        DrawText("Zipper: connected", 716, 220, 15, DARKBLUE);
-        DrawText("Stop restores this editor area", 716, 246, 14, DARKGRAY);
-        DrawText(isUnsaved ? "Unsaved - Save all: S" : "Save all: S", 716, 278, 16,
-                 isUnsaved ? MAROON : DARKGRAY);
+        DrawSettingsText("この旗からプレイ", 744, 181, 16, RAYWHITE);
+        DrawSettingsText("ジッパー：接続状態", 716, 220, 15, BLACK);
+        DrawSettingsText("停止するとこのエリアへ戻る", 716, 246, 14, BLACK);
+        DrawSettingsText(isUnsaved ? "未保存 - Sキーで全て保存" : "Sキーで全て保存", 716, 278, 16,
+                         isUnsaved ? MAROON : BLACK);
         return;
     }
     if (isButton) {
-        DrawText("Trigger: radio emitters", 716, 122, 16, isUnsaved ? MAROON : DARKGRAY);
-        DrawText("Attached to block edge", 716, 150, 16, DARKGRAY);
+        DrawSettingsText("対象：射出装置", 716, 122, 16, isUnsaved ? MAROON : BLACK);
+        DrawSettingsText("ブロックの辺に接続", 716, 150, 16, BLACK);
         DrawRectangle(716, 176, 188, 26, DARKBLUE);
-        DrawText("Preview signal", 756, 181, 16, RAYWHITE);
-        DrawText("Run once (preview only)", 716, 214, 14, DARKGRAY);
-        DrawText(isUnsaved ? "Unsaved - Save all: S" : "Save all: S", 716, 240, 16,
-                 isUnsaved ? MAROON : DARKGRAY);
+        DrawSettingsText("信号をプレビュー", 756, 181, 16, RAYWHITE);
+        DrawSettingsText("一度だけ実行（プレビューのみ）", 716, 214, 13, BLACK);
+        DrawSettingsText(isUnsaved ? "未保存 - Sキーで全て保存" : "Sキーで全て保存", 716, 240, 16,
+                         isUnsaved ? MAROON : BLACK);
         return;
     }
-    DrawText("Actual shot: folder based", 716, 122, 15, isUnsaved ? MAROON : DARKGRAY);
-    DrawText("Trigger: Data Button", 716, 150, 16, isUnsaved ? MAROON : DARKGRAY);
-    DrawText(TextFormat("Size / file: %.0fpx (8px step)", attachment->sizePerFile),
-             716, 182, 16, isUnsaved ? MAROON : DARKGRAY);
+    if (isBlockSocket) {
+        DrawSettingsText("上面ブロック設置部品", 716, 122, 16, isUnsaved ? MAROON : BLACK);
+        DrawSettingsText("可動ブロックを真上へ設置", 716, 150, 14, BLACK);
+        DrawSettingsText("信号：ブロック設置（エリア内のみ）", 716, 178, 14, BLACK);
+        DrawSettingsText(TextFormat("右側の光: +%.0f度", attachment->socketRightLightAngle), 716, 212, 15, BLACK);
+        DrawRectangle(716, 232, 42, 24, MAROON);
+        DrawRectangle(772, 232, 42, 24, DARKGREEN);
+        DrawText("-", 731, 235, 20, RAYWHITE);
+        DrawText("+", 789, 235, 20, RAYWHITE);
+        DrawSettingsText(TextFormat("透明度: %.0f%%", attachment->socketLightOpacity * 100.0f), 716, 276, 15, BLACK);
+        DrawRectangle(716, 296, 42, 24, MAROON);
+        DrawText("-", 731, 299, 20, RAYWHITE);
+        DrawRectangle(772, 296, 42, 24, DARKGREEN);
+        DrawText("+", 789, 299, 20, RAYWHITE);
+        DrawSettingsText("左端は対応する負角度を使用", 716, 334, 13, BLACK);
+        DrawSettingsText("設置したブロックは固定されます", 716, 358, 14, BLACK);
+        DrawSettingsText(isUnsaved ? "未保存 - Sキーで全て保存" : "Sキーで全て保存", 716, 388, 16,
+                         isUnsaved ? MAROON : BLACK);
+        return;
+    }
+    DrawSettingsText("実際の弾：フォルダー連動", 716, 122, 15, isUnsaved ? MAROON : BLACK);
+    DrawSettingsText("起動：データボタン", 716, 150, 16, isUnsaved ? MAROON : BLACK);
+    DrawSettingsText(TextFormat("1ファイルの大きさ: %.0fpx（8px刻み）", attachment->sizePerFile),
+                     716, 182, 14, isUnsaved ? MAROON : BLACK);
     DrawRectangle(816, 194, 38, 24, MAROON);
     DrawText("-", 830, 195, 20, RAYWHITE);
     DrawRectangle(864, 194, 38, 24, DARKGREEN);
     DrawText("+", 877, 195, 20, RAYWHITE);
-    DrawRectangle(716, 226, 94, 24, isAttachmentSpeedEditing ? Fade(SKYBLUE, 0.60f) : Fade(LIGHTGRAY, 0.65f));
-    DrawRectangleLines(716, 226, 94, 24, isAttachmentSpeedEditing ? PURPLE : (isUnsaved ? MAROON : GRAY));
+    DrawRectangle(716, 226, 94, 24, Fade(LIGHTGRAY, 0.65f));
+    DrawRectangleLines(716, 226, 94, 24, isAttachmentSpeedEditing ? BLUE : (isUnsaved ? MAROON : GRAY));
     DrawText(isAttachmentSpeedEditing ? attachmentSpeedInput :
-             TextFormat("%.1f at 100B", attachment->dataSpeed), 720, 230, 15, DARKBLUE);
+             TextFormat("%.1f / 100B", attachment->dataSpeed), 720, 230, 15, BLACK);
     if (isAttachmentSpeedEditing)
         DrawRectangle(722 + MeasureText(attachmentSpeedInput, 15), 230, 2, 16, PURPLE);
     DrawRectangle(816, 226, 38, 24, MAROON);
@@ -3247,16 +3975,16 @@ static void DrawAttachmentInspector(int attachmentIndex, bool isPathEditing)
     DrawRectangle(864, 226, 38, 24, DARKGREEN);
     DrawText("+", 877, 227, 20, RAYWHITE);
     DrawRectangle(716, 258, 188, 26, DARKBLUE);
-    DrawText("Preview shot", 760, 263, 16, RAYWHITE);
-    DrawText(TextFormat("Preview files: %d", attachment->previewFileCount), 716, 304, 16, isUnsaved ? MAROON : DARKGRAY);
+    DrawSettingsText("弾をプレビュー", 760, 263, 16, RAYWHITE);
+    DrawSettingsText(TextFormat("プレビュー用ファイル数: %d", attachment->previewFileCount), 716, 304, 14, isUnsaved ? MAROON : BLACK);
     DrawRectangle(816, 294, 38, 24, MAROON);
     DrawText("-", 830, 295, 20, RAYWHITE);
     DrawRectangle(864, 294, 38, 24, DARKGREEN);
     DrawText("+", 877, 295, 20, RAYWHITE);
-    DrawRectangle(716, 326, 94, 24, isAttachmentCapacityEditing ? Fade(SKYBLUE, 0.60f) : Fade(LIGHTGRAY, 0.65f));
-    DrawRectangleLines(716, 326, 94, 24, isAttachmentCapacityEditing ? PURPLE : (isUnsaved ? MAROON : GRAY));
+    DrawRectangle(716, 326, 94, 24, Fade(LIGHTGRAY, 0.65f));
+    DrawRectangleLines(716, 326, 94, 24, isAttachmentCapacityEditing ? BLUE : (isUnsaved ? MAROON : GRAY));
     DrawText(isAttachmentCapacityEditing ? attachmentCapacityInput :
-             TextFormat("%llu B", attachment->previewTotalBytes), 720, 330, 15, DARKBLUE);
+             TextFormat("%llu B", attachment->previewTotalBytes), 720, 330, 15, BLACK);
     if (isAttachmentCapacityEditing)
         DrawRectangle(722 + MeasureText(attachmentCapacityInput, 15), 330, 2, 16, PURPLE);
     DrawRectangle(816, 326, 38, 24, MAROON);
@@ -3264,15 +3992,16 @@ static void DrawAttachmentInspector(int attachmentIndex, bool isPathEditing)
     DrawRectangle(864, 326, 38, 24, DARKGREEN);
     DrawText("+", 877, 327, 20, RAYWHITE);
     (void)isPathEditing;
-    DrawText("Block mode: drag trajectory", 716, 368, 15, DARKBLUE);
-    DrawText(isUnsaved ? "Unsaved - Save all: S" : "Save all: S", 716, 396, 15,
-             isUnsaved ? MAROON : DARKGRAY);
+    DrawSettingsText("ブロックモード：軌道をドラッグ", 716, 368, 14, BLACK);
+    DrawSettingsText(isUnsaved ? "未保存 - Sキーで全て保存" : "Sキーで全て保存", 716, 396, 15,
+                     isUnsaved ? MAROON : BLACK);
 }
 
-static void DrawGlobalSettingsPanel(const RpgLayout *layout, const EditorSaveSnapshot *savedSnapshot,
+static void DrawGlobalSettingsPanel(const RpgLayout *layout, const RpgCharacter *player,
+                                    const RpgZipper *zipper, const EditorSaveSnapshot *savedSnapshot,
                                     RpgExplorerMode explorerMode, RpgBuildCellStorageMode storageMode)
 {
-    DrawInspectorFrame(globalSettingsPanelBounds, "Global Settings", DARKBLUE,
+    DrawInspectorFrame(globalSettingsPanelBounds, "全体設定", DARKBLUE,
                        GetInspectorCloseButton(RPG_EDITOR_GLOBAL_SETTINGS_INSPECTOR));
     Color delayColor = layout->electricCellDelay != savedSnapshot->layout.electricCellDelay ? MAROON : DARKGRAY;
     Color magnetSpeedColor = layout->magnetMetalSpeed != savedSnapshot->layout.magnetMetalSpeed ? MAROON : DARKGRAY;
@@ -3282,63 +4011,87 @@ static void DrawGlobalSettingsPanel(const RpgLayout *layout, const EditorSaveSna
         savedSnapshot->layout.zipperFolderReturnAnimationDelay ? MAROON : DARKGRAY;
     Color referenceFollowerScaleColor = layout->referenceFollowerScale !=
         savedSnapshot->layout.referenceFollowerScale ? MAROON : DARKGRAY;
-    DrawInspectorSectionTitle("SETTINGS", 716, 120, DARKBLUE);
-    DrawText("Explorer", 716, 150, 16, DARKGRAY);
-    Rectangle virtualBounds = { 716.0f, 166.0f, 88.0f, 28.0f };
-    Rectangle windowsBounds = { 812.0f, 166.0f, 92.0f, 28.0f };
-    DrawRectangleRec(virtualBounds, explorerMode == RPG_EXPLORER_MODE_VIRTUAL ? DARKBLUE : GRAY);
-    DrawRectangleRec(windowsBounds, explorerMode == RPG_EXPLORER_MODE_WINDOWS ? DARKBLUE : GRAY);
-    DrawRectangleLinesEx(virtualBounds, 1.0f, RAYWHITE);
-    DrawRectangleLinesEx(windowsBounds, 1.0f, RAYWHITE);
-    DrawText("Virtual", 726, 172, 15, RAYWHITE);
-    DrawText("Windows", 820, 172, 15, RAYWHITE);
-    DrawText("Build", 716, 210, 16, DARKGRAY);
-    Rectangle compactBounds = { 716.0f, 226.0f, 88.0f, 28.0f };
-    Rectangle foldersBounds = { 812.0f, 226.0f, 92.0f, 28.0f };
-    DrawRectangleRec(compactBounds, storageMode == RPG_BUILD_CELL_STORAGE_COMPACT ? DARKBLUE : GRAY);
-    /* 進行度保存の基盤が整うまで全マス個別フォルダ方式は選択不可として残す。 */
-    DrawRectangleRec(foldersBounds, Fade(GRAY, 0.45f));
-    DrawRectangleLinesEx(compactBounds, 1.0f, RAYWHITE);
-    DrawRectangleLinesEx(foldersBounds, 1.0f, RAYWHITE);
-    DrawText("Compact", 724, 232, 14, RAYWHITE);
-    DrawText("All folders", 816, 232, 14, Fade(RAYWHITE, 0.45f));
-    DrawInspectorSectionTitle("RUNTIME", 716, 272, DARKBLUE);
-    DrawText(TextFormat("Wire delay: %.2fs", layout->electricCellDelay), 716, 302, 16, delayColor);
-    DrawRectangle(716, 314, 44, 26, MAROON);
-    DrawText("-", 733, 318, 20, RAYWHITE);
-    DrawRectangle(772, 314, 44, 26, DARKGREEN);
-    DrawText("+", 788, 318, 20, RAYWHITE);
-    DrawText(TextFormat("Magnet speed: %.0f px/s", layout->magnetMetalSpeed), 716, 350, 16, magnetSpeedColor);
-    DrawRectangle(716, 362, 44, 26, MAROON);
-    DrawText("-", 733, 366, 20, RAYWHITE);
-    DrawRectangle(772, 362, 44, 26, DARKGREEN);
-    DrawText("+", 788, 366, 20, RAYWHITE);
-    DrawInspectorSectionTitle("ZIPPER", 716, 412, DARKBLUE);
-    DrawText(TextFormat("Folder return: %.2fs", layout->zipperFolderReturnDuration), 716, 442, 16, returnDurationColor);
-    DrawRectangle(716, 454, 44, 26, MAROON);
-    DrawText("-", 733, 458, 20, RAYWHITE);
-    DrawRectangle(772, 454, 44, 26, DARKGREEN);
-    DrawText("+", 788, 458, 20, RAYWHITE);
-    DrawText(TextFormat("Return animation delay: %.2fs", layout->zipperFolderReturnAnimationDelay),
-             716, 488, 16, returnDelayColor);
-    DrawRectangle(716, 500, 44, 26, MAROON);
-    DrawText("-", 733, 504, 20, RAYWHITE);
-    DrawRectangle(772, 500, 44, 26, DARKGREEN);
-    DrawText("+", 788, 504, 20, RAYWHITE);
-    DrawText(TextFormat("File follower scale: %.0f%%", layout->referenceFollowerScale * 100.0f),
-             716, 540, 16, referenceFollowerScaleColor);
-    DrawRectangle(716, 552, 44, 26, MAROON);
-    DrawText("-", 733, 556, 20, RAYWHITE);
-    DrawRectangle(772, 552, 44, 26, DARKGREEN);
-    DrawText("+", 788, 556, 20, RAYWHITE);
-    DrawText("Save all: S", 716, 590, 14, DARKGRAY);
+    Color playerSpeedColor = player->moveSpeed != savedSnapshot->player.moveSpeed ? MAROON : DARKGRAY;
+    Color playerScaleColor = player->scale != savedSnapshot->player.scale ? MAROON : DARKGRAY;
+    Color zipperLaunchColor = zipper->launchSpeed != savedSnapshot->zipper.launchSpeed ? MAROON : DARKGRAY;
+    Color zipperReturnColor = zipper->returnSpeed != savedSnapshot->zipper.returnSpeed ? MAROON : DARKGRAY;
+    Color zipperFollowColor = zipper->followSpeed != savedSnapshot->zipper.followSpeed ? MAROON : DARKGRAY;
+    for (int index = 0; index < RPG_GLOBAL_SETTINGS_TAB_COUNT; index++)
+        DrawSettingsTabHeader(globalSettingsTabs, globalSettingsTabExpanded,
+                              RPG_GLOBAL_SETTINGS_TAB_COUNT, index);
+    if (globalSettingsTabExpanded[RPG_GLOBAL_SETTINGS_TAB_BUILD]) {
+        float y = GetSettingsTabContentTop(globalSettingsTabs, globalSettingsTabExpanded,
+                                           RPG_GLOBAL_SETTINGS_TAB_COUNT, RPG_GLOBAL_SETTINGS_TAB_BUILD);
+        Rectangle virtualBounds = { 716.0f, y + 22.0f, 88.0f, 28.0f };
+        Rectangle windowsBounds = { 812.0f, y + 22.0f, 92.0f, 28.0f };
+        Rectangle compactBounds = { 716.0f, y + 82.0f, 88.0f, 28.0f };
+        Rectangle foldersBounds = { 812.0f, y + 82.0f, 92.0f, 28.0f };
+        DrawSettingsText("エクスプローラー", 716, y + 6, 16, DARKGRAY);
+        DrawRectangleRec(virtualBounds, explorerMode == RPG_EXPLORER_MODE_VIRTUAL ? DARKBLUE : GRAY);
+        DrawRectangleRec(windowsBounds, explorerMode == RPG_EXPLORER_MODE_WINDOWS ? DARKBLUE : GRAY);
+        DrawRectangleLinesEx(virtualBounds, 1.0f, RAYWHITE); DrawRectangleLinesEx(windowsBounds, 1.0f, RAYWHITE);
+        DrawSettingsText("仮想", 726, y + 28, 15, RAYWHITE); DrawSettingsText("本物", 820, y + 28, 15, RAYWHITE);
+        DrawSettingsText("ビルド", 716, y + 66, 16, DARKGRAY);
+        DrawRectangleRec(compactBounds, storageMode == RPG_BUILD_CELL_STORAGE_COMPACT ? DARKBLUE : GRAY);
+        DrawRectangleRec(foldersBounds, Fade(GRAY, 0.45f));
+        DrawRectangleLinesEx(compactBounds, 1.0f, RAYWHITE); DrawRectangleLinesEx(foldersBounds, 1.0f, RAYWHITE);
+        DrawSettingsText("簡易", 724, y + 88, 14, RAYWHITE); DrawSettingsText("全フォルダ", 816, y + 88, 14, Fade(RAYWHITE, 0.45f));
+    }
+    if (globalSettingsTabExpanded[RPG_GLOBAL_SETTINGS_TAB_RUNTIME]) {
+        float y = GetSettingsTabContentTop(globalSettingsTabs, globalSettingsTabExpanded,
+                                           RPG_GLOBAL_SETTINGS_TAB_COUNT, RPG_GLOBAL_SETTINGS_TAB_RUNTIME);
+        DrawSettingsText(TextFormat("導線遅延: %.2f秒", layout->electricCellDelay), 716, y + 6, 16, delayColor);
+        DrawRectangle(716, (int)y + 20, 44, 26, MAROON); DrawText("-", 733, (int)y + 24, 20, RAYWHITE);
+        DrawRectangle(772, (int)y + 20, 44, 26, DARKGREEN); DrawText("+", 788, (int)y + 24, 20, RAYWHITE);
+        DrawSettingsText(TextFormat("磁石速度: %.0f px/秒", layout->magnetMetalSpeed), 716, y + 56, 16, magnetSpeedColor);
+        DrawRectangle(716, (int)y + 70, 44, 26, MAROON); DrawText("-", 733, (int)y + 74, 20, RAYWHITE);
+        DrawRectangle(772, (int)y + 70, 44, 26, DARKGREEN); DrawText("+", 788, (int)y + 74, 20, RAYWHITE);
+    }
+    if (globalSettingsTabExpanded[RPG_GLOBAL_SETTINGS_TAB_PLAYER]) {
+        float y = GetSettingsTabContentTop(globalSettingsTabs, globalSettingsTabExpanded,
+                                           RPG_GLOBAL_SETTINGS_TAB_COUNT, RPG_GLOBAL_SETTINGS_TAB_PLAYER);
+        DrawSettingsText(TextFormat("移動速度: %.0f", player->moveSpeed), 716, y + 6, 16, playerSpeedColor);
+        DrawRectangle(716, (int)y + 20, 44, 26, MAROON); DrawText("-", 733, (int)y + 24, 20, RAYWHITE);
+        DrawRectangle(772, (int)y + 20, 44, 26, DARKGREEN); DrawText("+", 788, (int)y + 24, 20, RAYWHITE);
+        DrawSettingsText(TextFormat("拡大率: %.1f", player->scale), 716, y + 56, 16, playerScaleColor);
+        DrawRectangle(716, (int)y + 70, 44, 26, MAROON); DrawText("-", 733, (int)y + 74, 20, RAYWHITE);
+        DrawRectangle(772, (int)y + 70, 44, 26, DARKGREEN); DrawText("+", 788, (int)y + 74, 20, RAYWHITE);
+        DrawSaveButton((Rectangle){ 716, y + 108, 90, 26 }, EDITOR_SAVE_NONE);
+        DrawRevertButton((Rectangle){ 814, y + 108, 90, 26 });
+    }
+    if (globalSettingsTabExpanded[RPG_GLOBAL_SETTINGS_TAB_ZIPPER]) {
+        float y = GetSettingsTabContentTop(globalSettingsTabs, globalSettingsTabExpanded,
+                                           RPG_GLOBAL_SETTINGS_TAB_COUNT, RPG_GLOBAL_SETTINGS_TAB_ZIPPER);
+        DrawSettingsText(TextFormat("フォルダ返却: %.2f秒", layout->zipperFolderReturnDuration), 716, y + 6, 16, returnDurationColor);
+        DrawRectangle(716, (int)y + 20, 44, 26, MAROON); DrawText("-", 733, (int)y + 24, 20, RAYWHITE);
+        DrawRectangle(772, (int)y + 20, 44, 26, DARKGREEN); DrawText("+", 788, (int)y + 24, 20, RAYWHITE);
+        DrawSettingsText(TextFormat("返却アニメーション遅延: %.2f秒", layout->zipperFolderReturnAnimationDelay), 716, y + 62, 16, returnDelayColor);
+        DrawRectangle(716, (int)y + 76, 44, 26, MAROON); DrawText("-", 733, (int)y + 80, 20, RAYWHITE);
+        DrawRectangle(772, (int)y + 76, 44, 26, DARKGREEN); DrawText("+", 788, (int)y + 80, 20, RAYWHITE);
+        DrawSettingsText(TextFormat("ファイル追従倍率: %.0f%%", layout->referenceFollowerScale * 100.0f), 716, y + 118, 16, referenceFollowerScaleColor);
+        DrawRectangle(716, (int)y + 132, 44, 26, MAROON); DrawText("-", 733, (int)y + 136, 20, RAYWHITE);
+        DrawRectangle(772, (int)y + 132, 44, 26, DARKGREEN); DrawText("+", 788, (int)y + 136, 20, RAYWHITE);
+        DrawSettingsText(TextFormat("射出速度: %.0f", zipper->launchSpeed), 716, y + 174, 16, zipperLaunchColor);
+        DrawRectangle(716, (int)y + 188, 44, 26, MAROON); DrawText("-", 733, (int)y + 192, 20, RAYWHITE);
+        DrawRectangle(772, (int)y + 188, 44, 26, DARKGREEN); DrawText("+", 788, (int)y + 192, 20, RAYWHITE);
+        DrawSettingsText(TextFormat("帰還速度: %.0f", zipper->returnSpeed), 716, y + 230, 16, zipperReturnColor);
+        DrawRectangle(716, (int)y + 244, 44, 26, MAROON); DrawText("-", 733, (int)y + 248, 20, RAYWHITE);
+        DrawRectangle(772, (int)y + 244, 44, 26, DARKGREEN); DrawText("+", 788, (int)y + 248, 20, RAYWHITE);
+        DrawSettingsText(TextFormat("追従速度: %.0f", zipper->followSpeed), 716, y + 286, 16, zipperFollowColor);
+        DrawRectangle(716, (int)y + 300, 44, 26, MAROON); DrawText("-", 733, (int)y + 304, 20, RAYWHITE);
+        DrawRectangle(772, (int)y + 300, 44, 26, DARKGREEN); DrawText("+", 788, (int)y + 304, 20, RAYWHITE);
+        DrawRectangle(716, (int)y + 344, 188, 28, zipper->launchPreviewEnabled ? DARKGREEN : GRAY);
+        DrawSettingsText(zipper->launchPreviewEnabled ? "プレビュー：オン" : "プレビュー：オフ", 754, y + 350, 16, RAYWHITE);
+        DrawSaveButton((Rectangle){ 716, y + 378, 90, 26 }, EDITOR_SAVE_NONE);
+        DrawRevertButton((Rectangle){ 814, y + 378, 90, 26 });
+    }
 }
 
 // ステージ固有の管理と背景はここへ集約し、全体設定と保存先を混在させない。
 static void DrawStageSettingsPanel(const RpgLayout *layout, const RpgStage3Event *stageEntryEvent,
                                    const EditorSaveSnapshot *savedSnapshot)
 {
-    DrawInspectorFrame(stageSettingsPanelBounds, "Stage Settings", DARKBLUE,
+    DrawInspectorFrame(stageSettingsPanelBounds, "ステージ設定", DARKBLUE,
                        GetInspectorCloseButton(RPG_EDITOR_STAGE_SETTINGS_INSPECTOR));
     int stageIndex = RpgStageCatalog_FindIndex(&stageCatalogData, currentStageNumber);
     bool backgroundChanged = strcmp(layout->backgroundPath, savedSnapshot->layout.backgroundPath) != 0;
@@ -3350,111 +4103,122 @@ static void DrawStageSettingsPanel(const RpgLayout *layout, const RpgStage3Event
                           layout->groundSaturation != savedSnapshot->layout.groundSaturation ||
                           layout->groundLightness != savedSnapshot->layout.groundLightness;
     bool capacityChanged = layout->zipperMaxCapacityKB != savedSnapshot->layout.zipperMaxCapacityKB;
-    DrawInspectorSectionTitle("STAGE", 716, 120, DARKBLUE);
-    DrawRectangle(716, 150, 28, 26, GRAY);
-    DrawRectangle(876, 150, 28, 26, GRAY);
-    DrawText("<", 725, 153, 20, RAYWHITE);
-    DrawText(">", 885, 153, 20, RAYWHITE);
-    DrawText(TextFormat("Stage%d", currentStageNumber), 760, 155, 18, DARKBLUE);
-    DrawText(TextFormat("%d / %d", stageIndex + 1, stageCatalogData.count), 780, 177, 13, DARKGRAY);
-    DrawRectangle(716, 196, 188, 26, DARKGREEN);
-    DrawRectangleLinesEx((Rectangle){ 716, 196, 188, 26 }, 1.0f, RAYWHITE);
-    DrawText("Add stage", 770, 201, 16, RAYWHITE);
-    DrawRectangle(716, 230, 188, 26, MAROON);
-    DrawRectangleLinesEx((Rectangle){ 716, 230, 188, 26 }, 1.0f, RAYWHITE);
-    DrawText("Delete stage", 758, 235, 16, RAYWHITE);
-    DrawText("Zipper capacity", 716, 268, 15, capacityChanged ? MAROON : DARKGRAY);
-    DrawRectangle(796, 262, 70, 26, RAYWHITE);
-    DrawRectangleLinesEx((Rectangle){ 796, 262, 70, 26 }, 1.0f, capacityChanged ? MAROON : DARKGRAY);
-    DrawText(isZipperCapacityEditing ? zipperCapacityInput : TextFormat("%u", layout->zipperMaxCapacityKB),
-             802, 268, 16, capacityChanged ? MAROON : DARKBLUE);
-    if (isZipperCapacityEditing) DrawRectangle(802 + MeasureText(zipperCapacityInput, 16), 267, 2, 17, DARKBLUE);
-    DrawText("KB", 872, 268, 15, DARKGRAY);
-    DrawInspectorSectionTitle("BUILD ENTRY EVENT", 716, 310, DARKBLUE);
-    DrawText("Run once after build", 716, 340, 15, DARKGRAY);
-    DrawRectangle(816, 330, 88, 24, stageEntryEvent->inspect.enabled ? DARKGREEN : GRAY);
-    DrawText(stageEntryEvent->inspect.enabled ? "ON" : "OFF", 842, 334, 15, RAYWHITE);
-    DrawText(TextFormat("%d functions", stageEntryEvent->inspect.functionCount), 716, 364, 14, DARKGRAY);
-    DrawRectangle(716, 374, 188, 26, PURPLE);
-    DrawText("Edit functions", 752, 379, 16, RAYWHITE);
-    DrawInspectorSectionTitle("BACKGROUND", 716, 430, DARKBLUE);
-    DrawText(layout->backgroundPath[0] == '\0' ? "No PNG selected" : GetFileName(layout->backgroundPath),
-              716, 460, 15, backgroundChanged ? MAROON : DARKGRAY);
-    DrawRectangle(716, 484, 188, 28, DARKBLUE);
-    DrawText("Select PNG", 766, 490, 16, RAYWHITE);
-    DrawRectangle(716, 520, 188, 28, GRAY);
-    DrawText("Clear background", 744, 526, 16, RAYWHITE);
-    DrawText(TextFormat("Background brightness: %.0f%%", layout->backgroundBrightness * 100.0f),
-              716, 554, 15, visualChanged ? MAROON : DARKGRAY);
-    DrawRectangle(816, 546, 38, 24, MAROON);
-    DrawText("-", 830, 547, 20, RAYWHITE);
-    DrawRectangle(864, 546, 38, 24, DARKGREEN);
-    DrawText("+", 877, 547, 20, RAYWHITE);
-    DrawText(TextFormat("Block brightness: %.0f%%", layout->blockBrightness * 100.0f),
-              716, 594, 15, visualChanged ? MAROON : DARKGRAY);
-    DrawRectangle(816, 586, 38, 24, MAROON);
-    DrawText("-", 830, 587, 20, RAYWHITE);
-    DrawRectangle(864, 586, 38, 24, DARKGREEN);
-    DrawText("+", 877, 587, 20, RAYWHITE);
-    DrawInspectorSectionTitle("GROUND BLOCK", 716, 632, DARKBLUE);
-    DrawText(layout->groundBlockPath[0] == '\0' ? "Unified color (no PNG)" : GetFileName(layout->groundBlockPath),
-              716, 662, 15, groundBlockChanged ? MAROON : DARKGRAY);
-    DrawRectangle(716, 678, 188, 28, DARKBLUE);
-    DrawText("Select ground PNG", 738, 684, 16, RAYWHITE);
-    DrawRectangle(716, 714, 188, 28, GRAY);
-    DrawText("Clear ground PNG", 744, 720, 16, RAYWHITE);
-    DrawInspectorSectionTitle("GROUND TONE", 716, 754, DARKBLUE);
-    DrawText(TextFormat("Hue: %.0f%%", layout->groundHue * 100.0f), 716, 784, 15,
-             visualChanged ? MAROON : DARKGRAY);
-    DrawText(TextFormat("Saturation: %.0f%%", layout->groundSaturation * 100.0f), 716, 820, 15,
-             visualChanged ? MAROON : DARKGRAY);
-    DrawText(TextFormat("Lightness: %.0f%%", layout->groundLightness * 100.0f), 716, 856, 15,
-             visualChanged ? MAROON : DARKGRAY);
-    for (int row = 0; row < 3; row++) {
-        int y = 776 + row * 36;
-        DrawRectangle(816, y, 38, 24, MAROON);
-        DrawText("-", 830, y + 1, 20, RAYWHITE);
-        DrawRectangle(864, y, 38, 24, DARKGREEN);
-        DrawText("+", 877, y + 1, 20, RAYWHITE);
+    for (int index = 0; index < RPG_STAGE_SETTINGS_TAB_COUNT; index++)
+        DrawSettingsTabHeader(stageSettingsTabs, stageSettingsTabExpanded,
+                              RPG_STAGE_SETTINGS_TAB_COUNT, index);
+    if (stageSettingsTabExpanded[RPG_STAGE_SETTINGS_TAB_STAGE]) {
+        float y = GetSettingsTabContentTop(stageSettingsTabs, stageSettingsTabExpanded,
+                                           RPG_STAGE_SETTINGS_TAB_COUNT, RPG_STAGE_SETTINGS_TAB_STAGE);
+        DrawRectangle(716, (int)y + 6, 28, 26, GRAY); DrawRectangle(876, (int)y + 6, 28, 26, GRAY);
+        DrawText("<", 725, (int)y + 9, 20, RAYWHITE); DrawText(">", 885, (int)y + 9, 20, RAYWHITE);
+        DrawText(TextFormat("Stage%d", currentStageNumber), 760, (int)y + 11, 18, DARKBLUE);
+        DrawText(TextFormat("%d / %d", stageIndex + 1, stageCatalogData.count), 780, (int)y + 33, 13, DARKGRAY);
+        DrawRectangle(716, (int)y + 52, 188, 26, DARKGREEN); DrawRectangleLinesEx((Rectangle){ 716, y + 52, 188, 26 }, 1.0f, RAYWHITE);
+        DrawSettingsText("ステージを追加", 752, y + 57, 16, RAYWHITE);
+        DrawRectangle(716, (int)y + 86, 188, 26, MAROON); DrawRectangleLinesEx((Rectangle){ 716, y + 86, 188, 26 }, 1.0f, RAYWHITE);
+        DrawSettingsText("ステージを削除", 752, y + 91, 16, RAYWHITE);
+        DrawSettingsText("ジッパー容量", 716, y + 124, 15, capacityChanged ? MAROON : DARKGRAY);
+        DrawRectangle(796, (int)y + 118, 70, 26, RAYWHITE); DrawRectangleLinesEx((Rectangle){ 796, y + 118, 70, 26 }, 1.0f, capacityChanged ? MAROON : DARKGRAY);
+        DrawText(isZipperCapacityEditing ? zipperCapacityInput : TextFormat("%u", layout->zipperMaxCapacityKB), 802, (int)y + 124, 16, capacityChanged ? MAROON : DARKBLUE);
+        if (isZipperCapacityEditing) DrawRectangle(802 + MeasureText(zipperCapacityInput, 16), (int)y + 123, 2, 17, DARKBLUE);
+        DrawSettingsText("KB", 872, y + 124, 15, DARKGRAY);
     }
-    DrawText((visualChanged || capacityChanged) ? "Unsaved - Save all: S" : "Save all: S", 716, 892, 15,
-             (visualChanged || capacityChanged) ? MAROON : DARKGRAY);
+    if (stageSettingsTabExpanded[RPG_STAGE_SETTINGS_TAB_ENTRY_EVENT]) {
+        float y = GetSettingsTabContentTop(stageSettingsTabs, stageSettingsTabExpanded,
+                                           RPG_STAGE_SETTINGS_TAB_COUNT, RPG_STAGE_SETTINGS_TAB_ENTRY_EVENT);
+        RpgEditorInspectorActionRow entryRow = MakeInspectorActionRow(716.0f, y + 6.0f, 188.0f, 24.0f);
+        DrawSettingsText("ビルド後に一度実行", entryRow.labelBounds.x, entryRow.labelBounds.y, 15, DARKGRAY);
+        DrawRectangleRec(entryRow.actionBounds, stageEntryEvent->inspect.enabled ? DARKGREEN : GRAY);
+        DrawSettingsText(stageEntryEvent->inspect.enabled ? "オン" : "オフ",
+                         entryRow.actionBounds.x + 38.0f, entryRow.actionBounds.y + 4.0f, 15, RAYWHITE);
+        DrawSettingsText(TextFormat("機能: %d個", stageEntryEvent->inspect.functionCount), 716,
+                         entryRow.contentBottom + 8.0f, 14, DARKGRAY);
+        Rectangle editBounds = { 716.0f, entryRow.contentBottom + 28.0f, 188.0f, 26.0f };
+        DrawRectangleRec(editBounds, PURPLE);
+        DrawSettingsText("機能を編集", 752, editBounds.y + 5.0f, 16, RAYWHITE);
+    }
+    if (stageSettingsTabExpanded[RPG_STAGE_SETTINGS_TAB_BACKGROUND]) {
+        float y = GetSettingsTabContentTop(stageSettingsTabs, stageSettingsTabExpanded,
+                                           RPG_STAGE_SETTINGS_TAB_COUNT, RPG_STAGE_SETTINGS_TAB_BACKGROUND);
+        FileDialogRequest backgroundRequest = MakeSpriteFileDialogRequest("背景PNGを選択");
+        RpgEditorFilePickerLayout backgroundPicker = { y + 1.0f, { 716.0f, y + 12.0f, 188.0f, 18.0f },
+                                                        { 716.0f, y + 32.0f, 188.0f, 28.0f } };
+        backgroundPicker = DrawInspectorFilePicker(&backgroundRequest, &backgroundPicker, layout->backgroundPath,
+                                                    "PNG未選択", "PNGを選択", backgroundChanged, false);
+        float clearY = backgroundPicker.contentBottom + 8.0f;
+        DrawRectangle(716, (int)clearY, 188, 28, GRAY); DrawSettingsText("背景を消去", 744, clearY + 6.0f, 16, RAYWHITE);
+        float backgroundControlY = clearY + 34.0f;
+        DrawSettingsText(TextFormat("背景の明るさ: %.0f%%", layout->backgroundBrightness * 100.0f), 716,
+                         backgroundControlY + 8.0f, 15, visualChanged ? MAROON : DARKGRAY);
+        DrawRectangle(816, (int)backgroundControlY, 38, 24, MAROON); DrawText("-", 830, (int)backgroundControlY + 1, 20, RAYWHITE);
+        DrawRectangle(864, (int)backgroundControlY, 38, 24, DARKGREEN); DrawText("+", 877, (int)backgroundControlY + 1, 20, RAYWHITE);
+        backgroundControlY += 40.0f;
+        DrawSettingsText(TextFormat("ブロックの明るさ: %.0f%%", layout->blockBrightness * 100.0f), 716,
+                         backgroundControlY + 8.0f, 15, visualChanged ? MAROON : DARKGRAY);
+        DrawRectangle(816, (int)backgroundControlY, 38, 24, MAROON); DrawText("-", 830, (int)backgroundControlY + 1, 20, RAYWHITE);
+        DrawRectangle(864, (int)backgroundControlY, 38, 24, DARKGREEN); DrawText("+", 877, (int)backgroundControlY + 1, 20, RAYWHITE);
+    }
+    if (stageSettingsTabExpanded[RPG_STAGE_SETTINGS_TAB_GROUND_BLOCK]) {
+        float y = GetSettingsTabContentTop(stageSettingsTabs, stageSettingsTabExpanded,
+                                           RPG_STAGE_SETTINGS_TAB_COUNT, RPG_STAGE_SETTINGS_TAB_GROUND_BLOCK);
+        FileDialogRequest groundRequest = MakeSpriteFileDialogRequest("地面PNGを選択");
+        RpgEditorFilePickerLayout groundPicker = { y + 1.0f, { 716.0f, y + 12.0f, 188.0f, 18.0f },
+                                                    { 716.0f, y + 32.0f, 188.0f, 28.0f } };
+        groundPicker = DrawInspectorFilePicker(&groundRequest, &groundPicker, layout->groundBlockPath,
+                                                "単色（PNGなし）", "地面PNGを選択", groundBlockChanged, false);
+        float clearY = groundPicker.contentBottom + 8.0f;
+        DrawRectangle(716, (int)clearY, 188, 28, GRAY);
+        DrawSettingsText("地面PNGを消去", 744, clearY + 6.0f, 16, RAYWHITE);
+    }
+    if (stageSettingsTabExpanded[RPG_STAGE_SETTINGS_TAB_GROUND_TONE]) {
+        float y = GetSettingsTabContentTop(stageSettingsTabs, stageSettingsTabExpanded,
+                                           RPG_STAGE_SETTINGS_TAB_COUNT, RPG_STAGE_SETTINGS_TAB_GROUND_TONE);
+        const char *labels[] = { "色相", "彩度", "明度" };
+        float values[] = { layout->groundHue, layout->groundSaturation, layout->groundLightness };
+        for (int row = 0; row < 3; row++) {
+            int rowY = (int)y + 8 + row * 38;
+            DrawSettingsText(TextFormat("%s: %.0f%%", labels[row], values[row] * 100.0f), 716, rowY, 15, visualChanged ? MAROON : DARKGRAY);
+            DrawRectangle(816, rowY - 8, 38, 24, MAROON); DrawText("-", 830, rowY - 7, 20, RAYWHITE);
+            DrawRectangle(864, rowY - 8, 38, 24, DARKGREEN); DrawText("+", 877, rowY - 7, 20, RAYWHITE);
+        }
+    }
 }
 
 // 現在のエリアだけを対象にした管理パネル。削除操作はここに閉じ込める。
 static void DrawAreaInspectorPanel(const RpgStage *stage, int mapIndex, const RpgAreaEntryEvents *events)
 {
-    DrawInspectorFrame(areaInspectorPanelBounds, "Area Inspector", DARKBLUE,
+    DrawInspectorFrame(areaInspectorPanelBounds, "エリア設定", DARKBLUE,
                        GetInspectorCloseButton(RPG_EDITOR_AREA_SETTINGS_INSPECTOR));
-    DrawText(TextFormat("Area[%d][%d]", stage->mapGridX[mapIndex], stage->mapGridY[mapIndex]),
-             716, 120, 18, DARKBLUE);
-    DrawText(TextFormat("Areas: %d", RpgStage_GetMapCount(stage)), 716, 146, 15, DARKGRAY);
+    DrawSettingsText(TextFormat("エリア[%d][%d]", stage->mapGridX[mapIndex], stage->mapGridY[mapIndex]),
+                     716, 120, 18, DARKBLUE);
+    DrawSettingsText(TextFormat("エリア数: %d", RpgStage_GetMapCount(stage)), 716, 146, 15, DARKGRAY);
     DrawRectangle(716, 178, 188, 26, MAROON);
-    DrawText("Delete this area", 748, 183, 16, RAYWHITE);
+    DrawSettingsText("このエリアを削除", 748, 183, 16, RAYWHITE);
     const RpgStage3Event *entryEvent = &events->entries[mapIndex];
-    DrawText("FIRST ENTRY EVENT", 716, 212, 16, MAROON);
-    DrawRectangle(816, 208, 88, 24, entryEvent->inspect.enabled ? DARKGREEN : GRAY);
-    DrawText(entryEvent->inspect.enabled ? "ON" : "OFF", 842, 212, 15, RAYWHITE);
-    DrawText(TextFormat("%d functions", entryEvent->inspect.functionCount), 716, 238, 14, DARKGRAY);
-    DrawRectangle(716, 246, 188, 26, PURPLE);
-    DrawText("Edit functions", 752, 251, 16, RAYWHITE);
+    RpgEditorInspectorActionRow entryRow = MakeInspectorActionRow(716.0f, 212.0f, 188.0f, 24.0f);
+    DrawSettingsText("最初の入場イベント", entryRow.labelBounds.x, entryRow.labelBounds.y, 16, MAROON);
+    DrawRectangleRec(entryRow.actionBounds, entryEvent->inspect.enabled ? DARKGREEN : GRAY);
+    DrawSettingsText(entryEvent->inspect.enabled ? "オン" : "オフ",
+                     entryRow.actionBounds.x + 38.0f, entryRow.actionBounds.y + 4.0f, 15, RAYWHITE);
+    DrawSettingsText(TextFormat("機能: %d個", entryEvent->inspect.functionCount), 716,
+                     entryRow.contentBottom + 8.0f, 14, DARKGRAY);
+    Rectangle editBounds = { 716.0f, entryRow.contentBottom + 28.0f, 188.0f, 26.0f };
+    DrawRectangleRec(editBounds, PURPLE);
+    DrawSettingsText("機能を編集", 752, editBounds.y + 5.0f, 16, RAYWHITE);
 }
 
 static void DrawSettingsButtons(bool isGlobalSettingsOpen, bool isStageSettingsOpen,
-                                bool isAreaInspectorOpen, bool isZipperSettingsOpen)
+                                bool isAreaInspectorOpen)
 {
     DrawRectangleRec(globalSettingsButtonBounds, isGlobalSettingsOpen ? DARKBLUE : GRAY);
     DrawRectangleLinesEx(globalSettingsButtonBounds, 1.0f, RAYWHITE);
-    DrawText("Settings", (int)globalSettingsButtonBounds.x + 8, (int)globalSettingsButtonBounds.y + 5, 16, RAYWHITE);
+    DrawSettingsText("全体設定", globalSettingsButtonBounds.x + 8.0f, globalSettingsButtonBounds.y + 5.0f, 16.0f, BLACK);
     DrawRectangleRec(stageSettingsButtonBounds, isStageSettingsOpen ? DARKBLUE : GRAY);
     DrawRectangleLinesEx(stageSettingsButtonBounds, 1.0f, RAYWHITE);
-    DrawText("Stage", (int)stageSettingsButtonBounds.x + 14, (int)stageSettingsButtonBounds.y + 5, 16, RAYWHITE);
+    DrawSettingsText("ステージ", stageSettingsButtonBounds.x + 8.0f, stageSettingsButtonBounds.y + 5.0f, 16.0f, BLACK);
     DrawRectangleRec(areaInspectorButtonBounds, isAreaInspectorOpen ? DARKBLUE : GRAY);
     DrawRectangleLinesEx(areaInspectorButtonBounds, 1.0f, RAYWHITE);
-    DrawText("Area", (int)areaInspectorButtonBounds.x + 13, (int)areaInspectorButtonBounds.y + 5, 16, RAYWHITE);
-    DrawRectangleRec(zipperSettingsButtonBounds, isZipperSettingsOpen ? DARKBLUE : GRAY);
-    DrawRectangleLinesEx(zipperSettingsButtonBounds, 1.0f, RAYWHITE);
-    DrawText("Zipper", (int)zipperSettingsButtonBounds.x + 8, (int)zipperSettingsButtonBounds.y + 5, 16, RAYWHITE);
+    DrawSettingsText("エリア", areaInspectorButtonBounds.x + 10.0f, areaInspectorButtonBounds.y + 5.0f, 16.0f, BLACK);
 }
 
 static Rectangle GetBlockInventoryCell(int index)
@@ -3462,26 +4226,251 @@ static Rectangle GetBlockInventoryCell(int index)
     return (Rectangle){ 305.0f + index * 33.0f, 494.0f, 32.0f, 32.0f };
 }
 
-static Rectangle GetBlockInventoryListItem(int index)
+static int GetBlockInventoryFirstBlockType(const RpgBlockInventory *inventory)
 {
-    return (Rectangle){ 24.0f, 486.0f - (index + 1) * 32.0f, 260.0f, 32.0f };
+    return inventory != NULL && inventory->count > 0 ? inventory->blockTypes[0] : 0;
 }
 
-static void DrawBlockInventory(int selectedInventory, int selectedBlockType, bool isListOpen, Texture2D fileTexture)
+static Rectangle GetBlockInventoryListItem(int index)
+{
+    /* 展開中は名称だけでなく、そのパレットのブロック配列も同じ行へ置く。 */
+    return (Rectangle){ 24.0f, 486.0f - (index + 1) * 32.0f, 616.0f, 32.0f };
+}
+
+/* Only this compact grip can begin a palette-order drag.  The number, name,
+   edit button and block icons remain their own normal controls. */
+static Rectangle GetBlockInventoryReorderHandleBounds(int index)
+{
+    Rectangle row = GetBlockInventoryListItem(index);
+    return (Rectangle){ row.x + 4.0f, row.y + 5.0f, 12.0f, row.height - 10.0f };
+}
+
+static int RemapBlockInventoryIndexAfterMove(int index, int sourceIndex, int finalIndex)
+{
+    if (index < 0) return index;
+    if (index == sourceIndex) return finalIndex;
+    if (sourceIndex < finalIndex && index > sourceIndex && index <= finalIndex) return index - 1;
+    if (finalIndex < sourceIndex && index >= finalIndex && index < sourceIndex) return index + 1;
+    return index;
+}
+
+static Rectangle GetBlockInventoryNameBounds(int index)
+{
+    Rectangle row = GetBlockInventoryListItem(index);
+    return (Rectangle){ row.x + 46.0f, row.y + 3.0f, 116.0f, 26.0f };
+}
+
+static Rectangle GetBlockInventoryEditButtonBounds(int index)
+{
+    Rectangle row = GetBlockInventoryListItem(index);
+    return (Rectangle){ row.x + 170.0f, row.y + 3.0f, 78.0f, 26.0f };
+}
+
+static Rectangle GetBlockInventoryPreviewCellBounds(int paletteIndex, int slotIndex)
+{
+    Rectangle row = GetBlockInventoryListItem(paletteIndex);
+    return (Rectangle){ 305.0f + slotIndex * 30.0f, row.y + 2.0f, 28.0f, 28.0f };
+}
+
+static Rectangle GetBlockInventoryAddButtonBounds(void)
+{
+    Rectangle row = GetBlockInventoryListItem(RpgBlockInventory_Count());
+    return (Rectangle){ row.x, row.y, 136.0f, row.height };
+}
+
+static Rectangle GetBlockInventoryDeleteButtonBounds(void)
+{
+    Rectangle row = GetBlockInventoryListItem(RpgBlockInventory_Count());
+    return (Rectangle){ row.x + 142.0f, row.y, 136.0f, row.height };
+}
+
+static Color GetBlockInventoryBorderColor(RpgBlockInventoryBorderColor color)
+{
+    switch (color) {
+    case RPG_BLOCK_INVENTORY_BORDER_RED: return RED;
+    case RPG_BLOCK_INVENTORY_BORDER_BLUE: return DARKBLUE;
+    case RPG_BLOCK_INVENTORY_BORDER_YELLOW: return GOLD;
+    case RPG_BLOCK_INVENTORY_BORDER_WHITE:
+    default: return RAYWHITE;
+    }
+}
+
+/* パレットは本編のStage/gameや静的ステージ情報ではなく、エディターだけの
+ * 操作UI設定として assets/Settings/Editor に保存する。 */
+static bool GetEditorPalettePreferencesPath(char *path, size_t pathSize)
+{
+    return path != NULL && pathSize > 0 &&
+           snprintf(path, pathSize, "%s../assets/Settings/Editor/rpg_block_inventory.cfg",
+                    GetApplicationDirectory()) > 0;
+}
+
+static bool EnsureEditorPalettePreferencesDirectory(void)
+{
+    char directory[RPG_STAGE_PATH_LENGTH];
+    if (snprintf(directory, sizeof(directory), "%s../assets/Settings/Editor",
+                 GetApplicationDirectory()) <= 0) return false;
+#ifdef _WIN32
+    if (CreateDirectoryA(directory, NULL) || GetLastError() == ERROR_ALREADY_EXISTS) return true;
+    return false;
+#else
+    (void)directory;
+    return true;
+#endif
+}
+
+static bool SaveBlockInventoryPreferences(void)
+{
+    char path[RPG_STAGE_PATH_LENGTH];
+    return EnsureEditorPalettePreferencesDirectory() && GetEditorPalettePreferencesPath(path, sizeof(path)) &&
+           RpgBlockInventory_SavePreferences(path);
+}
+
+static bool LoadBlockInventoryPreferences(void)
+{
+    char editorPath[RPG_STAGE_PATH_LENGTH];
+    char legacyPath[RPG_STAGE_PATH_LENGTH];
+    if (!GetEditorPalettePreferencesPath(editorPath, sizeof(editorPath))) return false;
+    if (FileExists(editorPath)) return RpgBlockInventory_LoadPreferences(editorPath);
+    /* 前回実装で作られた共通Settings直下の設定だけは、初回起動時に
+       エディター専用領域へ移して既存の編集内容を失わないようにする。 */
+    if (snprintf(legacyPath, sizeof(legacyPath), "%s../assets/Settings/rpg_block_inventory.cfg",
+                 GetApplicationDirectory()) > 0 && FileExists(legacyPath) &&
+        RpgBlockInventory_LoadPreferences(legacyPath)) {
+        return SaveBlockInventoryPreferences();
+    }
+    return false;
+}
+
+/* Palette previews are deliberately self-contained.  World effect symbols
+   may span several cells (doors are three cells tall), which is correct in a
+   stage but must never overflow a one-cell palette icon. */
+static void DrawBlockInventoryEffectSymbol(Rectangle cell, int blockType)
+{
+    if (blockType == RPG_BLOCK_DOOR_CLOSED_TOP || blockType == RPG_BLOCK_KEY_DOOR_CLOSED_TOP) {
+        Color outline = blockType == RPG_BLOCK_KEY_DOOR_CLOSED_TOP ? VIOLET : GOLD;
+        DrawRectangleLinesEx((Rectangle){ cell.x + cell.width * 0.28f, cell.y + cell.height * 0.12f,
+                                           cell.width * 0.44f, cell.height * 0.76f }, 2.0f, outline);
+        if (blockType == RPG_BLOCK_KEY_DOOR_CLOSED_TOP) {
+            DrawCircle((int)(cell.x + cell.width * 0.5f), (int)(cell.y + cell.height * 0.40f),
+                       cell.width * 0.13f, SKYBLUE);
+            DrawRectangle((int)(cell.x + cell.width * 0.44f), (int)(cell.y + cell.height * 0.40f),
+                          (int)(cell.width * 0.12f), (int)(cell.height * 0.25f), SKYBLUE);
+        }
+        return;
+    }
+    BeginScissorMode((int)cell.x, (int)cell.y, (int)cell.width, (int)cell.height);
+    RpgStage_DrawEffectSymbol(cell, blockType);
+    EndScissorMode();
+}
+
+static void DrawBlockInventoryPropertyOrAttachmentIcon(Rectangle cell, int blockType)
+{
+    if (blockType == RPG_BLOCK_PROPERTY_ITEM)
+        DrawPoly((Vector2){ cell.x + cell.width * 0.5f, cell.y + cell.height * 0.5f }, 5,
+                 cell.width * 0.34f, -90.0f, GOLD);
+    else if (blockType == RPG_BLOCK_PROPERTY_CONVEYOR) {
+        DrawRectangleRec((Rectangle){ cell.x + cell.width * 0.12f, cell.y + cell.height * 0.25f,
+                                      cell.width * 0.76f, cell.height * 0.50f }, (Color){ 54, 66, 74, 255 });
+        DrawLineEx((Vector2){ cell.x + cell.width * 0.25f, cell.y + cell.height * 0.50f },
+                   (Vector2){ cell.x + cell.width * 0.72f, cell.y + cell.height * 0.50f }, 2.5f, GOLD);
+        DrawTriangle((Vector2){ cell.x + cell.width * 0.84f, cell.y + cell.height * 0.50f },
+                     (Vector2){ cell.x + cell.width * 0.63f, cell.y + cell.height * 0.31f },
+                     (Vector2){ cell.x + cell.width * 0.63f, cell.y + cell.height * 0.69f }, GOLD);
+    } else if (blockType == RPG_BLOCK_PROPERTY_MAP_EVENT) {
+        DrawCircleLines((int)(cell.x + cell.width * 0.5f), (int)(cell.y + cell.height * 0.5f),
+                        cell.width * 0.31f, ORANGE);
+        DrawCircle((int)(cell.x + cell.width * 0.5f), (int)(cell.y + cell.height * 0.5f),
+                   cell.width * 0.09f, ORANGE);
+    } else if (blockType == RPG_BLOCK_PROPERTY_RECEIVER) {
+        DrawRectangleRec((Rectangle){ cell.x + cell.width * 0.19f, cell.y + cell.height * 0.41f,
+                                      cell.width * 0.62f, cell.height * 0.22f }, DARKBROWN);
+        DrawRectangleLinesEx((Rectangle){ cell.x + cell.width * 0.19f, cell.y + cell.height * 0.41f,
+                                           cell.width * 0.62f, cell.height * 0.22f }, 1.5f, GOLD);
+        DrawLineEx((Vector2){ cell.x + cell.width * 0.5f, cell.y + cell.height * 0.63f },
+                   (Vector2){ cell.x + cell.width * 0.5f, cell.y + cell.height * 0.88f }, 2.0f, SKYBLUE);
+        DrawCircle((int)(cell.x + cell.width * 0.5f), (int)(cell.y + cell.height * 0.88f), 2.0f, GOLD);
+    } else if (blockType == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER) {
+        DrawCircle((int)(cell.x + cell.width * 0.5f), (int)(cell.y + cell.height * 0.58f),
+                   cell.width * 0.23f, DARKBLUE);
+        DrawLineEx((Vector2){ cell.x + cell.width * 0.5f, cell.y + cell.height * 0.58f },
+                   (Vector2){ cell.x + cell.width * 0.5f, cell.y + cell.height * 0.16f }, 2.0f, GOLD);
+        DrawCircleLines((int)(cell.x + cell.width * 0.5f), (int)(cell.y + cell.height * 0.16f),
+                        cell.width * 0.19f, SKYBLUE);
+    } else if (blockType == RPG_BLOCK_ATTACHMENT_DATA_BUTTON) {
+        DrawRectangleRounded((Rectangle){ cell.x + cell.width * 0.12f, cell.y + cell.height * 0.59f,
+                                          cell.width * 0.76f, cell.height * 0.22f }, 0.25f, 4, DARKGRAY);
+        DrawRectangleRounded((Rectangle){ cell.x + cell.width * 0.28f, cell.y + cell.height * 0.34f,
+                                          cell.width * 0.44f, cell.height * 0.28f }, 0.55f, 6, RED);
+    } else if (blockType == RPG_BLOCK_ATTACHMENT_SAVE_FLAG) {
+        DrawLineEx((Vector2){ cell.x + cell.width * 0.5f, cell.y + cell.height * 0.86f },
+                   (Vector2){ cell.x + cell.width * 0.5f, cell.y + cell.height * 0.16f }, 2.0f, DARKBROWN);
+        DrawTriangle((Vector2){ cell.x + cell.width * 0.53f, cell.y + cell.height * 0.22f },
+                     (Vector2){ cell.x + cell.width * 0.88f, cell.y + cell.height * 0.36f },
+                     (Vector2){ cell.x + cell.width * 0.53f, cell.y + cell.height * 0.50f }, RED);
+    } else if (blockType == RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET) {
+        DrawLineEx((Vector2){ cell.x + cell.width * 0.5f, cell.y + cell.height * 0.10f },
+                   (Vector2){ cell.x + cell.width * 0.5f, cell.y + cell.height * 0.66f }, 2.0f, SKYBLUE);
+        DrawRectangleLinesEx((Rectangle){ cell.x + cell.width * 0.20f, cell.y + cell.height * 0.66f,
+                                           cell.width * 0.60f, cell.height * 0.20f }, 1.5f, SKYBLUE);
+    }
+}
+
+/* Blocks may be moved between palettes, so visual classification belongs to
+   the block type rather than the palette that happened to contain it. */
+static bool IsBlockInventoryOverlayType(int blockType)
+{
+    return blockType == RPG_BLOCK_PROPERTY_ITEM ||
+           blockType == RPG_BLOCK_PROPERTY_RECEIVER ||
+           RpgBlockInventory_IsMapEventProperty(blockType) ||
+           RpgBlockInventory_IsConveyorProperty(blockType) ||
+           RpgBlockInventory_IsAttachment(blockType);
+}
+
+static void DrawBlockInventoryPreviewCell(Rectangle cell, const RpgBlockInventory *inventory,
+                                          int blockType, int selectedBlockType, Texture2D fileTexture)
+{
+    (void)inventory;
+    if (IsBlockInventoryOverlayType(blockType))
+        DrawRectangleRec(cell, Fade(DARKGRAY, 0.9f));
+    else RpgStage_DrawBlockCell(cell, blockType, cell.width / RPG_STAGE_TILE_SIZE);
+    if (blockType == RPG_BLOCK_REFERENCE_FILE && fileTexture.id != 0)
+        DrawTexturePro(fileTexture, (Rectangle){ 0.0f, 0.0f, (float)fileTexture.width, (float)fileTexture.height },
+                       (Rectangle){ cell.x + 3.0f, cell.y + 3.0f, cell.width - 6.0f, cell.height - 6.0f },
+                       (Vector2){ 0.0f, 0.0f }, 0.0f, WHITE);
+    else if (blockType == RPG_BLOCK_REFERENCE_FOLDER)
+        RpgStage_DrawReferenceFolder(cell, WHITE);
+    else if (blockType == RPG_BLOCK_IMAGE_OBJECT)
+        GameFont_DrawPreset(RPG_TEXT_PRESET_UI, "PNG", cell.x + 3.0f, cell.y + 9.0f,
+                            GameFont_GetPresetScale(RPG_TEXT_PRESET_UI, 11.0f));
+    if (IsBlockInventoryOverlayType(blockType))
+        DrawBlockInventoryPropertyOrAttachmentIcon(cell, blockType);
+    else DrawBlockInventoryEffectSymbol(cell, blockType);
+    DrawRectangleLinesEx(cell, blockType == selectedBlockType ? 2.0f : 1.0f,
+                         blockType == selectedBlockType ? GOLD : RAYWHITE);
+}
+
+static void DrawBlockInventory(int selectedInventory, int selectedBlockType, bool isListOpen,
+                               const RpgEditorDrag *drag, int dragSourcePalette,
+                               int dragSourceSlot, const RpgEditorDrag *paletteRowDrag,
+                               int paletteRowDragSource, Texture2D fileTexture)
 {
     const RpgBlockInventory *inventory = RpgBlockInventory_Get(selectedInventory);
+    Color inventoryBorder = GetBlockInventoryBorderColor(inventory->borderColor);
     // インベントリ名とブロック枠を分け、名前の操作がブロック選択へ干渉しないようにする。
     DrawRectangle(24, 486, 260, 48, Fade(BLACK, 0.55f));
-    DrawRectangleLines(24, 486, 260, 48, RAYWHITE);
+    DrawRectangleLines(24, 486, 260, 48, inventoryBorder);
     DrawText("<", 34, 501, 18, RAYWHITE);
-    DrawText(inventory->name, 62, 502, 16, RAYWHITE);
+    /* パレット名は他の操作UIと同じUIプリセットで描画する。 */
+    DrawRectangle(54, 487, 200, 46, Fade(RAYWHITE, 0.88f));
+    GameFont_DrawPreset(RPG_TEXT_PRESET_UI, TextFormat("%d: %s", selectedInventory + 1, inventory->name),
+                        62.0f, 502.0f, GameFont_GetPresetScale(RPG_TEXT_PRESET_UI, 16.0f));
     DrawText(">", 254, 501, 18, RAYWHITE);
     DrawRectangle(300, 486, 340, 48, Fade(BLACK, 0.55f));
-    DrawRectangleLines(300, 486, 340, 48, RAYWHITE);
+    DrawRectangleLines(300, 486, 340, 48, inventoryBorder);
     for (int index = 0; index < inventory->count; index++) {
         Rectangle cell = GetBlockInventoryCell(index);
         int blockType = inventory->blockTypes[index];
-        if (inventory->isProperty || inventory->isAttachment)
+        if (IsBlockInventoryOverlayType(blockType))
             DrawRectangleRec(cell, Fade(DARKGRAY, 0.9f));
         else
             // パレットもステージと同じ描画を使い、縦穴・横穴の向きを見分けられるようにする。
@@ -3498,11 +4487,14 @@ static void DrawBlockInventory(int selectedInventory, int selectedBlockType, boo
         }
         if (blockType == RPG_BLOCK_PROPERTY_ITEM)
             DrawPoly((Vector2){ cell.x + 16.0f, cell.y + 16.0f }, 5, 11.0f, -90.0f, GOLD);
-        if (blockType == RPG_BLOCK_PROPERTY_WIRE) {
-            DrawLineEx((Vector2){ cell.x + 5.0f, cell.y + 16.0f },
-                       (Vector2){ cell.x + 27.0f, cell.y + 16.0f }, 4.0f, SKYBLUE);
-            DrawCircle((int)cell.x + 5, (int)cell.y + 16, 4.0f, DARKGREEN);
-            DrawCircle((int)cell.x + 27, (int)cell.y + 16, 4.0f, MAROON);
+        if (blockType == RPG_BLOCK_PROPERTY_CONVEYOR) {
+            DrawRectangleRec((Rectangle){ cell.x + 4.0f, cell.y + 8.0f, 24.0f, 16.0f },
+                             (Color){ 54, 66, 74, 255 });
+            DrawLineEx((Vector2){ cell.x + 8.0f, cell.y + 16.0f },
+                       (Vector2){ cell.x + 23.0f, cell.y + 16.0f }, 3.0f, GOLD);
+            DrawTriangle((Vector2){ cell.x + 26.0f, cell.y + 16.0f },
+                         (Vector2){ cell.x + 19.0f, cell.y + 11.0f },
+                         (Vector2){ cell.x + 19.0f, cell.y + 21.0f }, GOLD);
         }
         if (blockType == RPG_BLOCK_PROPERTY_MAP_EVENT) {
             DrawCircleLines((int)cell.x + 16, (int)cell.y + 16, 10.0f, ORANGE);
@@ -3543,16 +4535,127 @@ static void DrawBlockInventory(int selectedInventory, int selectedBlockType, boo
                               (Vector2){ cell.x + 28.0f, cell.y + 11.0f },
                               (Vector2){ cell.x + 17.0f, cell.y + 15.0f }, RAYWHITE);
         }
-        RpgStage_DrawEffectSymbol(cell, blockType);
+        if (blockType == RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET) {
+            DrawLineEx((Vector2){ cell.x + 8.0f, cell.y + 3.0f },
+                       (Vector2){ cell.x + 8.0f, cell.y + 20.0f }, 1.0f, Fade(SKYBLUE, 0.35f));
+            DrawLineEx((Vector2){ cell.x + 16.0f, cell.y + 3.0f },
+                       (Vector2){ cell.x + 16.0f, cell.y + 20.0f }, 1.5f, Fade(SKYBLUE, 0.68f));
+            DrawLineEx((Vector2){ cell.x + 24.0f, cell.y + 3.0f },
+                       (Vector2){ cell.x + 24.0f, cell.y + 20.0f }, 1.0f, Fade(SKYBLUE, 0.35f));
+            DrawRectangleRec((Rectangle){ cell.x + 3.0f, cell.y + 20.0f, 2.0f, 8.0f },
+                             (Color){ 43, 166, 235, 255 });
+            DrawRectangleRec((Rectangle){ cell.x + 27.0f, cell.y + 20.0f, 2.0f, 8.0f },
+                             (Color){ 43, 166, 235, 255 });
+            DrawLineEx((Vector2){ cell.x + 5.0f, cell.y + 27.5f },
+                       (Vector2){ cell.x + 27.0f, cell.y + 27.5f }, 1.0f, SKYBLUE);
+        }
+        /* World door symbols span three tiles; palette icons must remain in
+           their own cell even in the compact bar. */
+        DrawBlockInventoryEffectSymbol(cell, blockType);
         DrawRectangleLinesEx(cell, blockType == selectedBlockType ? 3.0f : 1.0f,
                              blockType == selectedBlockType ? GOLD : RAYWHITE);
     }
     if (isListOpen) for (int index = 0; index < RpgBlockInventory_Count(); index++) {
         Rectangle row = GetBlockInventoryListItem(index);
-        DrawRectangleRec(row, index == selectedInventory ? Fade(DARKBLUE, 0.92f) : Fade(BLACK, 0.82f));
-        DrawRectangleLinesEx(row, 1.0f, RAYWHITE);
-        DrawText(RpgBlockInventory_Get(index)->name, 316, (int)row.y + 7, 16, RAYWHITE);
+        const RpgBlockInventory *listedInventory = RpgBlockInventory_Get(index);
+        DrawRectangleRec(row, index == selectedInventory ? Fade(SKYBLUE, 0.82f) : Fade(LIGHTGRAY, 0.92f));
+        DrawRectangleLinesEx(row, 2.0f, GetBlockInventoryBorderColor(listedInventory->borderColor));
+        Rectangle reorderHandle = GetBlockInventoryReorderHandleBounds(index);
+        DrawRectangleRounded(reorderHandle, 0.35f, 4, Fade(DARKGRAY, 0.70f));
+        for (int dot = 0; dot < 3; dot++) {
+            float dotY = reorderHandle.y + 4.0f + dot * 7.0f;
+            DrawCircleV((Vector2){ reorderHandle.x + 4.0f, dotY }, 1.15f, RAYWHITE);
+            DrawCircleV((Vector2){ reorderHandle.x + 8.0f, dotY }, 1.15f, RAYWHITE);
+        }
+        DrawSettingsText(TextFormat("%d", index + 1), row.x + 22.0f, row.y + 7.0f, 15.0f, BLACK);
+        Rectangle nameBounds = GetBlockInventoryNameBounds(index);
+        DrawRectangleRec(nameBounds, Fade(RAYWHITE, 0.78f));
+        DrawRectangleLinesEx(nameBounds, 1.0f, GetBlockInventoryBorderColor(listedInventory->borderColor));
+        GameFont_DrawPreset(RPG_TEXT_PRESET_UI, listedInventory->name, nameBounds.x + 4.0f, nameBounds.y + 5.0f,
+                            GameFont_GetPresetScale(RPG_TEXT_PRESET_UI, 15.0f));
+        Rectangle editBounds = GetBlockInventoryEditButtonBounds(index);
+        DrawRectangleRec(editBounds, DARKBLUE);
+        DrawRectangleLinesEx(editBounds, 1.0f, RAYWHITE);
+        DrawSettingsText("編集", editBounds.x + 23.0f, editBounds.y + 5.0f, 14.0f, RAYWHITE);
+        for (int blockIndex = 0; blockIndex < listedInventory->count; blockIndex++) {
+            Rectangle previewCell = GetBlockInventoryPreviewCellBounds(index, blockIndex);
+            DrawBlockInventoryPreviewCell(previewCell, listedInventory,
+                                          listedInventory->blockTypes[blockIndex], selectedBlockType, fileTexture);
+        }
     }
+    if (isListOpen) {
+        Rectangle addBounds = GetBlockInventoryAddButtonBounds();
+        Rectangle deleteBounds = GetBlockInventoryDeleteButtonBounds();
+        bool canAdd = RpgBlockInventory_Count() < RPG_BLOCK_INVENTORY_MAX_PALETTES;
+        bool canDelete = RpgBlockInventory_Count() > 1;
+        DrawRectangleRec(addBounds, canAdd ? DARKBLUE : GRAY);
+        DrawRectangleLinesEx(addBounds, 1.0f, RAYWHITE);
+        DrawSettingsText("+ パレット", addBounds.x + 20.0f, addBounds.y + 7.0f, 14.0f, RAYWHITE);
+        DrawRectangleRec(deleteBounds, canDelete ? MAROON : GRAY);
+        DrawRectangleLinesEx(deleteBounds, 1.0f, RAYWHITE);
+        DrawSettingsText("選択を削除", deleteBounds.x + 20.0f, deleteBounds.y + 7.0f, 14.0f, RAYWHITE);
+    }
+    if (drag != NULL && drag->active && dragSourcePalette >= 0 && dragSourceSlot >= 0) {
+        const RpgBlockInventory *source = RpgBlockInventory_Get(dragSourcePalette);
+        if (dragSourceSlot < source->count) {
+            Rectangle preview = RpgEditorDrag_GetPreviewBounds(drag, 32.0f, 32.0f);
+            DrawBlockInventoryPreviewCell(preview, source, source->blockTypes[dragSourceSlot],
+                                          selectedBlockType, fileTexture);
+            /* Shared drags retain their source until release; the overlay makes
+               this preview explicitly ghost-like rather than a second solid icon. */
+            DrawRectangleRec(preview, Fade(BLACK, 0.42f));
+            DrawRectangleLinesEx(preview, 2.0f, Fade(SKYBLUE, 0.85f));
+        }
+    }
+    if (drag != NULL && drag->active && dragSourcePalette >= 0 && dragSourceSlot >= 0) {
+        for (int paletteIndex = 0; paletteIndex < RpgBlockInventory_Count(); paletteIndex++) {
+            Rectangle row = GetBlockInventoryListItem(paletteIndex);
+            if (!CheckCollisionPointRec(drag->pointerPosition, row) || drag->pointerPosition.x < 305.0f) continue;
+            const RpgBlockInventory *destination = RpgBlockInventory_Get(paletteIndex);
+            int slot = Clamp((int)((drag->pointerPosition.x - 305.0f) / 30.0f), 0, destination->count);
+            Rectangle target = GetBlockInventoryPreviewCellBounds(paletteIndex, slot);
+            DrawRectangleLinesEx(target, 2.0f, SKYBLUE);
+            break;
+        }
+    }
+    if (paletteRowDrag != NULL && paletteRowDrag->active &&
+        paletteRowDragSource >= 0 && paletteRowDragSource < RpgBlockInventory_Count()) {
+        const RpgBlockInventory *source = RpgBlockInventory_Get(paletteRowDragSource);
+        Rectangle row = GetBlockInventoryListItem(paletteRowDragSource);
+        Rectangle preview = RpgEditorDrag_GetPreviewBounds(paletteRowDrag, row.width, row.height);
+        DrawRectangleRec(preview, Fade(SKYBLUE, 0.58f));
+        DrawRectangleLinesEx(preview, 2.0f, DARKBLUE);
+        GameFont_DrawPreset(RPG_TEXT_PRESET_UI, TextFormat("%d: %s", paletteRowDragSource + 1, source->name),
+                            preview.x + 24.0f, preview.y + 8.0f,
+                            GameFont_GetPresetScale(RPG_TEXT_PRESET_UI, 15.0f));
+    }
+}
+
+/* Block-mode context menu.  Its bounds are shared by drawing and input so a
+   map click cannot accidentally pass through the menu. */
+static Rectangle GetBlockContextDeleteBounds(Rectangle bounds)
+{
+    return (Rectangle){ bounds.x + 3.0f, bounds.y + 67.0f, bounds.width - 6.0f, 29.0f };
+}
+static Rectangle GetBlockContextDropBounds(Rectangle bounds)
+{ return (Rectangle){ bounds.x + 3.0f, bounds.y + 3.0f, bounds.width - 6.0f, 29.0f }; }
+static Rectangle GetBlockContextRestoreBounds(Rectangle bounds)
+{ return (Rectangle){ bounds.x + 3.0f, bounds.y + 35.0f, bounds.width - 6.0f, 29.0f }; }
+
+static void DrawBlockContextMenu(Rectangle bounds)
+{
+    Rectangle dropBounds = GetBlockContextDropBounds(bounds);
+    Rectangle restoreBounds = GetBlockContextRestoreBounds(bounds);
+    Rectangle deleteBounds = GetBlockContextDeleteBounds(bounds);
+    Vector2 pointer = RpgViewport_GetMousePosition();
+    DrawRectangleRec(bounds, (Color){ 36, 39, 45, 250 });
+    DrawRectangleLinesEx(bounds, 1.0f, (Color){ 175, 180, 188, 255 });
+    DrawRectangleRec(dropBounds, CheckCollisionPointRec(pointer, dropBounds) ? (Color){ 72, 75, 82, 255 } : (Color){ 54, 57, 63, 255 });
+    DrawRectangleRec(restoreBounds, CheckCollisionPointRec(pointer, restoreBounds) ? (Color){ 72, 75, 82, 255 } : (Color){ 54, 57, 63, 255 });
+    DrawRectangleRec(deleteBounds, CheckCollisionPointRec(pointer, deleteBounds) ? (Color){ 182, 42, 52, 255 } : (Color){ 72, 75, 82, 255 });
+    DrawText("Drop", (int)dropBounds.x + 12, (int)dropBounds.y + 6, 16, RAYWHITE);
+    DrawText("Restore", (int)restoreBounds.x + 12, (int)restoreBounds.y + 6, 16, RAYWHITE);
+    DrawText("Delete", (int)deleteBounds.x + 12, (int)deleteBounds.y + 7, 16, RAYWHITE);
 }
 
 // 既存の設置物ゴーストと同様、特殊ブロックは配置確定前にカーソル位置へ半透明で表示する。
@@ -3779,15 +4882,22 @@ static void DrawEditor(const RpgCharacter *player, const RpgCharacter *npc, cons
                        int selectedAttachmentIndex, bool isAttachmentPathEditing,
                        int selectedInventory, int selectedBlockType,
                        bool isBlockInventoryListOpen,
+                       const RpgEditorDrag *paletteBlockDrag,
+                       int paletteBlockDragSourcePalette, int paletteBlockDragSourceSlot,
+                       const RpgEditorDrag *paletteRowDrag, int paletteRowDragSource,
+                       int selectedPaletteInspectorIndex,
+                       bool isPaletteNameEditing, int paletteNameCursorIndex,
+                       int paletteNameSelectionAnchor, int paletteNameSelectionEnd,
                        bool isZipperPointerFeedbackSuppressed,
-                       int selectedReferenceRow, int selectedReferenceColumn, bool isReferencePathEditing,
+                        int selectedReferenceObjectIndex, bool isReferencePathEditing,
                        bool isReferencePointerFeedbackSuppressed,
                         int referencePathCursorIndex, int referencePathSelectionAnchor,
                         int referencePathSelectionEnd, const char *referenceFolderNameInput, RpgExplorerMode explorerMode,
                         bool isGlobalSettingsOpen, bool isStageSettingsOpen, bool isAreaInspectorOpen,
                         int playDialogueIndex, int playInspectTarget, int playInspectFunctionIndex,
                         int playInspectLineIndex, bool playZipperFollowsPlayer,
-                        const RpgSceneState *scene, bool isGlobalMapOpen)
+                       const RpgSceneState *scene, bool isGlobalMapOpen,
+                       bool isBlockContextMenuOpen, Rectangle blockContextMenuBounds)
 {
     (void)isStage3DialogueEditing;
     (void)isAreaEntryDialogueEditing;
@@ -3825,8 +4935,14 @@ static void DrawEditor(const RpgCharacter *player, const RpgCharacter *npc, cons
                                 layout->backgroundBrightness);
         RpgImageObjects_DrawLayer(&stage->imageObjects, drawMapIndex, RPG_STAGE_COLUMNS,
                                   RPG_STAGE_TILE_SIZE, WHITE, RPG_IMAGE_OBJECT_LAYER_BACK);
-        RpgStage_DrawMap(stage, drawMapIndex, blockMode && drawMapIndex == mapIndex,
-                         layout->blockBrightness);
+        RpgStage_DrawMapWithAttachments(stage, &attachments, drawMapIndex,
+                                        blockMode && drawMapIndex == mapIndex,
+                                        layout->blockBrightness);
+        RpgAttachments_DrawBlockSocketRecesses(&attachments, drawMapIndex, &stageBackground,
+                                                (Rectangle){ 0.0f, 0.0f,
+                                                             (float)(RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE),
+                                                             (float)(RPG_STAGE_ROWS * RPG_STAGE_TILE_SIZE) },
+                                                layout->backgroundBrightness);
         RpgStage_DrawMapReferenceObjects(stage, drawMapIndex, fileTexture);
         rlPopMatrix();
     }
@@ -3841,7 +4957,13 @@ static void DrawEditor(const RpgCharacter *player, const RpgCharacter *npc, cons
     RpgImageObjects_DrawLayer(&stage->imageObjects, mapIndex, RPG_STAGE_COLUMNS,
                               RPG_STAGE_TILE_SIZE, WHITE, RPG_IMAGE_OBJECT_LAYER_BACK);
     DrawImageObjectDragPreviewForLayer(stage, RPG_IMAGE_OBJECT_LAYER_BACK);
-    RpgStage_DrawMap(stage, mapIndex, blockMode, layout->blockBrightness);
+    RpgStage_DrawMapWithAttachments(stage, &attachments, mapIndex, blockMode,
+                                    layout->blockBrightness);
+    RpgAttachments_DrawBlockSocketRecesses(&attachments, mapIndex, &stageBackground,
+                                            (Rectangle){ 0.0f, 0.0f,
+                                                         (float)(RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE),
+                                                         (float)(RPG_STAGE_ROWS * RPG_STAGE_TILE_SIZE) },
+                                            layout->backgroundBrightness);
     RpgStage_DrawMapReferenceObjects(stage, mapIndex, fileTexture);
     if (isReferenceDragPreviewVisible) {
         Rectangle ghostBounds = { referenceDragPointer.x - RPG_STAGE_TILE_SIZE * 0.5f,
@@ -3861,6 +4983,7 @@ static void DrawEditor(const RpgCharacter *player, const RpgCharacter *npc, cons
     RpgWires_DrawElectric(&wires, dataShots,
                           mapIndex * RPG_STAGE_COLUMNS, RPG_STAGE_COLUMNS);
     RpgReceivers_DrawMap(&receivers, mapIndex);
+    RpgAttachments_DrawSocketLightsMap(&attachments, stage, mapIndex);
     RpgAttachments_DrawMapExcept(&attachments, mapIndex, attachmentDragDrawSkipIndex);
     RpgDataShots_DrawMap(dataShots, mapIndex);
     RpgImageObjects_DrawLayer(&stage->imageObjects, mapIndex, RPG_STAGE_COLUMNS,
@@ -3924,15 +5047,26 @@ static void DrawEditor(const RpgCharacter *player, const RpgCharacter *npc, cons
                               RPG_STAGE_TILE_SIZE, WHITE, RPG_IMAGE_OBJECT_LAYER_FRONT);
     DrawImageObjectDragPreviewForLayer(stage, RPG_IMAGE_OBJECT_LAYER_FRONT);
     // FILE.png もZipperと同じWindows風のホバー・選択表示を使う。
-    for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int localColumn = 0; localColumn < RPG_STAGE_COLUMNS; localColumn++) {
-        int column = mapIndex * RPG_STAGE_COLUMNS + localColumn;
-        if (!RpgBlockInventory_IsReferenceObject(stage->blocks[row][column])) continue;
-        Rectangle bounds = { localColumn * RPG_STAGE_TILE_SIZE, row * RPG_STAGE_TILE_SIZE,
-                             RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE };
-        bool isSelectedReference = selected == 7 && selectedReferenceRow == row &&
-                                   selectedReferenceColumn == column && !isReferencePointerFeedbackSuppressed;
-        RpgZipper_DrawPointerFeedback(bounds, CheckCollisionPointRec(GetEditorMapPointer(RpgViewport_GetMousePosition()), bounds) &&
-                                      !isReferencePointerFeedbackSuppressed, isSelectedReference);
+    for (int index = 0; index < stage->referenceObjects.count; index++) {
+        const RpgReferenceObject *object = &stage->referenceObjects.entries[index];
+        int objectRow = -1, objectColumn = -1;
+        if (!RpgStage_GetWorldCellAtPosition(stage, object->position, &objectRow, &objectColumn) ||
+            objectColumn < mapIndex * RPG_STAGE_COLUMNS ||
+            objectColumn >= (mapIndex + 1) * RPG_STAGE_COLUMNS) continue;
+        Vector2 origin = GetEditorMapWorldOrigin(stage, mapIndex);
+        float size = RPG_STAGE_TILE_SIZE * (object->drawScale > 0.0f ? object->drawScale : 1.0f);
+        Rectangle bounds = { object->position.x - origin.x - size * 0.5f,
+                             object->position.y - origin.y - size * 0.5f, size, size };
+        Rectangle worldBounds = { object->position.x - size * 0.5f,
+                                  object->position.y - size * 0.5f, size, size };
+        Vector2 pointer = GetEditorReferenceWorldPosition(stage, mapIndex,
+                                                           GetEditorMapPointer(RpgViewport_GetMousePosition()));
+        bool hovered = CheckCollisionPointRec(pointer, worldBounds) &&
+                       !isReferencePointerFeedbackSuppressed;
+        bool selectedReference = selected == 7 && selectedReferenceObjectIndex == index &&
+                                 !isReferencePointerFeedbackSuppressed;
+        if (hovered || selectedReference)
+            RpgZipper_DrawPointerFeedback(bounds, hovered, selectedReference);
     }
     rlPopMatrix();
     EndMode2D();
@@ -3981,11 +5115,13 @@ static void DrawEditor(const RpgCharacter *player, const RpgCharacter *npc, cons
              (int)editorWorkspace.controlBar.y, LIGHTGRAY);
     // ブロック編集中はキャンバス全面を導線・軌道の操作領域として使えるようにする。
     if (!blockMode && !isEditorPlaying)
-        DrawSettingsButtons(isGlobalSettingsOpen, isStageSettingsOpen, isAreaInspectorOpen, selected == 3);
+        DrawSettingsButtons(isGlobalSettingsOpen, isStageSettingsOpen, isAreaInspectorOpen);
     if (!isEditorPlaying) {
         DrawRectangleRec(editorPlayToggleBounds, DARKGREEN);
         DrawRectangleLinesEx(editorPlayToggleBounds, 1.0f, RAYWHITE);
-        DrawText("Play", (int)editorPlayToggleBounds.x + 18, (int)editorPlayToggleBounds.y + 5, 16, RAYWHITE);
+        GameFont_DrawPreset(RPG_TEXT_PRESET_UI, "Play",
+                            editorPlayToggleBounds.x + 18.0f, editorPlayToggleBounds.y + 5.0f,
+                            GameFont_GetPresetScale(RPG_TEXT_PRESET_UI, 16.0f));
     }
     DrawText(TextFormat("Area (%d, %d)", stage->mapGridX[mapIndex], stage->mapGridY[mapIndex]),
              562, 491, 16, MAROON);
@@ -3993,12 +5129,27 @@ static void DrawEditor(const RpgCharacter *player, const RpgCharacter *npc, cons
         DrawText("PLAY: A/D move   W jump   F2 stop", 16, 518, 14, RAYWHITE);
     else if (!blockMode)
         DrawText("B: Block mode   S: Save all   Esc: Deselect", 16, 518, 14, RAYWHITE);
-    if (blockMode && !isEditorPlaying) DrawBlockInventory(selectedInventory, selectedBlockType, isBlockInventoryListOpen, fileTexture);
+    /* Shiftを押している間は、クリックで開いた一覧状態とは独立して
+       パレット一覧を一時展開する。離すと通常のコンパクト表示へ戻る。 */
+    bool isPaletteListTemporarilyExpanded = blockMode &&
+        (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT));
+    bool isPaletteInspectorOpen = selected == RPG_EDITOR_PALETTE_INSPECTOR &&
+                                  selectedPaletteInspectorIndex >= 0 &&
+                                  selectedPaletteInspectorIndex < RpgBlockInventory_Count();
+    if (blockMode && !isEditorPlaying)
+        DrawBlockInventory(selectedInventory, selectedBlockType,
+                           isBlockInventoryListOpen || isPaletteListTemporarilyExpanded ||
+                           isPaletteInspectorOpen, paletteBlockDrag,
+                           paletteBlockDragSourcePalette, paletteBlockDragSourceSlot,
+                           paletteRowDrag, paletteRowDragSource,
+                           fileTexture);
     bool hasUnsavedChanges = HasAnyUnsavedChanges(savedSnapshot, player, npc, layout, stage, dialogue, stage3Event,
                                                    items, savedItems) || RpgStageCatalog_IsDirty(&stageCatalogData);
     if (!isEditorPlaying && !blockMode) {
         DrawRectangleRec(revertSavedBounds, hasUnsavedChanges ? MAROON : GRAY);
-        DrawText("Revert saved", (int)revertSavedBounds.x + 8, (int)revertSavedBounds.y + 5, 16, RAYWHITE);
+        GameFont_DrawPreset(RPG_TEXT_PRESET_UI, "Revert saved",
+                            revertSavedBounds.x + 8.0f, revertSavedBounds.y + 5.0f,
+                            GameFont_GetPresetScale(RPG_TEXT_PRESET_UI, 16.0f));
         if (AreItemsDifferent(items, savedItems)) DrawText("Items: unsaved", 720, 518, 14, MAROON);
         else if (AreWiresDifferent(&wires, &savedWires)) DrawText("Wires: unsaved", 720, 518, 14, MAROON);
         else if (AreReceiversDifferent(&receivers, &savedReceivers)) DrawText("Receivers: unsaved", 720, 518, 14, MAROON);
@@ -4007,7 +5158,8 @@ static void DrawEditor(const RpgCharacter *player, const RpgCharacter *npc, cons
     DrawText(message, 580, 518, 14, saveState == EDITOR_SAVE_SUCCEEDED ? DARKGREEN : MAROON);
     bool isModalOpen = isDialogueEditorOpen || isExamineFunctionListOpen || isFunctionTypeListOpen ||
                        isMoveFunctionEditorOpen || isWaitFunctionEditorOpen || isLayerChangeFunctionEditorOpen;
-    if (!isEditorPlaying && !blockMode && !isModalOpen && selected >= 1 && selected < RPG_EDITOR_INSPECTOR_COUNT &&
+    if (!isEditorPlaying && (!blockMode || selected == RPG_EDITOR_CONVEYOR_INSPECTOR ||
+                             selected == RPG_EDITOR_PALETTE_INSPECTOR) && !isModalOpen && selected >= 1 && selected < RPG_EDITOR_INSPECTOR_COUNT &&
         !(selected == 6 && isAttachmentPathDragVisualActive)) {
         Rectangle inspectorScreenBounds = GetInspectorScreenBounds(selected);
         inspectorDrawingSelected = selected;
@@ -4017,21 +5169,19 @@ static void DrawEditor(const RpgCharacter *player, const RpgCharacter *npc, cons
         BeginScissorMode((int)inspectorScreenBounds.x, (int)inspectorScreenBounds.y,
                          (int)inspectorScreenBounds.width, (int)inspectorScreenBounds.height);
     if (selected == 1) {
-        DrawInspectorFrame(playerInspectorBounds, "Player Inspector", DARKBLUE, GetInspectorCloseButton(1));
-        DrawText(TextFormat("Move speed: %.0f", player->moveSpeed), 716, 120, 17,
-                 player->moveSpeed != savedSnapshot->player.moveSpeed ? MAROON : DARKGRAY);
+        DrawInspectorFrame(playerInspectorBounds, "プレイヤー設定", DARKBLUE, GetInspectorCloseButton(1));
+        DrawSettingsText(TextFormat("移動速度: %.0f", player->moveSpeed), 716, 120, 17,
+                         player->moveSpeed != savedSnapshot->player.moveSpeed ? MAROON : BLACK);
         DrawText("[-] 20", 716, 144, 16, MAROON);
         DrawText("[+] 20", 820, 144, 16, DARKGREEN);
-        DrawText(TextFormat("Scale: %.1f", player->scale), 716, 166, 16,
-                 player->scale != savedSnapshot->player.scale ? MAROON : DARKGRAY);
+        DrawSettingsText(TextFormat("拡大率: %.1f", player->scale), 716, 166, 16,
+                         player->scale != savedSnapshot->player.scale ? MAROON : BLACK);
         DrawText("[-]", 812, 166, 16, MAROON);
         DrawText("[+]", 864, 166, 16, DARKGREEN);
         DrawSaveButton((Rectangle){ 716, 204, 90, 26 }, saveState);
         DrawRevertButton((Rectangle){ 814, 204, 90, 26 });
     } else if (selected == 2) {
         DrawNpcSummaryInspector(dialogue, npc, &savedSnapshot->npc, saveState);
-    } else if (selected == 3) {
-        DrawZipperInspector(zipper, &savedSnapshot->zipper, saveState);
     } else if (selected == 4) {
         DrawItemInspector(items, savedItems, selectedItemIndex, isItemNameEditing, itemNameCursorIndex,
                           itemNameSelectionAnchor, itemNameSelectionEnd);
@@ -4042,14 +5192,23 @@ static void DrawEditor(const RpgCharacter *player, const RpgCharacter *npc, cons
     } else if (selected == 6) {
         DrawAttachmentInspector(selectedAttachmentIndex, isAttachmentPathEditing);
     } else if (selected == 7) {
-        DrawReferenceInspector(stage, &savedSnapshot->stage, selectedReferenceRow, selectedReferenceColumn,
+        DrawReferenceInspector(stage, &savedSnapshot->stage, selectedReferenceObjectIndex,
                                isReferencePathEditing, referencePathCursorIndex,
                                referencePathSelectionAnchor, referencePathSelectionEnd,
                                referenceFolderNameInput);
     } else if (selected == RPG_EDITOR_IMAGE_INSPECTOR) {
         DrawImageObjectInspector(stage, &savedSnapshot->stage, selectedImageObjectIndex);
+    } else if (selected == RPG_EDITOR_CONVEYOR_INSPECTOR) {
+        DrawConveyorInspector(selectedConveyorIndex, conveyorPreviewRemaining);
+    } else if (selected == RPG_EDITOR_PALETTE_INSPECTOR &&
+               selectedPaletteInspectorIndex >= 0 &&
+               selectedPaletteInspectorIndex < RpgBlockInventory_Count()) {
+        DrawPaletteInspector(selectedPaletteInspectorIndex,
+                             isPaletteNameEditing,
+                             paletteNameCursorIndex, paletteNameSelectionAnchor,
+                             paletteNameSelectionEnd);
     } else if (selected == RPG_EDITOR_GLOBAL_SETTINGS_INSPECTOR && isGlobalSettingsOpen) {
-        DrawGlobalSettingsPanel(layout, savedSnapshot, explorerMode, RpgBuildCellStorage_GetMode());
+        DrawGlobalSettingsPanel(layout, player, zipper, savedSnapshot, explorerMode, RpgBuildCellStorage_GetMode());
     } else if (selected == RPG_EDITOR_STAGE_SETTINGS_INSPECTOR && isStageSettingsOpen) {
         DrawStageSettingsPanel(layout, stage3Event, savedSnapshot);
     } else if (selected == RPG_EDITOR_AREA_SETTINGS_INSPECTOR && isAreaInspectorOpen) {
@@ -4139,6 +5298,7 @@ static void DrawEditor(const RpgCharacter *player, const RpgCharacter *npc, cons
                                                       dialogue, stage3Event, items, savedItems, detailScroll);
     if (RpgScene_IsGameSettings(scene)) RpgScene_DrawGameSettingsOverlay(scene);
     else if (scene != NULL) RpgScene_DrawGameSettingsButton();
+    if (isBlockContextMenuOpen) DrawBlockContextMenu(blockContextMenuBounds);
     if (isGlobalMapOpen) DrawGlobalMapModal(stage, mapIndex);
     }
     RpgViewport_EndFrame();
@@ -4161,6 +5321,8 @@ int main(void)
     // エディター起動時にも、プレイ中に残った一時objectフォルダとInboxを掃除する。
     RpgObjectFolders_ClearSessionStorage();
     GameFont_Load(TextFormat("%s../assets/Fonts/NotoSansJP-VF.ttf", GetApplicationDirectory()));
+    (void)LoadBlockInventoryPreferences();
+    RegisterSettingsUiText();
     RpgSceneState editorScene = RpgScene_GameOnly();
     RpgStageCatalog_Load(&stageCatalogData);
     /* 起動時にも設計情報を本編用の静的パッケージへ同期する。実行中データは含めない。 */
@@ -4188,6 +5350,7 @@ int main(void)
                                  layout.groundLightness);
     static RpgStage stage;
     stage = stageLoadBuffer.stage;
+    RegisterStageFilePickerText(&stage);
     // 保存済みFileの日本語パスも、選択前から ? にならないようフォントへ登録する。
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++)
         if (RpgBlockInventory_IsReferenceObject(stage.blocks[row][column])) {
@@ -4267,6 +5430,9 @@ int main(void)
     int selectionEnd = 0;
     int draggedDialogueLine = -1;
     bool isDialogueEditorOpen = false;
+    /* A selected line is not necessarily being typed into.  Keep its focus
+       separate so selection can remain visible without capturing shortcuts. */
+    bool isDialogueTextEditing = false;
     bool isSpeakerEditing = false;
     int speakerCursorIndex = 0;
     int speakerSelectionAnchor = 0;
@@ -4311,8 +5477,7 @@ int main(void)
     int draggedMapEventIndex = -1;
     int selectedBlockInventory = 0;
     int selectedBlockType = 1;
-    int selectedReferenceRow = -1;
-    int selectedReferenceColumn = -1;
+    int selectedReferenceObjectIndex = -1;
     bool isReferencePathEditing = false;
     bool isReferencePathPointerHeld = false;
     char referenceFolderNameInput[RPG_STAGE_REFERENCE_PATH_LENGTH] = { 0 };
@@ -4320,6 +5485,16 @@ int main(void)
     int referencePathSelectionAnchor = 0;
     int referencePathSelectionEnd = 0;
     bool isBlockInventoryListOpen = false;
+    RpgEditorDrag paletteBlockDrag = { 0 };
+    int paletteBlockDragSourcePalette = -1;
+    int paletteBlockDragSourceSlot = -1;
+    RpgEditorDrag paletteRowDrag = { 0 };
+    int paletteRowDragSource = -1;
+    int selectedPaletteInspectorIndex = -1;
+    int paletteNameEditingIndex = -1;
+    int paletteNameCursorIndex = 0;
+    int paletteNameSelectionAnchor = 0;
+    int paletteNameSelectionEnd = 0;
     bool isBlockInventoryPointerHeld = false;
     bool isInspectorPointerHeld = false;
     bool isPropertyPlacementPending = false;
@@ -4338,6 +5513,10 @@ int main(void)
     int draggedAttachmentIndex = -1;
     RpgAttachment draggedAttachmentBeforeEdit = { 0 };
     bool isAttachmentErasePointerHeld = false;
+    bool isBlockContextMenuOpen = false;
+    int blockContextMenuRow = -1;
+    int blockContextMenuColumn = -1;
+    Rectangle blockContextMenuBounds = { 0 };
     RpgEditorDrag effectBlockDrag = { 0 };
     int draggedEffectBlockRow = -1;
     int draggedEffectBlockColumn = -1;
@@ -4346,8 +5525,7 @@ int main(void)
     RpgEditorDrag characterDrag = { 0 };
     int draggedCharacterKind = 0;
     RpgEditorDrag referenceDrag = { 0 };
-    int draggedReferenceRow = -1;
-    int draggedReferenceColumn = -1;
+    int draggedReferenceObjectIndex = -1;
     RpgEditorDrag imageObjectDrag = { 0 };
     int draggedImageObjectIndex = -1;
     int selectedItemIndex = -1;
@@ -4363,6 +5541,10 @@ int main(void)
     int itemNameSelectionAnchor = 0;
     int itemNameSelectionEnd = 0;
     const char *message = "Select a character";
+    /* TextFormat() returns a rotating temporary buffer.  Palette notifications
+       remain visible while the inventory UI formats many other labels, so they
+       must own their text rather than retaining that temporary pointer. */
+    char paletteStatusMessage[128] = "";
     static EditorSaveSnapshot savedSnapshot;
     RpgItems savedItems = items;
     UpdateSaveSnapshot(&savedSnapshot, &player, &npc, &layout, &stage, &dialogue, &stage3Event);
@@ -4396,6 +5578,8 @@ int main(void)
     Vector2 editorPlayZipperLaunchVelocity = { 0.0f, 0.0f };
     int editorPlayAttachedDataShotIndex = -1;
     int editorPlayAttachedAttachmentIndex = -1;
+    int editorPlayAttachedDynamicBlockIndex = -1;
+    int editorPlayAttachedReferenceObjectIndex = -1;
     Vector2 editorPlayAttachedDataShotOffset = { 0.0f, 0.0f };
     bool editorPlayZipperAttachedToBlock = false;
     RpgGridCell editorPlayZipperAttachedBlockCell = { -1, -1 };
@@ -4447,6 +5631,12 @@ int main(void)
     bool editorPlayZipperInspectCompleted = false;
     bool editorPlayZipperFollowsPlayer = false;
     double lastEditorPlayZipperClickTime = -1.0;
+    bool hasStageFolderSync = false;
+    int lastStageFolderSyncNumber = 0;
+    double nextStageFolderSyncTime = 0.0;
+    bool editorPreviewBuildDirty = true;
+    bool editorPreviewBuildReady = false;
+    int editorPreviewBuildStageNumber = 0;
 
     while (!shouldExit) {
         RpgGameWindow_UpdateAutoHide();
@@ -4454,9 +5644,19 @@ int main(void)
         /* テキスト編集と競合しない通常状態だけで、編集UIを隠すマップ確認表示を切り替える。 */
         bool isEditorFullscreenShortcut = IsKeyPressed(KEY_X) &&
                                           (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL));
-        bool isEditorTextEditing = activeDialogueLine >= 0 || isSpeakerEditing || isItemNameEditing ||
-                                   isReferencePathEditing || isInspectTitleEditing || isKeyDoorFailureEditing;
-        if (!isEditorPlaying && !isEditorTextEditing && !RpgScene_IsGameSettings(&editorScene) &&
+        /* Text focus is a single editor-wide state.  Keep this list limited to
+           fields that can receive keyboard input; the shared text module then
+           owns the actual capture flag used by every shortcut below. */
+        bool isEditorTextEditing = (isDialogueEditorOpen && isDialogueTextEditing &&
+                                    activeDialogueLine >= 0) ||
+                                   isSpeakerEditing || isItemNameEditing ||
+                                   isReferencePathEditing || isAttachmentPathEditing ||
+                                   isInspectTitleEditing || isKeyDoorFailureEditing ||
+                                   isAttachmentCapacityEditing || isAttachmentSpeedEditing ||
+                                   isZipperCapacityEditing || paletteNameEditingIndex >= 0;
+        RpgEditorText_SetKeyboardCapture(isEditorTextEditing);
+        bool isKeyboardCaptured = RpgEditorText_IsKeyboardCaptured();
+        if (!isEditorPlaying && !isKeyboardCaptured && !RpgScene_IsGameSettings(&editorScene) &&
             isEditorFullscreenShortcut) {
             isEditorGameFullscreen = !isEditorGameFullscreen;
         }
@@ -4476,7 +5676,7 @@ int main(void)
         if (isEditorPlaying) {
             RpgRuntimeContext runtime = {
                 .layout=&layout, .stageBackground=&stageBackground, .stage=&stage, .items=&items, .referenceDrops=&editorPlayReferenceDrops, .wires=&wires, .receivers=&receivers, .attachments=&attachments, .signalBlocks=&signalBlocks, .dataShots=&editorPlayShots, .buttonEvent=&editorPlayButtonEvent, .events=&mapEvents, .dialogue=&dialogue, .stage3Event=&stage3Event, .areaEntryEvents=&areaEntryEvents, .zipper=&zipperData, .inspect=&npcInspectData, .player=&player, .npc=&npc, .magnetRuntime=&editorPlayMagnetRuntime,
-                .dialogueIndex=&editorPlayDialogueIndex, .stage3IntroIndex=&editorPlayStage3IntroIndex, .inspectFunctionIndex=&editorPlayInspectFunctionIndex, .inspectLineIndex=&editorPlayInspectLineIndex, .inspectTarget=&editorPlayInspectTarget, .isInspectMoveRunning=&isEditorPlayInspectMoveRunning, .inspectMoveElapsed=&editorPlayInspectMoveElapsed, .inspectMoveStartX=&editorPlayInspectMoveStartX, .inspectMoveStartY=&editorPlayInspectMoveStartY, .activeInspectMove=&editorPlayActiveInspectMove, .inspectMoveTransitionElapsed=&editorPlayInspectMoveTransitionElapsed, .activeWaitFunctionIndex=&editorPlayActiveWaitFunctionIndex, .inspectWaitElapsed=&editorPlayInspectWaitElapsed, .stage3IntroShown=&editorPlayStage3IntroShown, .areaEntryShown=editorPlayAreaEntryShown, .activeEntryEvent=&editorPlayActiveEntryEvent, .zipperFollowsPlayer=&editorPlayZipperFollowsPlayer, .isZipperLaunched=&editorPlayZipperLaunched, .zipperLaunchVelocity=&editorPlayZipperLaunchVelocity, .attachedDataShotIndex=&editorPlayAttachedDataShotIndex, .attachedAttachmentIndex=&editorPlayAttachedAttachmentIndex, .attachedDataShotOffset=&editorPlayAttachedDataShotOffset, .isZipperAttachedToBlock=&editorPlayZipperAttachedToBlock, .zipperAttachedBlockCell=&editorPlayZipperAttachedBlockCell,
+                .dialogueIndex=&editorPlayDialogueIndex, .stage3IntroIndex=&editorPlayStage3IntroIndex, .inspectFunctionIndex=&editorPlayInspectFunctionIndex, .inspectLineIndex=&editorPlayInspectLineIndex, .inspectTarget=&editorPlayInspectTarget, .isInspectMoveRunning=&isEditorPlayInspectMoveRunning, .inspectMoveElapsed=&editorPlayInspectMoveElapsed, .inspectMoveStartX=&editorPlayInspectMoveStartX, .inspectMoveStartY=&editorPlayInspectMoveStartY, .activeInspectMove=&editorPlayActiveInspectMove, .inspectMoveTransitionElapsed=&editorPlayInspectMoveTransitionElapsed, .activeWaitFunctionIndex=&editorPlayActiveWaitFunctionIndex, .inspectWaitElapsed=&editorPlayInspectWaitElapsed, .stage3IntroShown=&editorPlayStage3IntroShown, .areaEntryShown=editorPlayAreaEntryShown, .activeEntryEvent=&editorPlayActiveEntryEvent, .zipperFollowsPlayer=&editorPlayZipperFollowsPlayer, .isZipperLaunched=&editorPlayZipperLaunched, .zipperLaunchVelocity=&editorPlayZipperLaunchVelocity, .attachedDataShotIndex=&editorPlayAttachedDataShotIndex, .attachedAttachmentIndex=&editorPlayAttachedAttachmentIndex, .attachedDataShotOffset=&editorPlayAttachedDataShotOffset, .isZipperAttachedToBlock=&editorPlayZipperAttachedToBlock, .zipperAttachedBlockCell=&editorPlayZipperAttachedBlockCell, .attachedDynamicBlockIndex=&editorPlayAttachedDynamicBlockIndex, .attachedReferenceObjectIndex=&editorPlayAttachedReferenceObjectIndex,
                 .zipperPointerSelected=&editorPlayZipperPointerSelected, .isZipperPointerFeedbackSuppressed=&editorPlayZipperPointerFeedbackSuppressed, .lastZipperPointerClickTime=&editorPlayLastZipperPointerClickTime, .selectedReferencePointerTarget=&editorPlaySelectedReference, .isReferencePointerFeedbackSuppressed=&editorPlayReferencePointerFeedbackSuppressed, .isReferencePointerPressed=&editorPlayReferencePointerPressed, .pressedReferenceTarget=&editorPlayPressedReference, .referencePressPosition=&editorPlayReferencePressPosition, .isReferenceDragActive=&editorPlayReferenceDragActive, .draggedReferenceTarget=&editorPlayDraggedReference, .referenceDragPosition=&editorPlayReferenceDragPosition, .lastReferencePointerClickTime=&editorPlayLastReferenceClickTime, .zipperAnimationElapsed=&editorPlayZipperAnimationElapsed, .npcInspectCompleted=&editorPlayNpcInspectCompleted, .zipperInspectCompleted=&editorPlayZipperInspectCompleted, .isZipperControllable=&editorPlayZipperControllable, .wasDataButtonPressed=&wasEditorPlayButtonPressed, .previousMap=&editorPlayPreviousMap, .worldCoordinatesInitialized=&editorPlayWorldCoordinatesInitialized, .cameraFollowsPlayer=&editorPlayCameraFollowsPlayer, .itemMessage=editorPlayItemMessage, .itemMessageSize=(int)sizeof(editorPlayItemMessage), .itemMessageTimer=&editorPlayItemMessageTimer, .referenceText=editorPlayReferenceText, .referenceTextSize=(int)sizeof(editorPlayReferenceText), .referenceFileName=editorPlayReferenceFileName, .referenceFileNameSize=(int)sizeof(editorPlayReferenceFileName), .isReferenceTextOpen=&editorPlayReferenceTextOpen, .camera=&editorPlayCamera, .zipperTexture=zipperTexture, .fileTexture=fileTexture,
                 // エディターではゲーム設定だけを共有し、タイトルへの遷移は許可しない。
                 .scene=&editorScene
@@ -4507,7 +5707,14 @@ int main(void)
                                &wires, &receivers, &attachments, &signalBlocks, &zipperData);
             (void)RpgViewport_Resize(RPG_EDITOR_WIDTH, RPG_EDITOR_HEIGHT);
             RpgStageBuild_Close();
-            RpgObjectFolders_EndStageBuild();
+            RpgObjectFolders_AbandonStageBuild();
+            /* Stop restores the editor snapshot.  Recreate its disposable
+               runtime cache now, rather than making the first idle editor
+               frame perform this work later. */
+            editorPreviewBuildReady = BuildEditorPreviewCache(currentStageNumber, &layout, &stage);
+            editorPreviewBuildDirty = !editorPreviewBuildReady;
+            editorPreviewBuildStageNumber = editorPreviewBuildReady ? currentStageNumber : 0;
+            nextStageFolderSyncTime = editorPreviewBuildReady ? 0.0 : GetTime() + 0.70;
             ResetEditorPreviews(&stage, &signalBlocks, &attachmentPreviewShots, &previewEvent,
                                 &isMovePreviewPlaying, &isZipperLaunchPreviewVisible,
                                 &isZipperLaunchPreviewReturning);
@@ -4522,7 +5729,7 @@ int main(void)
             editorPlayActiveWaitFunctionIndex = -1; editorPlayInspectWaitElapsed = 0.0f;
             editorPlayNpcInspectCompleted = false; editorPlayZipperInspectCompleted = false;
             editorPlayZipperFollowsPlayer = false; editorPlayZipperControllable = false;
-            editorPlayZipperLaunched = false; editorPlayAttachedDataShotIndex = -1;
+            editorPlayZipperLaunched = false; editorPlayAttachedDataShotIndex = -1; editorPlayAttachedDynamicBlockIndex = -1; editorPlayAttachedReferenceObjectIndex = -1;
             editorPlayAttachedAttachmentIndex = -1; editorPlayZipperAttachedToBlock = false;
             editorPlayZipperAttachedBlockCell = (RpgGridCell){ -1, -1 };
             editorPlayReferenceDragActive = false; editorPlayReferenceTextOpen = false;
@@ -4545,7 +5752,7 @@ int main(void)
         Vector2 mousePosition = RpgViewport_GetMousePosition();
         Vector2 mapMousePosition = GetEditorMapPointer(mousePosition);
         bool globalMapInteractionThisFrame = false;
-        bool isGlobalMapShortcut = !isEditorPlaying &&
+        bool isGlobalMapShortcut = !isKeyboardCaptured && !isEditorPlaying &&
             (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) && IsKeyPressed(KEY_M);
         if (isGlobalMapShortcut) {
             globalMapInteractionThisFrame = true;
@@ -4560,7 +5767,7 @@ int main(void)
                 message = "World map opened";
             } else message = "World map closed";
         }
-        if (isGlobalMapOpen && IsKeyPressed(KEY_ESCAPE)) {
+        if (!isKeyboardCaptured && isGlobalMapOpen && IsKeyPressed(KEY_ESCAPE)) {
             globalMapInteractionThisFrame = true;
             isGlobalMapOpen = false;
             draggedGlobalMapIndex = -1;
@@ -4615,7 +5822,7 @@ int main(void)
                     message = "Area deleted";
                 } else message = "Cannot delete the last area";
             }
-            if (IsKeyPressed(KEY_DELETE)) {
+            if (!isKeyboardCaptured && IsKeyPressed(KEY_DELETE)) {
                 globalMapInteractionThisFrame = true;
                 int deletedGridX = stage.mapGridX[mapIndex];
                 int deletedGridY = stage.mapGridY[mapIndex];
@@ -4638,7 +5845,7 @@ int main(void)
             }
         }
         RpgAreaDirection insertionDirection;
-        bool isAreaInsertRequested = !isEditorPlaying &&
+        bool isAreaInsertRequested = !isKeyboardCaptured && !isEditorPlaying &&
                                      RpgEditorNavigation_RequestAreaInsertion(&insertionDirection);
         if (isAreaInsertRequested) {
             int insertedMapIndex = RpgStage_InsertAdjacentMap(&stage, mapIndex, insertionDirection);
@@ -4649,6 +5856,12 @@ int main(void)
                 message = TextFormat("Area (%d, %d) inserted", stage.mapGridX[mapIndex],
                                      stage.mapGridY[mapIndex]);
             } else message = "Area limit reached";
+        }
+        if (selected >= 1 && selected < RPG_EDITOR_INSPECTOR_COUNT) {
+            /* パネルの必要高が変化した後も、以前のスクロール位置を入力座標へ
+               残さない。Folder は固定高なので常に0へ収束する。 */
+            inspectorScrollOffsets[selected] = Clamp(inspectorScrollOffsets[selected],
+                                                      0.0f, GetInspectorScrollMaximum(selected));
         }
         if (!isEditorPlaying && !blockMode && selected >= 1 && selected < RPG_EDITOR_INSPECTOR_COUNT) {
             Rectangle inspectorScreenBounds = GetInspectorScreenBounds(selected);
@@ -4754,8 +5967,9 @@ int main(void)
                     player.position = saveFlagPlayStart;
                 }
                 pendingSaveFlagPlayIndex = -1;
-                /* 前回のPlay専用Fileは編集状態に持ち込まない。Playごとに空の実行時集合から始める。 */
-                editorPlayReferenceDrops = RpgReferenceObjects_Default();
+                /* Copy editor-owned movable references into the isolated play
+                   session.  Stop still discards this runtime copy. */
+                editorPlayReferenceDrops = stage.referenceObjects;
                 RpgRuntime_ResetTransientState();
                 PrepareEditorPlayCharacter(&player, &stage);
                 /* Runtime area transitions use the player's occupied storage
@@ -4771,11 +5985,24 @@ int main(void)
                 editorPlayPreviousMap = isSaveFlagPlayRequested ? saveFlagPlayMapIndex :
                     RpgStage_FindNearestActiveMap(
                         &stage, (int)(player.position.x / (RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE)));
-                /* 選択中ステージだけを本編と同じ build 形式へ作り、直後からPlayで使う。 */
-                if (!RpgStageBuild_CreateEditorPreview(currentStageNumber, &stage, &attachments, player.position)) {
+                /* The idle editor sync pre-generates Stage/editor/StageN.  Reconnect
+                   that cache when it still represents this exact edit state; a
+                   just-edited or absent cache safely falls back to a normal build. */
+                bool usingPreparedEditorPreview = editorPreviewBuildReady &&
+                                                  !editorPreviewBuildDirty &&
+                                                  editorPreviewBuildStageNumber == currentStageNumber &&
+                                                  RpgStageBuild_ResumeEditorPreview(currentStageNumber, &stage);
+                if (!usingPreparedEditorPreview &&
+                    !RpgStageBuild_CreateEditorPreview(currentStageNumber, &stage, &attachments, player.position)) {
                     (void)RpgEditorPlay_Stop(&playSnapshot, &mapIndex, &player, &npc, &stage, &items,
                                               &mapEvents, &wires, &receivers, &attachments, &signalBlocks, &zipperData);
                     message = "Play build failed";
+                } else if (isSaveFlagPlayRequested &&
+                           !RpgObjectFolder_EnsureRuntimeZipperDirectory()) {
+                    (void)RpgEditorPlay_Stop(&playSnapshot, &mapIndex, &player, &npc, &stage, &items,
+                                              &mapEvents, &wires, &receivers, &attachments, &signalBlocks, &zipperData);
+                    RpgStageBuild_Close();
+                    message = "Save flag Zipper build failed";
                 } else if (!RpgViewport_Resize(RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE,
                                                 RPG_STAGE_ROWS * RPG_STAGE_TILE_SIZE)) {
                     (void)RpgEditorPlay_Stop(&playSnapshot, &mapIndex, &player, &npc, &stage, &items,
@@ -4801,11 +6028,11 @@ int main(void)
                 RpgZipper_ClearHeldObject(&zipperData);
                 lastEditorPlayZipperClickTime = -1.0;
                 if (isSaveFlagPlayRequested) {
-                    editorPlayZipperFollowsPlayer = true;
-                    editorPlayZipperControllable = true;
-                    editorPlayZipperInspectCompleted = true;
-                    zipperData.character.position = (Vector2){ player.position.x - RPG_STAGE_TILE_SIZE * player.scale,
-                                                               player.position.y };
+                    RpgRuntime_StartFollowingZipper(&zipperData, &player,
+                                                     &editorPlayZipperFollowsPlayer,
+                                                     &editorPlayZipperControllable,
+                                                     &editorPlayZipperInspectCompleted,
+                                                     &editorPlayZipperAnimationElapsed);
                 }
                 isEditorPlaying = true;
                 isGlobalMapOpen = false;
@@ -4828,8 +6055,14 @@ int main(void)
                                    &wires, &receivers, &attachments, &signalBlocks, &zipperData);
                 (void)RpgViewport_Resize(RPG_EDITOR_WIDTH, RPG_EDITOR_HEIGHT);
                 RpgStageBuild_Close();
-                RpgObjectFolders_EndStageBuild();
-                RpgObjectFolders_ClearSessionStorage();
+                RpgObjectFolders_AbandonStageBuild();
+                /* The play snapshot has just restored the exact edit state.
+                   Prepare its isolated runtime cache before normal editor
+                   input resumes, so the next Play only reconnects it. */
+                editorPreviewBuildReady = BuildEditorPreviewCache(currentStageNumber, &layout, &stage);
+                editorPreviewBuildDirty = !editorPreviewBuildReady;
+                editorPreviewBuildStageNumber = editorPreviewBuildReady ? currentStageNumber : 0;
+                nextStageFolderSyncTime = editorPreviewBuildReady ? 0.0 : GetTime() + 0.70;
                 RpgObjectFolders_PrepareAttachmentFolders(&attachments);
                 RpgObjectFolder_PrepareZipperAnimationCommand();
                 ResetEditorPreviews(&stage, &signalBlocks, &attachmentPreviewShots, &previewEvent,
@@ -4846,7 +6079,7 @@ int main(void)
                 editorPlayActiveWaitFunctionIndex = -1; editorPlayInspectWaitElapsed = 0.0f;
                 editorPlayNpcInspectCompleted = false; editorPlayZipperInspectCompleted = false;
                 editorPlayZipperFollowsPlayer = false; editorPlayZipperControllable = false;
-                editorPlayZipperLaunched = false; editorPlayAttachedDataShotIndex = -1;
+                editorPlayZipperLaunched = false; editorPlayAttachedDataShotIndex = -1; editorPlayAttachedDynamicBlockIndex = -1; editorPlayAttachedReferenceObjectIndex = -1;
                 editorPlayAttachedAttachmentIndex = -1; editorPlayZipperAttachedToBlock = false;
                 editorPlayZipperAttachedBlockCell = (RpgGridCell){ -1, -1 };
                 editorPlayReferenceDragActive = false; editorPlayReferenceTextOpen = false;
@@ -4959,7 +6192,7 @@ int main(void)
         }
         // 日本語IMEのローマ字入力中は、文字キーのエディター操作を受け付けない。
         // マップを切り替える時は、前のマップの選択・入力状態を必ず解除する。
-        int requestedMapIndex = (!isEditorPlaying && !isGlobalMapOpen && !isAreaInsertRequested) ?
+        int requestedMapIndex = (!isKeyboardCaptured && !isEditorPlaying && !isGlobalMapOpen && !isAreaInsertRequested) ?
                                 RpgEditorNavigation_RequestAreaMove(&stage, mapIndex) : -1;
         if (!isDialogueEditing && requestedMapIndex >= 0) {
             mapIndex = requestedMapIndex;
@@ -4973,34 +6206,31 @@ int main(void)
             isInspectDialogueEditing = false; isExamineFunctionListOpen = false; isFunctionTypeListOpen = false; isMoveFunctionEditorOpen = false; isMovePreviewPlaying = false;
             isZipperPointerFeedbackSuppressed = true;
         }
-        // ステージの選択は保存やRevertとは独立したエディター内の移動である。
-        if (!isEditorPlaying && !isDialogueEditing && !isAttachmentCapacityEditing && !isAttachmentSpeedEditing &&
-            (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT))) {
-            int stageIndex = RpgStageCatalog_FindIndex(&stageCatalogData, currentStageNumber);
-            int targetStageNumber = 0;
-            if ((IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_UP)) && stageIndex > 0)
-                targetStageNumber = RpgStageCatalog_GetNumberAt(&stageCatalogData, stageIndex - 1);
-            else if ((IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_DOWN)) && stageIndex >= 0 &&
-                     stageIndex + 1 < stageCatalogData.count)
-                targetStageNumber = RpgStageCatalog_GetNumberAt(&stageCatalogData, stageIndex + 1);
-            if (targetStageNumber > 0 && LoadEditorStageState(targetStageNumber, &layout, &player, &npc,
-                                                               &stage, &items, &dialogue, &stage3Event)) {
-                currentStageNumber = targetStageNumber;
-                RpgStageCatalog_Select(&stageCatalogData, currentStageNumber);
-                savedItems = items;
-                savedMapEvents = mapEvents; savedWires = wires; savedReceivers = receivers;
-                savedAttachments = attachments; savedSignalBlocks = signalBlocks;
-                UpdateSaveSnapshot(&savedSnapshot, &player, &npc, &layout, &stage, &dialogue, &stage3Event);
-                mapIndex = RpgStage_FindNearestActiveMap(&stage, 0);
-                if (isGlobalSettingsOpen) selected = RPG_EDITOR_GLOBAL_SETTINGS_INSPECTOR;
-                else if (isStageSettingsOpen) selected = RPG_EDITOR_STAGE_SETTINGS_INSPECTOR;
-                else if (isAreaInspectorOpen) selected = RPG_EDITOR_AREA_SETTINGS_INSPECTOR;
-                else selected = 0;
-                message = TextFormat("Stage%d selected", currentStageNumber);
-            }
+        if (!isKeyboardCaptured && !isGlobalMapOpen && !isDialogueEditing && !isAttachmentCapacityEditing && !isAttachmentSpeedEditing && !isZipperCapacityEditing && IsKeyPressed(KEY_B)) { blockMode = !blockMode; selected = 0; activeDialogueLine = -1; draggedDialogueLine = -1; isGlobalSettingsOpen = false; isStageSettingsOpen = false; isAreaInspectorOpen = false; isZipperPointerFeedbackSuppressed = true; isReferencePointerFeedbackSuppressed = true; }
+        /* Shift+矢印はステージを切り替えない。ブロックモードだけで、現在の
+           パレットを循環して切り替える。Ctrl+矢印のエリア挿入は従来どおり優先する。 */
+        if (!isKeyboardCaptured && blockMode && !isEditorPlaying && !isGlobalMapOpen &&
+            !isDialogueEditing && !isAttachmentCapacityEditing && !isAttachmentSpeedEditing &&
+            !isZipperCapacityEditing && !isItemNameEditing && !isReferencePathEditing &&
+            !isInspectTitleEditing && !isKeyDoorFailureEditing && paletteNameEditingIndex < 0 &&
+            (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) &&
+            !(IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) &&
+            (IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_RIGHT) ||
+             IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_DOWN))) {
+            /* 横は従来どおり 左=前 / 右=次。縦は見た目の一覧方向に合わせ、
+               上=次 / 下=前へ反転する。 */
+            int delta = (IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_DOWN)) ? -1 : 1;
+            int paletteCount = RpgBlockInventory_Count();
+            selectedBlockInventory = (selectedBlockInventory + delta + paletteCount) % paletteCount;
+            const RpgBlockInventory *inventory = RpgBlockInventory_Get(selectedBlockInventory);
+            selectedBlockType = GetBlockInventoryFirstBlockType(inventory);
+            isBlockInventoryListOpen = false;
+            snprintf(paletteStatusMessage, sizeof(paletteStatusMessage), "Palette %d: %s",
+                     selectedBlockInventory + 1, inventory->name);
+            message = paletteStatusMessage;
         }
-        if (!isGlobalMapOpen && !isDialogueEditing && !isAttachmentCapacityEditing && !isAttachmentSpeedEditing && !isZipperCapacityEditing && IsKeyPressed(KEY_B)) { blockMode = !blockMode; selected = 0; activeDialogueLine = -1; draggedDialogueLine = -1; isGlobalSettingsOpen = false; isStageSettingsOpen = false; isAreaInspectorOpen = false; isZipperPointerFeedbackSuppressed = true; isReferencePointerFeedbackSuppressed = true; }
-        if (blockMode && !isDialogueEditing && !isAttachmentCapacityEditing && !isAttachmentSpeedEditing && !isZipperCapacityEditing &&
+        if (!isKeyboardCaptured && blockMode && !isDialogueEditing && !isAttachmentCapacityEditing && !isAttachmentSpeedEditing && !isZipperCapacityEditing &&
+            paletteNameEditingIndex < 0 &&
             (IsKeyPressed(KEY_A) || IsKeyPressed(KEY_D))) {
             const RpgBlockInventory *inventory = RpgBlockInventory_Get(selectedBlockInventory);
             int selectedSlot = 0;
@@ -5009,22 +6239,45 @@ int main(void)
             if (IsKeyPressed(KEY_A)) selectedSlot = (selectedSlot + inventory->count - 1) % inventory->count;
             else selectedSlot = (selectedSlot + 1) % inventory->count;
             selectedBlockType = inventory->blockTypes[selectedSlot];
-            message = TextFormat("Palette: %s", inventory->name);
+            snprintf(paletteStatusMessage, sizeof(paletteStatusMessage), "Palette: %s", inventory->name);
+            message = paletteStatusMessage;
         }
-        if (!isGlobalMapOpen && !isDialogueEditing && !isAttachmentCapacityEditing && !isAttachmentSpeedEditing && !isZipperCapacityEditing && IsKeyPressed(KEY_ESCAPE)) { selected = 0; isGlobalSettingsOpen = false; isStageSettingsOpen = false; isAreaInspectorOpen = false; activeDialogueLine = -1; draggedDialogueLine = -1; isZipperPointerFeedbackSuppressed = true; isReferencePointerFeedbackSuppressed = true; message = "Selection cleared"; }
+        if (!isKeyboardCaptured && blockMode && !isDialogueEditing && !isAttachmentCapacityEditing && !isAttachmentSpeedEditing &&
+            !isZipperCapacityEditing && !isItemNameEditing && !isReferencePathEditing &&
+            !isInspectTitleEditing && !isKeyDoorFailureEditing && paletteNameEditingIndex < 0) {
+            int requestedPalette = -1;
+            if (IsKeyPressed(KEY_ONE)) requestedPalette = 0;
+            else if (IsKeyPressed(KEY_TWO)) requestedPalette = 1;
+            else if (IsKeyPressed(KEY_THREE)) requestedPalette = 2;
+            else if (IsKeyPressed(KEY_FOUR)) requestedPalette = 3;
+            else if (IsKeyPressed(KEY_FIVE)) requestedPalette = 4;
+            else if (IsKeyPressed(KEY_SIX)) requestedPalette = 5;
+            else if (IsKeyPressed(KEY_SEVEN)) requestedPalette = 6;
+            else if (IsKeyPressed(KEY_EIGHT)) requestedPalette = 7;
+            else if (IsKeyPressed(KEY_NINE)) requestedPalette = 8;
+            else if (IsKeyPressed(KEY_ZERO)) requestedPalette = 9;
+            if (requestedPalette >= 0 && requestedPalette < RpgBlockInventory_Count()) {
+                const RpgBlockInventory *inventory = RpgBlockInventory_Get(requestedPalette);
+                selectedBlockInventory = requestedPalette;
+                selectedBlockType = GetBlockInventoryFirstBlockType(inventory);
+                isBlockInventoryListOpen = false;
+                snprintf(paletteStatusMessage, sizeof(paletteStatusMessage), "Palette %d: %s",
+                         requestedPalette + 1, inventory->name);
+                message = paletteStatusMessage;
+            }
+        }
+        if (!isKeyboardCaptured && !isGlobalMapOpen && !isDialogueEditing && !isAttachmentCapacityEditing && !isAttachmentSpeedEditing && !isZipperCapacityEditing && IsKeyPressed(KEY_ESCAPE)) { selected = 0; isGlobalSettingsOpen = false; isStageSettingsOpen = false; isAreaInspectorOpen = false; activeDialogueLine = -1; draggedDialogueLine = -1; isZipperPointerFeedbackSuppressed = true; isReferencePointerFeedbackSuppressed = true; message = "Selection cleared"; }
         if (isDialogueEditorOpen && activeDialogueLine >= 0) {
             UpdateImeCandidateWindow(activeDialogueLine, dialogueScroll);
         }
 
-        bool isInspectorSurfaceClicked = !blockMode && !wasModalOpenAtFrameStart &&
+        bool isInspectorSurfaceClicked = (!blockMode || selected == RPG_EDITOR_PALETTE_INSPECTOR) && !wasModalOpenAtFrameStart &&
                                          selected >= 1 && selected < RPG_EDITOR_INSPECTOR_COUNT &&
                                          CheckCollisionPointRec(mousePosition, GetInspectorScreenBounds(selected));
         bool isPlayerInspectorClicked = !blockMode && !wasModalOpenAtFrameStart && selected == 1 &&
                                         IsInspectorContentScreenPoint(1, mousePosition);
         bool isNpcSummaryClicked = !blockMode && !wasModalOpenAtFrameStart && selected == 2 && !isDialogueEditorOpen && !isExamineFunctionListOpen &&
                                    IsInspectorContentScreenPoint(2, mousePosition);
-        bool isZipperInspectorClicked = !blockMode && !wasModalOpenAtFrameStart && selected == 3 &&
-                                        IsInspectorContentScreenPoint(3, mousePosition);
         bool isItemInspectorClicked = !blockMode && !wasModalOpenAtFrameStart && selected == 4 &&
                                       IsInspectorContentScreenPoint(4, mousePosition);
         bool isDoorInspectorClicked = !blockMode && !wasModalOpenAtFrameStart && selected == 5 &&
@@ -5036,6 +6289,11 @@ int main(void)
         bool isImageObjectInspectorClicked = !wasModalOpenAtFrameStart &&
                                              selected == RPG_EDITOR_IMAGE_INSPECTOR &&
                                              IsInspectorContentScreenPoint(RPG_EDITOR_IMAGE_INSPECTOR, mousePosition);
+        bool isPaletteInspectorClicked = !wasModalOpenAtFrameStart &&
+                                         selected == RPG_EDITOR_PALETTE_INSPECTOR &&
+                                         selectedPaletteInspectorIndex >= 0 &&
+                                         selectedPaletteInspectorIndex < RpgBlockInventory_Count() &&
+                                         IsInspectorContentScreenPoint(RPG_EDITOR_PALETTE_INSPECTOR, mousePosition);
         bool isGlobalSettingsInspectorClicked = !blockMode && !wasModalOpenAtFrameStart &&
                                                 isGlobalSettingsOpen && selected == RPG_EDITOR_GLOBAL_SETTINGS_INSPECTOR &&
                                                 IsInspectorContentScreenPoint(selected, mousePosition);
@@ -5048,9 +6306,9 @@ int main(void)
         bool isDialogueEditorClicked = isDialogueEditorOpen &&
                                        CheckCollisionPointRec(mousePosition, dialogueEditorBounds);
         bool isInspectorClicked = isPlayerInspectorClicked || isNpcSummaryClicked ||
-                                  isZipperInspectorClicked || isItemInspectorClicked || isDoorInspectorClicked || isDialogueEditorClicked;
+                                  isItemInspectorClicked || isDoorInspectorClicked || isDialogueEditorClicked;
         isInspectorClicked = isInspectorClicked || isAttachmentInspectorClicked || isReferenceInspectorClicked ||
-                             isImageObjectInspectorClicked ||
+                             isImageObjectInspectorClicked || isPaletteInspectorClicked ||
                              isGlobalSettingsInspectorClicked || isStageSettingsInspectorClicked ||
                              isAreaSettingsInspectorClicked ||
                              isInspectorSurfaceClicked;
@@ -5097,84 +6355,164 @@ int main(void)
         bool isAreaInspectorPanelClicked = !blockMode && !wasModalOpenAtFrameStart &&
                                             isAreaInspectorOpen && selected == RPG_EDITOR_AREA_SETTINGS_INSPECTOR &&
                                            IsInspectorContentScreenPoint(selected, mousePosition);
-        bool isZipperSettingsButtonClicked = !blockMode && !wasModalOpenAtFrameStart &&
-                                              CheckCollisionPointRec(mousePosition, zipperSettingsButtonBounds);
         if (isGlobalSettingsButtonClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             isGlobalSettingsOpen = !isGlobalSettingsOpen;
             isGlobalSettingsPointerHeld = true;
             isStageSettingsOpen = false;
             isAreaInspectorOpen = false;
-            if (isGlobalSettingsOpen) selected = RPG_EDITOR_GLOBAL_SETTINGS_INSPECTOR;
+            if (isGlobalSettingsOpen) {
+                ResetSettingsTabs(globalSettingsTabExpanded, RPG_GLOBAL_SETTINGS_TAB_COUNT);
+                inspectorScrollOffsets[RPG_EDITOR_GLOBAL_SETTINGS_INSPECTOR] = 0.0f;
+                selected = RPG_EDITOR_GLOBAL_SETTINGS_INSPECTOR;
+            }
             else if (selected == RPG_EDITOR_GLOBAL_SETTINGS_INSPECTOR) selected = 0;
         } else if (isGlobalSettingsPanelClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             isGlobalSettingsPointerHeld = true;
-            if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 314, 44, 26 }))
+            int tabIndex = FindSettingsTabAtPoint(globalSettingsTabs, globalSettingsTabExpanded,
+                                                  RPG_GLOBAL_SETTINGS_TAB_COUNT, inspectorMousePosition);
+            if (tabIndex >= 0) {
+                globalSettingsTabExpanded[tabIndex] = !globalSettingsTabExpanded[tabIndex];
+            } else if (globalSettingsTabExpanded[RPG_GLOBAL_SETTINGS_TAB_RUNTIME]) {
+                float y = GetSettingsTabContentTop(globalSettingsTabs, globalSettingsTabExpanded,
+                                                   RPG_GLOBAL_SETTINGS_TAB_COUNT, RPG_GLOBAL_SETTINGS_TAB_RUNTIME);
+                if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, y + 20, 44, 26 }))
                 layout.electricCellDelay = Clamp(layout.electricCellDelay - 0.01f, 0.01f, 2.0f);
-            else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 772, 314, 44, 26 }))
+                else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 772, y + 20, 44, 26 }))
                 layout.electricCellDelay = Clamp(layout.electricCellDelay + 0.01f, 0.01f, 2.0f);
-            else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 362, 44, 26 }))
+                else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, y + 70, 44, 26 }))
                 layout.magnetMetalSpeed = Clamp(layout.magnetMetalSpeed - 16.0f, 16.0f, 960.0f);
-            else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 772, 362, 44, 26 }))
+                else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 772, y + 70, 44, 26 }))
                 layout.magnetMetalSpeed = Clamp(layout.magnetMetalSpeed + 16.0f, 16.0f, 960.0f);
-            else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 454, 44, 26 }))
+            }
+            if (tabIndex < 0 && globalSettingsTabExpanded[RPG_GLOBAL_SETTINGS_TAB_PLAYER]) {
+                float y = GetSettingsTabContentTop(globalSettingsTabs, globalSettingsTabExpanded,
+                                                   RPG_GLOBAL_SETTINGS_TAB_COUNT, RPG_GLOBAL_SETTINGS_TAB_PLAYER);
+                if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, y + 20, 44, 26 }))
+                    player.moveSpeed = Clamp(player.moveSpeed - 20.0f, 60.0f, 480.0f);
+                else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 772, y + 20, 44, 26 }))
+                    player.moveSpeed = Clamp(player.moveSpeed + 20.0f, 60.0f, 480.0f);
+                else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, y + 70, 44, 26 }))
+                    player.scale = Clamp(player.scale - 0.1f, 0.5f, 1.0f);
+                else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 772, y + 70, 44, 26 }))
+                    player.scale = Clamp(player.scale + 0.1f, 0.5f, 1.0f);
+                else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, y + 108, 90, 26 }))
+                    message = SaveCharacterSettings(&layout, &player, true, &savedSnapshot) ? "Saved" : "Save failed";
+                else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 814, y + 108, 90, 26 })) {
+                    RevertCharacterSettings(&savedSnapshot, &layout, &player, true);
+                    message = "Reverted to saved";
+                }
+            }
+            if (tabIndex < 0 && globalSettingsTabExpanded[RPG_GLOBAL_SETTINGS_TAB_ZIPPER]) {
+                float y = GetSettingsTabContentTop(globalSettingsTabs, globalSettingsTabExpanded,
+                                                   RPG_GLOBAL_SETTINGS_TAB_COUNT, RPG_GLOBAL_SETTINGS_TAB_ZIPPER);
+                if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, y + 20, 44, 26 }))
                 layout.zipperFolderReturnDuration = Clamp(layout.zipperFolderReturnDuration - 0.05f, 0.10f, 5.0f);
-            else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 772, 454, 44, 26 }))
+                else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 772, y + 20, 44, 26 }))
                 layout.zipperFolderReturnDuration = Clamp(layout.zipperFolderReturnDuration + 0.05f, 0.10f, 5.0f);
-            else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 500, 44, 26 }))
+                else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, y + 76, 44, 26 }))
                 layout.zipperFolderReturnAnimationDelay = Clamp(layout.zipperFolderReturnAnimationDelay - 0.05f, 0.0f, 5.0f);
-            else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 772, 500, 44, 26 }))
+                else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 772, y + 76, 44, 26 }))
                 layout.zipperFolderReturnAnimationDelay = Clamp(layout.zipperFolderReturnAnimationDelay + 0.05f, 0.0f, 5.0f);
-            else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 552, 44, 26 }))
+                else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, y + 132, 44, 26 }))
                 layout.referenceFollowerScale = Clamp(layout.referenceFollowerScale - 0.05f, 0.15f, 1.0f);
-            else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 772, 552, 44, 26 }))
+                else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 772, y + 132, 44, 26 }))
                 layout.referenceFollowerScale = Clamp(layout.referenceFollowerScale + 0.05f, 0.15f, 1.0f);
-            else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 166, 88, 28 })) {
+                else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, y + 188, 44, 26 }))
+                    zipperData.launchSpeed = Clamp(zipperData.launchSpeed - 60.0f, 120.0f, 2400.0f);
+                else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 772, y + 188, 44, 26 }))
+                    zipperData.launchSpeed = Clamp(zipperData.launchSpeed + 60.0f, 120.0f, 2400.0f);
+                else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, y + 244, 44, 26 }))
+                    zipperData.returnSpeed = Clamp(zipperData.returnSpeed - 30.0f, 60.0f, 1200.0f);
+                else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 772, y + 244, 44, 26 }))
+                    zipperData.returnSpeed = Clamp(zipperData.returnSpeed + 30.0f, 60.0f, 1200.0f);
+                else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, y + 300, 44, 26 }))
+                    zipperData.followSpeed = Clamp(zipperData.followSpeed - 30.0f, 60.0f, 1200.0f);
+                else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 772, y + 300, 44, 26 }))
+                    zipperData.followSpeed = Clamp(zipperData.followSpeed + 30.0f, 60.0f, 1200.0f);
+                else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, y + 344, 188, 28 })) {
+                    zipperData.launchPreviewEnabled = !zipperData.launchPreviewEnabled;
+                    isZipperLaunchPreviewVisible = false;
+                    isZipperLaunchPreviewReturning = false;
+                    zipperLaunchPreviewCooldown = 1.0f;
+                    message = zipperData.launchPreviewEnabled ? "Preview enabled" : "Preview disabled";
+                } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, y + 378, 90, 26 }))
+                    message = SaveZipperSettings(&savedSnapshot) ? "Saved" : "Save failed";
+                else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 814, y + 378, 90, 26 })) {
+                    zipperData = savedSnapshot.zipper;
+                    message = "Reverted to saved";
+                }
+            }
+            if (tabIndex < 0 && globalSettingsTabExpanded[RPG_GLOBAL_SETTINGS_TAB_BUILD]) {
+                float y = GetSettingsTabContentTop(globalSettingsTabs, globalSettingsTabExpanded,
+                                                   RPG_GLOBAL_SETTINGS_TAB_COUNT, RPG_GLOBAL_SETTINGS_TAB_BUILD);
+                if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, y + 22, 88, 28 })) {
                 explorerMode = RPG_EXPLORER_MODE_VIRTUAL;
                 message = RpgExplorerLauncher_SaveMode(explorerMode) ? "Explorer: Virtual" : "Explorer setting failed";
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 812, 166, 92, 28 })) {
+                } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 812, y + 22, 92, 28 })) {
                 explorerMode = RPG_EXPLORER_MODE_WINDOWS;
                 message = RpgExplorerLauncher_SaveMode(explorerMode) ? "Explorer: Windows" : "Explorer setting failed";
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 226, 88, 28 })) {
+                } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, y + 82, 88, 28 })) {
                 message = RpgBuildCellStorage_SaveMode(RPG_BUILD_CELL_STORAGE_COMPACT) ?
                           "Build: compact cells" : "Build setting failed";
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 812, 226, 92, 28 })) {
+                } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 812, y + 82, 92, 28 })) {
                 message = "All folders is disabled";
+                }
             }
         } else if (isStageSettingsButtonClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             isStageSettingsOpen = !isStageSettingsOpen;
             isStageSettingsPointerHeld = true;
             isGlobalSettingsOpen = false;
             isAreaInspectorOpen = false;
-            if (isStageSettingsOpen) selected = RPG_EDITOR_STAGE_SETTINGS_INSPECTOR;
+            if (isStageSettingsOpen) {
+                ResetSettingsTabs(stageSettingsTabExpanded, RPG_STAGE_SETTINGS_TAB_COUNT);
+                inspectorScrollOffsets[RPG_EDITOR_STAGE_SETTINGS_INSPECTOR] = 0.0f;
+                selected = RPG_EDITOR_STAGE_SETTINGS_INSPECTOR;
+            }
             else if (selected == RPG_EDITOR_STAGE_SETTINGS_INSPECTOR) selected = 0;
         } else if (isStageSettingsPanelClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             isStageSettingsPointerHeld = true;
+            int tabIndex = FindSettingsTabAtPoint(stageSettingsTabs, stageSettingsTabExpanded,
+                                                  RPG_STAGE_SETTINGS_TAB_COUNT, inspectorMousePosition);
             int stageIndex = RpgStageCatalog_FindIndex(&stageCatalogData, currentStageNumber);
             int targetStageNumber = 0;
-            if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 150, 28, 26 }) && stageIndex > 0)
-                targetStageNumber = RpgStageCatalog_GetNumberAt(&stageCatalogData, stageIndex - 1);
-            else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 876, 150, 28, 26 }) &&
-                     stageIndex >= 0 && stageIndex + 1 < stageCatalogData.count)
-                targetStageNumber = RpgStageCatalog_GetNumberAt(&stageCatalogData, stageIndex + 1);
-            else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 196, 188, 26 })) {
+            if (tabIndex >= 0) {
+                stageSettingsTabExpanded[tabIndex] = !stageSettingsTabExpanded[tabIndex];
+                if (tabIndex == RPG_STAGE_SETTINGS_TAB_STAGE && !stageSettingsTabExpanded[tabIndex])
+                    isZipperCapacityEditing = false;
+            } else if (stageSettingsTabExpanded[RPG_STAGE_SETTINGS_TAB_STAGE]) {
+                float y = GetSettingsTabContentTop(stageSettingsTabs, stageSettingsTabExpanded,
+                                                   RPG_STAGE_SETTINGS_TAB_COUNT, RPG_STAGE_SETTINGS_TAB_STAGE);
+                if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, y + 6, 28, 26 }) && stageIndex > 0)
+                    targetStageNumber = RpgStageCatalog_GetNumberAt(&stageCatalogData, stageIndex - 1);
+                else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 876, y + 6, 28, 26 }) &&
+                         stageIndex >= 0 && stageIndex + 1 < stageCatalogData.count)
+                    targetStageNumber = RpgStageCatalog_GetNumberAt(&stageCatalogData, stageIndex + 1);
+                else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, y + 52, 188, 26 })) {
                 if (HasAnyUnsavedChanges(&savedSnapshot, &player, &npc, &layout, &stage, &dialogue, &stage3Event,
                                          &items, &savedItems)) message = "Save or Revert before changing stage";
                 else targetStageNumber = RpgStageCatalog_Add(&stageCatalogData);
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 230, 188, 26 })) {
+                } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, y + 86, 188, 26 })) {
                 if (HasAnyUnsavedChanges(&savedSnapshot, &player, &npc, &layout, &stage, &dialogue, &stage3Event,
                                          &items, &savedItems)) message = "Save or Revert before deleting stage";
                 else if (RpgStageCatalog_DeleteCurrent(&stageCatalogData))
                     targetStageNumber = RpgStageCatalog_GetCurrentNumber(&stageCatalogData);
                 else message = "Cannot delete the last stage";
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 796, 262, 70, 26 })) {
+                } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 796, y + 118, 70, 26 })) {
                 snprintf(zipperCapacityInput, sizeof(zipperCapacityInput), "%u", layout.zipperMaxCapacityKB);
                 isZipperCapacityEditing = true;
                 message = "Enter Zipper capacity in KB";
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 816, 330, 88, 24 })) {
+                }
+            }
+            if (tabIndex < 0 && stageSettingsTabExpanded[RPG_STAGE_SETTINGS_TAB_ENTRY_EVENT]) {
+                float y = GetSettingsTabContentTop(stageSettingsTabs, stageSettingsTabExpanded,
+                                                   RPG_STAGE_SETTINGS_TAB_COUNT, RPG_STAGE_SETTINGS_TAB_ENTRY_EVENT);
+                RpgEditorInspectorActionRow entryRow = MakeInspectorActionRow(716.0f, y + 6.0f, 188.0f, 24.0f);
+                Rectangle editBounds = { 716.0f, entryRow.contentBottom + 28.0f, 188.0f, 26.0f };
+                if (CheckCollisionPointRec(inspectorMousePosition, entryRow.actionBounds)) {
                 stage3Event.inspect.enabled = !stage3Event.inspect.enabled;
                 stage3Event.enabled = stage3Event.inspect.enabled;
                 message = stage3Event.inspect.enabled ? "Stage entry event enabled" : "Stage entry event disabled";
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 374, 188, 26 })) {
+                } else if (CheckCollisionPointRec(inspectorMousePosition, editBounds)) {
                 activeInspect = &stage3Event.inspect;
                 inspectFunctionIndex = 0;
                 modalHistory.count = 0;
@@ -5189,29 +6527,50 @@ int main(void)
                 activeDialogueLine = -1;
                 dialogueScroll = 0;
                 message = "Stage entry functions opened";
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 484, 188, 28 })) {
+                }
+            }
+            if (tabIndex < 0 && stageSettingsTabExpanded[RPG_STAGE_SETTINGS_TAB_BACKGROUND]) {
+                float y = GetSettingsTabContentTop(stageSettingsTabs, stageSettingsTabExpanded,
+                                                   RPG_STAGE_SETTINGS_TAB_COUNT, RPG_STAGE_SETTINGS_TAB_BACKGROUND);
+                RpgEditorFilePickerLayout backgroundPicker = { y + 1.0f, { 716.0f, y + 12.0f, 188.0f, 18.0f },
+                                                                { 716.0f, y + 32.0f, 188.0f, 28.0f }, 0.0f };
+                backgroundPicker = ResolveInspectorFilePickerLayout(&backgroundPicker, layout.backgroundPath);
+                float clearY = backgroundPicker.contentBottom + 8.0f;
+                float backgroundControlY = clearY + 34.0f;
+                if (CheckCollisionPointRec(inspectorMousePosition, backgroundPicker.selectBounds)) {
                 char selectedBackgroundPath[RPG_LAYOUT_BACKGROUND_PATH_LENGTH] = { 0 };
-                if (FileDialog_SelectPng(selectedBackgroundPath, sizeof(selectedBackgroundPath))) {
+                FileDialogRequest backgroundDialog = MakeSpriteFileDialogRequest("背景PNGを選択");
+                if (FileDialog_Select(selectedBackgroundPath, sizeof(selectedBackgroundPath), &backgroundDialog)) {
                     if (RpgStageBackground_Load(&stageBackground, selectedBackgroundPath)) {
                         snprintf(layout.backgroundPath, sizeof(layout.backgroundPath), "%s", selectedBackgroundPath);
                         message = "Background PNG loaded";
                     } else message = "Background PNG load failed";
                 }
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 520, 188, 28 })) {
+                } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, clearY, 188, 28 })) {
                 layout.backgroundPath[0] = '\0';
                 RpgStageBackground_Load(&stageBackground, layout.backgroundPath);
                 message = "Background cleared";
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 816, 546, 38, 24 })) {
+                } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 816, backgroundControlY, 38, 24 })) {
                 layout.backgroundBrightness = Clamp(layout.backgroundBrightness - 0.05f, 0.15f, 1.0f);
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 864, 546, 38, 24 })) {
+                } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 864, backgroundControlY, 38, 24 })) {
                 layout.backgroundBrightness = Clamp(layout.backgroundBrightness + 0.05f, 0.15f, 1.0f);
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 816, 586, 38, 24 })) {
+                } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 816, backgroundControlY + 40.0f, 38, 24 })) {
                 layout.blockBrightness = Clamp(layout.blockBrightness - 0.05f, 0.15f, 1.0f);
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 864, 586, 38, 24 })) {
+                } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 864, backgroundControlY + 40.0f, 38, 24 })) {
                 layout.blockBrightness = Clamp(layout.blockBrightness + 0.05f, 0.15f, 1.0f);
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 678, 188, 28 })) {
+                }
+            }
+            if (tabIndex < 0 && stageSettingsTabExpanded[RPG_STAGE_SETTINGS_TAB_GROUND_BLOCK]) {
+                float y = GetSettingsTabContentTop(stageSettingsTabs, stageSettingsTabExpanded,
+                                                   RPG_STAGE_SETTINGS_TAB_COUNT, RPG_STAGE_SETTINGS_TAB_GROUND_BLOCK);
+                RpgEditorFilePickerLayout groundPicker = { y + 1.0f, { 716.0f, y + 12.0f, 188.0f, 18.0f },
+                                                            { 716.0f, y + 32.0f, 188.0f, 28.0f }, 0.0f };
+                groundPicker = ResolveInspectorFilePickerLayout(&groundPicker, layout.groundBlockPath);
+                float clearY = groundPicker.contentBottom + 8.0f;
+                if (CheckCollisionPointRec(inspectorMousePosition, groundPicker.selectBounds)) {
                 char selectedGroundPath[RPG_LAYOUT_BACKGROUND_PATH_LENGTH] = { 0 };
-                if (FileDialog_SelectPng(selectedGroundPath, sizeof(selectedGroundPath))) {
+                FileDialogRequest groundDialog = MakeSpriteFileDialogRequest("地面PNGを選択");
+                if (FileDialog_Select(selectedGroundPath, sizeof(selectedGroundPath), &groundDialog)) {
                     if (RpgStageGroundTexture_Load(&groundBlockTexture, selectedGroundPath)) {
                         snprintf(layout.groundBlockPath, sizeof(layout.groundBlockPath), "%s", selectedGroundPath);
                         RpgStage_SetGroundTexture(groundBlockTexture.texture);
@@ -5220,31 +6579,37 @@ int main(void)
                         message = "Ground PNG loaded";
                     } else message = "Ground PNG load failed";
                 }
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 714, 188, 28 })) {
+                } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, clearY, 188, 28 })) {
                 layout.groundBlockPath[0] = '\0';
                 RpgStageGroundTexture_Load(&groundBlockTexture, layout.groundBlockPath);
                 RpgStage_SetGroundTexture(groundBlockTexture.texture);
                 RpgStage_SetGroundAppearance(layout.groundHue, layout.groundSaturation,
                                              layout.groundLightness);
                 message = "Ground PNG cleared";
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 816, 776, 38, 24 })) {
+                }
+            }
+            if (tabIndex < 0 && stageSettingsTabExpanded[RPG_STAGE_SETTINGS_TAB_GROUND_TONE]) {
+                float y = GetSettingsTabContentTop(stageSettingsTabs, stageSettingsTabExpanded,
+                                                   RPG_STAGE_SETTINGS_TAB_COUNT, RPG_STAGE_SETTINGS_TAB_GROUND_TONE);
+                if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 816, y, 38, 24 })) {
                 layout.groundHue = Clamp(layout.groundHue - 0.05f, 0.0f, 1.0f);
                 RpgStage_SetGroundAppearance(layout.groundHue, layout.groundSaturation, layout.groundLightness);
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 864, 776, 38, 24 })) {
+                } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 864, y, 38, 24 })) {
                 layout.groundHue = Clamp(layout.groundHue + 0.05f, 0.0f, 1.0f);
                 RpgStage_SetGroundAppearance(layout.groundHue, layout.groundSaturation, layout.groundLightness);
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 816, 812, 38, 24 })) {
+                } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 816, y + 38, 38, 24 })) {
                 layout.groundSaturation = Clamp(layout.groundSaturation - 0.05f, 0.0f, 1.0f);
                 RpgStage_SetGroundAppearance(layout.groundHue, layout.groundSaturation, layout.groundLightness);
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 864, 812, 38, 24 })) {
+                } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 864, y + 38, 38, 24 })) {
                 layout.groundSaturation = Clamp(layout.groundSaturation + 0.05f, 0.0f, 1.0f);
                 RpgStage_SetGroundAppearance(layout.groundHue, layout.groundSaturation, layout.groundLightness);
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 816, 848, 38, 24 })) {
+                } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 816, y + 76, 38, 24 })) {
                 layout.groundLightness = Clamp(layout.groundLightness - 0.05f, 0.0f, 1.0f);
                 RpgStage_SetGroundAppearance(layout.groundHue, layout.groundSaturation, layout.groundLightness);
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 864, 848, 38, 24 })) {
+                } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 864, y + 76, 38, 24 })) {
                 layout.groundLightness = Clamp(layout.groundLightness + 0.05f, 0.0f, 1.0f);
                 RpgStage_SetGroundAppearance(layout.groundHue, layout.groundSaturation, layout.groundLightness);
+            }
             }
             if (targetStageNumber > 0 && LoadEditorStageState(targetStageNumber, &layout, &player, &npc,
                                                                &stage, &items, &dialogue, &stage3Event)) {
@@ -5265,12 +6630,6 @@ int main(void)
             isStageSettingsOpen = false;
             if (isAreaInspectorOpen) selected = RPG_EDITOR_AREA_SETTINGS_INSPECTOR;
             else if (selected == RPG_EDITOR_AREA_SETTINGS_INSPECTOR) selected = 0;
-        } else if (isZipperSettingsButtonClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-            /* Area横の専用ボタンだけがZipper設定を開く。マップ選択には伝搬させない。 */
-            isGlobalSettingsOpen = false;
-            isStageSettingsOpen = false;
-            isAreaInspectorOpen = false;
-            selected = selected == 3 ? 0 : 3;
         } else if (isAreaInspectorPanelClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             isAreaInspectorPointerHeld = true;
             if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 178, 188, 26 })) {
@@ -5285,12 +6644,15 @@ int main(void)
                     isAreaInspectorOpen = false;
                     message = "Area deleted";
                 } else message = "Cannot delete the last area";
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 816, 208, 88, 24 })) {
+            } else {
+                RpgEditorInspectorActionRow entryRow = MakeInspectorActionRow(716.0f, 212.0f, 188.0f, 24.0f);
+                Rectangle editBounds = { 716.0f, entryRow.contentBottom + 28.0f, 188.0f, 26.0f };
+                if (CheckCollisionPointRec(inspectorMousePosition, entryRow.actionBounds)) {
                 RpgStage3Event *areaEvent = &areaEntryEvents.entries[mapIndex];
                 areaEvent->inspect.enabled = !areaEvent->inspect.enabled;
                 areaEvent->enabled = areaEvent->inspect.enabled;
                 message = areaEvent->inspect.enabled ? "Area entry event enabled" : "Area entry event disabled";
-            } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 246, 188, 26 })) {
+                } else if (CheckCollisionPointRec(inspectorMousePosition, editBounds)) {
                 activeInspect = &areaEntryEvents.entries[mapIndex].inspect;
                 inspectFunctionIndex = 0;
                 modalHistory.count = 0;
@@ -5305,6 +6667,7 @@ int main(void)
                 activeDialogueLine = -1;
                 dialogueScroll = 0;
                 message = "Area entry functions opened";
+                }
             }
         }
         if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) isGlobalSettingsPointerHeld = false;
@@ -5314,6 +6677,121 @@ int main(void)
                                     CheckCollisionPointRec(mousePosition, revertSavedBounds);
         int clickedBlockType = 0;
         bool isBlockInventoryControlClicked = false;
+        bool isPaletteListTemporarilyExpanded = blockMode &&
+            (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT));
+        bool isPaletteInspectorOpen = selected == RPG_EDITOR_PALETTE_INSPECTOR &&
+                                      selectedPaletteInspectorIndex >= 0 &&
+                                      selectedPaletteInspectorIndex < RpgBlockInventory_Count();
+        bool isPaletteListExpanded = isBlockInventoryListOpen || isPaletteListTemporarilyExpanded ||
+                                     isPaletteInspectorOpen;
+        bool isPaletteIconPointer = false;
+        bool isPaletteReorderHandlePointer = false;
+        if (blockMode && isPaletteListExpanded && !isGlobalMapOpen) {
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                for (int paletteIndex = 0; paletteIndex < RpgBlockInventory_Count(); paletteIndex++) {
+                    if (!CheckCollisionPointRec(mousePosition,
+                                                GetBlockInventoryReorderHandleBounds(paletteIndex))) continue;
+                    paletteRowDragSource = paletteIndex;
+                    RpgEditorDrag_Begin(&paletteRowDrag, mousePosition);
+                    isPaletteReorderHandlePointer = true;
+                    isBlockInventoryControlClicked = true;
+                    break;
+                }
+                if (!isPaletteReorderHandlePointer) {
+                    for (int paletteIndex = 0; paletteIndex < RpgBlockInventory_Count() &&
+                         !isPaletteIconPointer; paletteIndex++) {
+                        const RpgBlockInventory *palette = RpgBlockInventory_Get(paletteIndex);
+                        for (int slot = 0; slot < palette->count; slot++) {
+                            if (!CheckCollisionPointRec(mousePosition,
+                                                        GetBlockInventoryPreviewCellBounds(paletteIndex, slot))) continue;
+                            paletteBlockDragSourcePalette = paletteIndex;
+                            paletteBlockDragSourceSlot = slot;
+                            RpgEditorDrag_Begin(&paletteBlockDrag, mousePosition);
+                            isPaletteIconPointer = true;
+                            isBlockInventoryControlClicked = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (paletteRowDragSource >= 0 && IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+                (void)RpgEditorDrag_Update(&paletteRowDrag, mousePosition);
+            if (paletteRowDragSource >= 0 && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+                int sourcePalette = paletteRowDragSource;
+                bool moved = false;
+                if (paletteRowDrag.active) {
+                    for (int paletteIndex = 0; paletteIndex < RpgBlockInventory_Count(); paletteIndex++) {
+                        if (!CheckCollisionPointRec(mousePosition,
+                                                    GetBlockInventoryListItem(paletteIndex))) continue;
+                        int finalIndex = RpgBlockInventory_MovePalette(sourcePalette, paletteIndex);
+                        if (finalIndex >= 0) {
+                            selectedBlockInventory = RemapBlockInventoryIndexAfterMove(
+                                selectedBlockInventory, sourcePalette, finalIndex);
+                            selectedPaletteInspectorIndex = RemapBlockInventoryIndexAfterMove(
+                                selectedPaletteInspectorIndex, sourcePalette, finalIndex);
+                            paletteNameEditingIndex = RemapBlockInventoryIndexAfterMove(
+                                paletteNameEditingIndex, sourcePalette, finalIndex);
+                            moved = finalIndex != sourcePalette;
+                        }
+                        break;
+                    }
+                    if (moved) {
+                        if (!SaveBlockInventoryPreferences()) message = "Palette save failed";
+                        else message = "Palette order changed";
+                    } else message = "Drop onto a palette row";
+                }
+                paletteRowDragSource = -1;
+                RpgEditorDrag_End(&paletteRowDrag);
+                isBlockInventoryControlClicked = true;
+            }
+            if (paletteRowDragSource < 0 && paletteBlockDragSourcePalette >= 0 &&
+                IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+                (void)RpgEditorDrag_Update(&paletteBlockDrag, mousePosition);
+            if (paletteRowDragSource < 0 && paletteBlockDragSourcePalette >= 0 &&
+                IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+                int sourcePalette = paletteBlockDragSourcePalette;
+                int sourceSlot = paletteBlockDragSourceSlot;
+                const RpgBlockInventory *source = RpgBlockInventory_Get(sourcePalette);
+                int sourceType = sourceSlot >= 0 && sourceSlot < source->count ?
+                                 source->blockTypes[sourceSlot] : 0;
+                bool moved = false;
+                if (paletteBlockDrag.active) {
+                    for (int paletteIndex = 0; paletteIndex < RpgBlockInventory_Count(); paletteIndex++) {
+                        Rectangle row = GetBlockInventoryListItem(paletteIndex);
+                        if (!CheckCollisionPointRec(mousePosition, row) || mousePosition.x < 305.0f) continue;
+                        const RpgBlockInventory *destination = RpgBlockInventory_Get(paletteIndex);
+                        int destinationSlot = (int)((mousePosition.x - 305.0f) / 30.0f);
+                        destinationSlot = Clamp(destinationSlot, 0, destination->count);
+                        moved = RpgBlockInventory_MoveBlock(sourcePalette, sourceSlot,
+                                                            paletteIndex, destinationSlot);
+                        if (moved) {
+                            selectedBlockInventory = paletteIndex;
+                            selectedBlockType = sourceType;
+                        }
+                        break;
+                    }
+                    if (moved) {
+                        if (!SaveBlockInventoryPreferences()) message = "Palette save failed";
+                        else message = "Block moved in palette";
+                    } else message = "Drop onto a palette row";
+                } else if (sourceType > 0) {
+                    selectedBlockInventory = sourcePalette;
+                    clickedBlockType = sourceType;
+                }
+                paletteBlockDragSourcePalette = -1;
+                paletteBlockDragSourceSlot = -1;
+                RpgEditorDrag_End(&paletteBlockDrag);
+                isBlockInventoryControlClicked = true;
+            }
+        }
+        /* Palette names are edited only from the dedicated inspector.  The
+           compact palette list remains a selector, so it cannot accidentally
+           consume normal block-mode placement input. */
+        if (paletteNameEditingIndex >= 0 &&
+            (selected != RPG_EDITOR_PALETTE_INSPECTOR ||
+             paletteNameEditingIndex != selectedPaletteInspectorIndex)) {
+            paletteNameEditingIndex = -1;
+        }
         if (blockMode && !isGlobalMapOpen && !globalMapInteractionThisFrame && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             const RpgBlockInventory *inventory = RpgBlockInventory_Get(selectedBlockInventory);
             // ブロック枠はインベントリ名のクリック領域より先に判定し、選択クリックを一覧表示へ渡さない。
@@ -5327,20 +6805,121 @@ int main(void)
             } else if (CheckCollisionPointRec(mousePosition, (Rectangle){ 24, 486, 30, 48 })) {
                 isBlockInventoryControlClicked = true;
                 selectedBlockInventory = (selectedBlockInventory + RpgBlockInventory_Count() - 1) % RpgBlockInventory_Count();
-                selectedBlockType = RpgBlockInventory_Get(selectedBlockInventory)->blockTypes[0];
+                selectedBlockType = GetBlockInventoryFirstBlockType(RpgBlockInventory_Get(selectedBlockInventory));
             } else if (CheckCollisionPointRec(mousePosition, (Rectangle){ 254, 486, 30, 48 })) {
                 isBlockInventoryControlClicked = true;
                 selectedBlockInventory = (selectedBlockInventory + 1) % RpgBlockInventory_Count();
-                selectedBlockType = RpgBlockInventory_Get(selectedBlockInventory)->blockTypes[0];
+                selectedBlockType = GetBlockInventoryFirstBlockType(RpgBlockInventory_Get(selectedBlockInventory));
             } else if (CheckCollisionPointRec(mousePosition, (Rectangle){ 54, 486, 200, 48 })) {
                 isBlockInventoryControlClicked = true;
                 isBlockInventoryListOpen = !isBlockInventoryListOpen;
-            } else if (isBlockInventoryListOpen) {
-                for (int index = 0; index < RpgBlockInventory_Count(); index++) if (CheckCollisionPointRec(mousePosition, GetBlockInventoryListItem(index))) {
-                    selectedBlockInventory = index;
-                    selectedBlockType = RpgBlockInventory_Get(index)->blockTypes[0];
-                    isBlockInventoryListOpen = false;
-                    isBlockInventoryControlClicked = true;
+            } else if (isPaletteListExpanded &&
+                       CheckCollisionPointRec(mousePosition, GetBlockInventoryAddButtonBounds())) {
+                int addedPalette = RpgBlockInventory_Add();
+                isBlockInventoryControlClicked = true;
+                if (addedPalette >= 0) {
+                    selectedBlockInventory = addedPalette;
+                    selectedPaletteInspectorIndex = addedPalette;
+                    selected = RPG_EDITOR_PALETTE_INSPECTOR;
+                    if (!SaveBlockInventoryPreferences()) message = "Palette save failed";
+                    else message = "Palette added";
+                } else message = "Palette limit reached";
+            } else if (isPaletteListExpanded &&
+                       CheckCollisionPointRec(mousePosition, GetBlockInventoryDeleteButtonBounds())) {
+                int deletedPalette = selectedBlockInventory;
+                isBlockInventoryControlClicked = true;
+                if (RpgBlockInventory_Remove(deletedPalette)) {
+                    selectedBlockInventory = Clamp(deletedPalette, 0, RpgBlockInventory_Count() - 1);
+                    selectedBlockType = GetBlockInventoryFirstBlockType(
+                        RpgBlockInventory_Get(selectedBlockInventory));
+                    if (selectedPaletteInspectorIndex == deletedPalette) {
+                        selected = 0;
+                        selectedPaletteInspectorIndex = -1;
+                    } else if (selectedPaletteInspectorIndex > deletedPalette) {
+                        selectedPaletteInspectorIndex--;
+                    }
+                    paletteNameEditingIndex = -1;
+                    if (!SaveBlockInventoryPreferences()) message = "Palette save failed";
+                    else message = "Palette deleted";
+                } else message = "Keep at least one palette";
+            } else if (isPaletteListExpanded && !isPaletteIconPointer) {
+                for (int index = 0; index < RpgBlockInventory_Count(); index++) {
+                    const RpgBlockInventory *listedInventory = RpgBlockInventory_Get(index);
+                    if (CheckCollisionPointRec(mousePosition, GetBlockInventoryEditButtonBounds(index))) {
+                        selectedBlockInventory = index;
+                        selectedBlockType = GetBlockInventoryFirstBlockType(listedInventory);
+                        selectedPaletteInspectorIndex = index;
+                        paletteNameEditingIndex = -1;
+                        selected = RPG_EDITOR_PALETTE_INSPECTOR;
+                        /* The expanded list is only a selector.  Closing this
+                           inspector must restore the compact palette bar unless
+                           Shift is currently held. */
+                        isBlockInventoryListOpen = false;
+                        isBlockInventoryControlClicked = true;
+                        break;
+                    }
+                    if (CheckCollisionPointRec(mousePosition, GetBlockInventoryListItem(index))) {
+                        selectedBlockInventory = index;
+                        selectedBlockType = GetBlockInventoryFirstBlockType(listedInventory);
+                        isBlockInventoryListOpen = false;
+                        isBlockInventoryControlClicked = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (selected == RPG_EDITOR_PALETTE_INSPECTOR &&
+            selectedPaletteInspectorIndex >= 0 &&
+            selectedPaletteInspectorIndex < RpgBlockInventory_Count()) {
+            RpgBlockInventory *paletteInspector =
+                RpgBlockInventory_GetMutable(selectedPaletteInspectorIndex);
+            Rectangle paletteNameBounds = { 716.0f, 162.0f, 188.0f, 28.0f };
+            bool paletteNameClicked = isPaletteInspectorClicked &&
+                IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+                CheckCollisionPointRec(inspectorMousePosition, paletteNameBounds);
+            if (paletteNameClicked && paletteInspector != NULL) {
+                paletteNameEditingIndex = selectedPaletteInspectorIndex;
+                RpgEditorText_BeginPointerSelection(paletteInspector->name,
+                                                     inspectorMousePosition.x - paletteNameBounds.x - 8.0f, 15.0f,
+                                                     &paletteNameCursorIndex, &paletteNameSelectionAnchor,
+                                                     &paletteNameSelectionEnd);
+            }
+            if (paletteNameEditingIndex == selectedPaletteInspectorIndex && paletteInspector != NULL) {
+                UpdateShortText(paletteInspector->name, sizeof(paletteInspector->name),
+                                &paletteNameCursorIndex, &paletteNameSelectionAnchor,
+                                &paletteNameSelectionEnd);
+                if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) &&
+                    CheckCollisionPointRec(inspectorMousePosition, paletteNameBounds))
+                    RpgEditorText_UpdatePointerSelection(paletteInspector->name,
+                                                          inspectorMousePosition.x - paletteNameBounds.x - 8.0f, 15.0f,
+                                                          &paletteNameCursorIndex, &paletteNameSelectionEnd);
+                /* Reuse the same native IME placement path as the existing
+                   inspector name fields, so Japanese input remains usable. */
+                UpdateImeCandidateWindowAt(724 + (int)inspectorOffsets[RPG_EDITOR_PALETTE_INSPECTOR].x,
+                                           190 + (int)inspectorOffsets[RPG_EDITOR_PALETTE_INSPECTOR].y);
+                bool finishNameEdit = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_ESCAPE) ||
+                    RpgEditorText_ShouldEndEditingOnOutsideClick(paletteNameBounds,
+                                                                  inspectorMousePosition);
+                if (finishNameEdit) {
+                    if (paletteInspector->name[0] == '\0')
+                        snprintf(paletteInspector->name, sizeof(paletteInspector->name), "Palette %d",
+                                 selectedPaletteInspectorIndex + 1);
+                    if (!SaveBlockInventoryPreferences()) message = "Palette save failed";
+                    else message = "Palette updated";
+                    paletteNameEditingIndex = -1;
+                }
+            }
+            if (isPaletteInspectorClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                for (int colorIndex = 0; colorIndex < RPG_BLOCK_INVENTORY_BORDER_COLOR_COUNT; colorIndex++) {
+                    Rectangle colorBounds = { 716.0f + colorIndex * 47.0f, 224.0f, 43.0f, 26.0f };
+                    if (CheckCollisionPointRec(inspectorMousePosition, colorBounds)) {
+                        if (RpgBlockInventory_SetBorderColor(selectedPaletteInspectorIndex,
+                                                             (RpgBlockInventoryBorderColor)colorIndex)) {
+                            if (!SaveBlockInventoryPreferences()) message = "Palette save failed";
+                            else message = "Palette border updated";
+                        }
+                        break;
+                    }
                 }
             }
         }
@@ -5354,84 +6933,114 @@ int main(void)
                 message = "Image object selected";
             } else message = TextFormat("Block %d selected", selectedBlockType);
         }
-        Rectangle referencePathBounds = { 716.0f, 144.0f, 188.0f, 28.0f };
-        bool isReferencePathClicked = isReferenceInspectorClicked &&
+        RpgReferenceObject *selectedReferenceObject =
+            selectedReferenceObjectIndex >= 0 && selectedReferenceObjectIndex < stage.referenceObjects.count ?
+            &stage.referenceObjects.entries[selectedReferenceObjectIndex] : NULL;
+        bool isReferenceFolderSelected = selectedReferenceObject != NULL &&
+                                         selectedReferenceObject->objectKind == RPG_REFERENCE_OBJECT_FOLDER;
+        RpgEditorFolderInspectorLayout referenceFolderLayout = GetFolderInspectorLayout();
+        Rectangle referencePathBounds = isReferenceFolderSelected ? referenceFolderLayout.nameBounds :
+                                        (Rectangle){ 716.0f, 156.0f, 188.0f, 28.0f };
+        RpgEditorFilePickerLayout referencePickerLayout = { 142.0f, { 716.0f, 156.0f, 188.0f, 28.0f },
+                                                              { 716.0f, 192.0f, 188.0f, 28.0f }, 0.0f };
+        if (!isReferenceFolderSelected && selectedReferenceObject != NULL) {
+            const char *referenceDisplay = selectedReferenceObject->sourcePath[0] != '\0' ?
+                selectedReferenceObject->sourcePath : GetReferenceRelativeDisplayPath(selectedReferenceObject->path);
+            referencePickerLayout = ResolveInspectorFilePickerLayout(&referencePickerLayout, referenceDisplay);
+        }
+        Rectangle referenceSelectBounds = isReferenceFolderSelected ? referenceFolderLayout.openBounds :
+                                        referencePickerLayout.selectBounds;
+        bool isReferencePathClicked = isReferenceInspectorClicked && isReferenceFolderSelected &&
                                      CheckCollisionPointRec(inspectorMousePosition, referencePathBounds);
         bool isReferenceFileSelectClicked = isReferenceInspectorClicked &&
-                                            CheckCollisionPointRec(inspectorMousePosition,
-                                                                   (Rectangle){ 716.0f, 180.0f, 188.0f, 28.0f });
-        bool isReferenceFolderSelected = selectedReferenceRow >= 0 && selectedReferenceColumn >= 0 &&
-                                         RpgBlockInventory_IsReferenceFolder(stage.blocks[selectedReferenceRow][selectedReferenceColumn]);
+                                            CheckCollisionPointRec(inspectorMousePosition, referenceSelectBounds);
         bool isReferenceFolderRenameClicked = isReferenceInspectorClicked && isReferenceFolderSelected &&
                                               CheckCollisionPointRec(inspectorMousePosition,
-                                                                     (Rectangle){ 716.0f, 214.0f, 188.0f, 28.0f });
+                                                                     referenceFolderLayout.renameBounds);
+        const RpgImageObject *inspectorImageObject =
+            selectedImageObjectIndex >= 0 && selectedImageObjectIndex < stage.imageObjects.count ?
+            &stage.imageObjects.entries[selectedImageObjectIndex] : NULL;
+        RpgEditorFilePickerLayout imagePickerLayout = GetImageInspectorFilePickerLayout(inspectorImageObject);
+        float imageControlsY = GetImageInspectorControlsTop(inspectorImageObject);
         bool isImagePngSelectClicked = isImageObjectInspectorClicked &&
-                                       CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716.0f, 174.0f, 188.0f, 28.0f });
+                                       CheckCollisionPointRec(inspectorMousePosition, imagePickerLayout.selectBounds);
         bool isImageScaleDownClicked = isImageObjectInspectorClicked &&
-                                        CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 816.0f, 212.0f, 32.0f, 26.0f });
+                                        CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 816.0f, imageControlsY, 32.0f, 26.0f });
         bool isImageScaleUpClicked = isImageObjectInspectorClicked &&
-                                      CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 854.0f, 212.0f, 50.0f, 26.0f });
+                                      CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 854.0f, imageControlsY, 50.0f, 26.0f });
         bool isImageLayerBackClicked = isImageObjectInspectorClicked &&
-                                       CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716.0f, 268.0f, 60.0f, 28.0f });
+                                       CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716.0f, imageControlsY + 56.0f, 60.0f, 28.0f });
         bool isImageLayerMiddleClicked = isImageObjectInspectorClicked &&
-                                         CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 780.0f, 268.0f, 60.0f, 28.0f });
+                                         CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 780.0f, imageControlsY + 56.0f, 60.0f, 28.0f });
         bool isImageLayerFrontClicked = isImageObjectInspectorClicked &&
-                                       CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 844.0f, 268.0f, 60.0f, 28.0f });
+                                       CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 844.0f, imageControlsY + 56.0f, 60.0f, 28.0f });
         bool isImageAppearancePngClicked = isImageObjectInspectorClicked &&
-                                           CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716.0f, 336.0f, 58.0f, 26.0f });
+                                           CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716.0f, imageControlsY + 124.0f, 58.0f, 26.0f });
         bool isImageAppearanceFolderClicked = isImageObjectInspectorClicked &&
-                                              CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 778.0f, 336.0f, 62.0f, 26.0f });
+                                              CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 778.0f, imageControlsY + 124.0f, 62.0f, 26.0f });
         bool isImageAppearanceFileClicked = isImageObjectInspectorClicked &&
-                                            CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 844.0f, 336.0f, 60.0f, 26.0f });
+                                            CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 844.0f, imageControlsY + 124.0f, 60.0f, 26.0f });
         if (isReferencePathClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             const char *path = isReferenceFolderSelected ? referenceFolderNameInput :
-                               RpgStage_GetReferencePathAtCell(&stage, selectedReferenceRow, selectedReferenceColumn);
-            referencePathCursorIndex = GetCursorIndexAtX(path, inspectorMousePosition.x - 724.0f, 15.0f);
-            referencePathSelectionAnchor = referencePathCursorIndex;
-            referencePathSelectionEnd = referencePathCursorIndex;
+                               selectedReferenceObject->path;
+            RpgEditorText_BeginPointerSelection(path, inspectorMousePosition.x - 724.0f, 15.0f,
+                                                 &referencePathCursorIndex, &referencePathSelectionAnchor,
+                                                 &referencePathSelectionEnd);
             isReferencePathEditing = true;
             isReferencePathPointerHeld = true;
         }
-        if (isReferencePathEditing && selected == 7 && selectedReferenceRow >= 0 && selectedReferenceColumn >= 0) {
+        if (!isReferenceFolderSelected) isReferencePathEditing = false;
+        if (isReferencePathEditing && selected == 7 && selectedReferenceObject != NULL) {
             char *path = isReferenceFolderSelected ? referenceFolderNameInput :
-                         stage.referencePaths[selectedReferenceRow][selectedReferenceColumn];
+                          selectedReferenceObject->path;
             UpdateShortText(path, isReferenceFolderSelected ? sizeof(referenceFolderNameInput) :
-                            sizeof(stage.referencePaths[selectedReferenceRow][selectedReferenceColumn]), &referencePathCursorIndex,
+                            sizeof(selectedReferenceObject->path), &referencePathCursorIndex,
                             &referencePathSelectionAnchor, &referencePathSelectionEnd);
             if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && isReferencePathPointerHeld) {
-                referencePathSelectionEnd = GetCursorIndexAtX(path, inspectorMousePosition.x - 724.0f, 15.0f);
-                referencePathCursorIndex = referencePathSelectionEnd;
+                RpgEditorText_UpdatePointerSelection(path, inspectorMousePosition.x - 724.0f, 15.0f,
+                                                      &referencePathCursorIndex, &referencePathSelectionEnd);
             }
-            UpdateImeCandidateWindowAt(724 + (int)inspectorOffsets[7].x, 172 + (int)inspectorOffsets[7].y);
+            if (RpgEditorText_ShouldEndEditingOnOutsideClick(referencePathBounds,
+                                                             inspectorMousePosition))
+                isReferencePathEditing = false;
+            UpdateImeCandidateWindowAt(724 + (int)inspectorOffsets[7].x,
+                                       (isReferenceFolderSelected ? 172 : 184) + (int)inspectorOffsets[7].y);
         }
         if (isReferenceFileSelectClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
-            selectedReferenceRow >= 0 && selectedReferenceColumn >= 0) {
+            selectedReferenceObject != NULL) {
             if (isReferenceFolderSelected) {
-                const char *folderPath = RpgStage_GetReferencePathAtCell(&stage, selectedReferenceRow,
-                                                                          selectedReferenceColumn);
-                message = RpgExplorerLauncher_OpenDirectory(folderPath) ? "Folder opened" : "Folder open failed";
+                message = RpgExplorerLauncher_OpenDirectory(selectedReferenceObject->path) ? "Folder opened" : "Folder open failed";
             } else {
             char selectedPath[RPG_STAGE_REFERENCE_PATH_LENGTH] = { 0 };
+            char resolvedSourcePath[RPG_STAGE_REFERENCE_PATH_LENGTH] = { 0 };
             char copiedPath[RPG_STAGE_REFERENCE_PATH_LENGTH] = { 0 };
             char previousCopiedPath[RPG_STAGE_REFERENCE_PATH_LENGTH] = { 0 };
+            FileDialogRequest referenceDialog = MakeFilesFileDialogRequest("ファイルを選択");
             // プロジェクトで扱う外部ファイルを集約したFilesフォルダを、選択画面の初期位置にする。
-            if (FileDialog_SelectFile(selectedPath, sizeof(selectedPath),
-                                      TextFormat("%s../assets/Files", GetApplicationDirectory()))) {
+            if (FileDialog_Select(selectedPath, sizeof(selectedPath), &referenceDialog) &&
+                FileDialog_ResolvePath(&referenceDialog, selectedPath, resolvedSourcePath,
+                                       sizeof(resolvedSourcePath))) {
                 /* 外部パスはステージに保存せず、種類を問わずbuild配下のマス専用コピーへ差し替える。 */
-                snprintf(previousCopiedPath, sizeof(previousCopiedPath), "%s",
-                         RpgStage_GetReferencePathAtCell(&stage, selectedReferenceRow, selectedReferenceColumn));
-                if (RpgStageStorage_CopyReferenceFileToBuild(currentStageNumber, selectedReferenceRow,
-                                                             selectedReferenceColumn, selectedPath, copiedPath,
-                                                             (int)sizeof(copiedPath)) &&
-                    RpgStage_SetReferencePathAtCell(&stage, selectedReferenceRow, selectedReferenceColumn,
-                                                     copiedPath)) {
+                int referenceRow = -1, referenceColumn = -1;
+                snprintf(previousCopiedPath, sizeof(previousCopiedPath), "%s", selectedReferenceObject->path);
+                if (RpgStage_GetWorldCellAtPosition(&stage, selectedReferenceObject->position,
+                                                    &referenceRow, &referenceColumn) &&
+                    RpgStageStorage_CopyReferenceFileToBuild(currentStageNumber, referenceRow,
+                                                             referenceColumn, resolvedSourcePath, copiedPath,
+                                                             (int)sizeof(copiedPath))) {
+                    snprintf(selectedReferenceObject->path, sizeof(selectedReferenceObject->path), "%s", copiedPath);
+                    /* Keep the real saved picker value.  The build copy above
+                       remains an implementation detail used by runtime file
+                       operations and must not replace this relative path. */
+                    snprintf(selectedReferenceObject->sourcePath,
+                             sizeof(selectedReferenceObject->sourcePath), "%s", selectedPath);
                     if (strcmp(previousCopiedPath, copiedPath) != 0)
                         RpgStageStorage_RemoveReferenceFileCopy(currentStageNumber, previousCopiedPath);
-                    referencePathCursorIndex = (int)strlen(copiedPath);
+                    referencePathCursorIndex = (int)strlen(selectedPath);
                     referencePathSelectionAnchor = referencePathCursorIndex;
                     referencePathSelectionEnd = referencePathCursorIndex;
                     isReferencePathEditing = false;
-                    GameFont_AddText(copiedPath);
+                    GameFont_AddText(selectedPath);
                     message = "File copied to build";
                 } else message = "File copy failed";
             } else message = "File selection cancelled";
@@ -5439,10 +7048,11 @@ int main(void)
         }
         if (isReferenceFolderRenameClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             char renamedPath[RPG_STAGE_REFERENCE_PATH_LENGTH] = { 0 };
-            const char *oldPath = RpgStage_GetReferencePathAtCell(&stage, selectedReferenceRow, selectedReferenceColumn);
+            const char *oldPath = selectedReferenceObject != NULL ? selectedReferenceObject->path : "";
             if (RpgStageStorage_RenameBuildFolder(currentStageNumber, oldPath, referenceFolderNameInput,
                                                   renamedPath, (int)sizeof(renamedPath)) &&
-                RpgStage_SetReferencePathAtCell(&stage, selectedReferenceRow, selectedReferenceColumn, renamedPath)) {
+                selectedReferenceObject != NULL) {
+                snprintf(selectedReferenceObject->path, sizeof(selectedReferenceObject->path), "%s", renamedPath);
                 isReferencePathEditing = false;
                 message = "Folder renamed";
             } else message = "Folder rename failed";
@@ -5452,7 +7062,8 @@ int main(void)
             RpgImageObject *imageObject = &stage.imageObjects.entries[selectedImageObjectIndex];
             if (isImagePngSelectClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                 char selectedPath[RPG_IMAGE_OBJECT_PATH_LENGTH] = { 0 };
-                if (FileDialog_SelectPng(selectedPath, sizeof(selectedPath))) {
+                FileDialogRequest imageDialog = MakeSpriteFileDialogRequest("画像PNGを選択");
+                if (FileDialog_Select(selectedPath, sizeof(selectedPath), &imageDialog)) {
                     snprintf(imageObject->path, sizeof(imageObject->path), "%s", selectedPath);
                     GameFont_AddText(selectedPath);
                     message = "Image PNG selected";
@@ -5490,7 +7101,7 @@ int main(void)
                 imageObject->appearance = RPG_IMAGE_OBJECT_APPEARANCE_SHELL_FILE;
                 message = "Image appearance: Shell file";
             }
-            if ((IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) && IsKeyPressed(KEY_D)) {
+            if (!isKeyboardCaptured && (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) && IsKeyPressed(KEY_D)) {
                 int duplicate = RpgImageObjects_DuplicateRight(&stage.imageObjects, selectedImageObjectIndex,
                                                                 RPG_STAGE_WORLD_COLUMNS);
                 if (duplicate >= 0) { selectedImageObjectIndex = duplicate; message = "Image duplicated to the right"; }
@@ -5498,24 +7109,29 @@ int main(void)
             }
         }
         /* Folder配置物は通常の選択状態からCtrl+Dで右隣へ複製し、見た目設定も同じ値を引き継ぐ。 */
-        if (!isReferencePathEditing && selected == 7 && selectedReferenceRow >= 0 && selectedReferenceColumn >= 0 &&
-            RpgBlockInventory_IsReferenceFolder(stage.blocks[selectedReferenceRow][selectedReferenceColumn]) &&
+        if (!isKeyboardCaptured && !isReferencePathEditing && selected == 7 && selectedReferenceObject != NULL &&
+            selectedReferenceObject->objectKind == RPG_REFERENCE_OBJECT_FOLDER &&
             (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) && IsKeyPressed(KEY_D)) {
-            int copyColumn = selectedReferenceColumn + 1;
+            int sourceRow = -1, sourceColumn = -1;
             char copyFolderName[64];
             char copyFolderPath[RPG_STAGE_REFERENCE_PATH_LENGTH] = { 0 };
-            if (copyColumn >= RPG_STAGE_WORLD_COLUMNS || stage.blocks[selectedReferenceRow][copyColumn] != 0) {
-                message = "Folder copy needs an empty right cell";
+            if (!RpgStage_GetWorldCellAtPosition(&stage, selectedReferenceObject->position,
+                                                 &sourceRow, &sourceColumn) ||
+                sourceColumn + 1 >= RPG_STAGE_WORLD_COLUMNS) {
+                message = "Folder copy needs a cell on the right";
             } else {
-                snprintf(copyFolderName, sizeof(copyFolderName), "Folder_%d_%d", selectedReferenceRow + 1, copyColumn + 1);
+                int copyColumn = sourceColumn + 1;
+                snprintf(copyFolderName, sizeof(copyFolderName), "Folder_%d_%d", sourceRow + 1, copyColumn + 1);
                 if (RpgStageStorage_CreateBuildFolder(currentStageNumber, copyFolderName, copyFolderPath,
                                                       (int)sizeof(copyFolderPath))) {
-                    stage.blocks[selectedReferenceRow][copyColumn] = RPG_BLOCK_REFERENCE_FOLDER;
-                    RpgStage_SetReferencePathAtCell(&stage, selectedReferenceRow, copyColumn, copyFolderPath);
-                    selectedReferenceColumn = copyColumn;
-                    snprintf(referenceFolderNameInput, sizeof(referenceFolderNameInput), "%s", copyFolderName);
-                    blockEditedThisFrame = true;
-                    message = "Folder copied to the right";
+                    if (RpgReferenceObjects_Add(&stage.referenceObjects, RPG_REFERENCE_OBJECT_FOLDER,
+                                                RpgStage_GetWorldPositionForCell(&stage, sourceRow, copyColumn),
+                                                copyFolderPath, 0)) {
+                        selectedReferenceObjectIndex = stage.referenceObjects.count - 1;
+                        snprintf(referenceFolderNameInput, sizeof(referenceFolderNameInput), "%s", copyFolderName);
+                        blockEditedThisFrame = true;
+                        message = "Folder copied to the right";
+                    } else message = "Reference object limit reached";
                 } else message = "Folder copy failed";
             }
         }
@@ -5787,9 +7403,10 @@ int main(void)
                 message = npcInspect.enabled ? "Examine enabled" : "Examine disabled";
             } else if (CheckCollisionPointRec(mousePosition, (Rectangle){ 260, 132, 368, 24 })) {
                 isInspectTitleEditing = true;
-                titleCursorIndex = GetCursorIndexAtX(npcInspect.functions[inspectFunctionIndex].title, mousePosition.x - 268.0f, 16.0f);
-                titleSelectionAnchor = titleCursorIndex;
-                titleSelectionEnd = titleCursorIndex;
+                RpgEditorText_BeginPointerSelection(npcInspect.functions[inspectFunctionIndex].title,
+                                                     mousePosition.x - 268.0f, 16.0f,
+                                                     &titleCursorIndex, &titleSelectionAnchor,
+                                                     &titleSelectionEnd);
             } else if (CheckCollisionPointRec(mousePosition, (Rectangle){ 430, 394, 210, 30 }) &&
                        !isFunctionPreviewPlaying) {
                 /* プレビューは編集データを一時的に動かし、終了時にスナップショットへ戻す。 */
@@ -5909,12 +7526,15 @@ int main(void)
         if (isExamineFunctionListOpen && isInspectTitleEditing) {
             UpdateShortText(npcInspect.functions[inspectFunctionIndex].title, RPG_INSPECT_TITLE_LENGTH,
                             &titleCursorIndex, &titleSelectionAnchor, &titleSelectionEnd);
+            if (RpgEditorText_ShouldEndEditingOnOutsideClick((Rectangle){ 260, 132, 368, 24 },
+                                                             mousePosition))
+                isInspectTitleEditing = false;
         }
         if (isExamineFunctionListOpen && isInspectTitleEditing && IsMouseButtonDown(MOUSE_BUTTON_LEFT) &&
             CheckCollisionPointRec(mousePosition, (Rectangle){ 260, 132, 368, 24 })) {
-            titleSelectionEnd = GetCursorIndexAtX(npcInspect.functions[inspectFunctionIndex].title,
-                                                  mousePosition.x - 268.0f, 16.0f);
-            titleCursorIndex = titleSelectionEnd;
+            RpgEditorText_UpdatePointerSelection(npcInspect.functions[inspectFunctionIndex].title,
+                                                  mousePosition.x - 268.0f, 16.0f,
+                                                  &titleCursorIndex, &titleSelectionEnd);
         }
         if (isExamineFunctionListOpen && isInspectTitleEditing) UpdateImeCandidateWindowAt(268, 156);
         if ((isCloseDialogueEditorClicked || isBackToExamineClicked) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
@@ -5936,6 +7556,8 @@ int main(void)
             activeDialogueLine = -1;
             draggedDialogueLine = -1;
             isItemNameEditing = false;
+            paletteNameEditingIndex = -1;
+            selectedPaletteInspectorIndex = -1;
             isAttachmentPathEditing = false;
             isAttachmentPathDragActive = false;
             message = "Inspector closed";
@@ -5974,83 +7596,49 @@ int main(void)
             CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 800, 136, 48, 26 })) npc.scale = Clamp(npc.scale - 0.1f, 0.5f, 3.0f);
         if (isNpcSummaryClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
             CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 852, 136, 48, 26 })) npc.scale = Clamp(npc.scale + 0.1f, 0.5f, 1.0f);
-        if (isZipperInspectorClicked && !isCloseInspectorClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
-            CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 808, 264, 48, 26 })) {
-            zipperData.launchSpeed = Clamp(zipperData.launchSpeed - 60.0f, 120.0f, 2400.0f);
-        }
-        if (isZipperInspectorClicked && !isCloseInspectorClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
-            CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 856, 264, 48, 26 })) {
-            zipperData.launchSpeed = Clamp(zipperData.launchSpeed + 60.0f, 120.0f, 2400.0f);
-        }
-        if (isZipperInspectorClicked && !isCloseInspectorClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
-            CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 808, 286, 48, 26 })) {
-            zipperData.returnSpeed = Clamp(zipperData.returnSpeed - 30.0f, 60.0f, 1200.0f);
-        }
-        if (isZipperInspectorClicked && !isCloseInspectorClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
-            CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 856, 286, 48, 26 })) {
-            zipperData.returnSpeed = Clamp(zipperData.returnSpeed + 30.0f, 60.0f, 1200.0f);
-        }
-        if (isZipperInspectorClicked && !isCloseInspectorClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
-            CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 808, 308, 48, 26 })) {
-            zipperData.followSpeed = Clamp(zipperData.followSpeed - 30.0f, 60.0f, 1200.0f);
-        }
-        if (isZipperInspectorClicked && !isCloseInspectorClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
-            CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 856, 308, 48, 26 })) {
-            zipperData.followSpeed = Clamp(zipperData.followSpeed + 30.0f, 60.0f, 1200.0f);
-        }
-        if (isZipperInspectorClicked && !isCloseInspectorClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
-            CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 340, 188, 28 })) {
-            zipperData.launchPreviewEnabled = !zipperData.launchPreviewEnabled;
-            isZipperLaunchPreviewVisible = false;
-            isZipperLaunchPreviewReturning = false;
-            zipperLaunchPreviewCooldown = 1.0f;
-            message = zipperData.launchPreviewEnabled ? "Preview enabled" : "Preview disabled";
-        }
-        if (isZipperInspectorClicked && !isCloseInspectorClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
-            CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 382, 90, 26 })) {
-            message = SaveZipperSettings(&savedSnapshot) ? "Saved" : "Save failed";
-        }
-        if (isZipperInspectorClicked && !isCloseInspectorClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
-            CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 814, 382, 90, 26 })) {
-            zipperData = savedSnapshot.zipper;
-            message = "Reverted to saved";
-        }
         if (isItemInspectorClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && selectedItemIndex >= 0) {
             if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 144, 188, 28 })) {
                 isItemNameEditing = true;
-                itemNameCursorIndex = GetCursorIndexAtX(items.entries[selectedItemIndex].name,
-                                                        inspectorMousePosition.x - 724.0f, 17.0f);
-                itemNameSelectionAnchor = itemNameCursorIndex;
-                itemNameSelectionEnd = itemNameCursorIndex;
+                RpgEditorText_BeginPointerSelection(items.entries[selectedItemIndex].name,
+                                                     inspectorMousePosition.x - 724.0f, 17.0f,
+                                                     &itemNameCursorIndex, &itemNameSelectionAnchor,
+                                                     &itemNameSelectionEnd);
             }
         }
         if (isItemNameEditing && selectedItemIndex >= 0) {
             UpdateShortText(items.entries[selectedItemIndex].name, RPG_ITEM_NAME_LENGTH,
                             &itemNameCursorIndex, &itemNameSelectionAnchor, &itemNameSelectionEnd);
+            if (RpgEditorText_ShouldEndEditingOnOutsideClick((Rectangle){ 716, 144, 188, 28 },
+                                                             inspectorMousePosition))
+                isItemNameEditing = false;
         }
         if (isItemNameEditing && selectedItemIndex >= 0 && IsMouseButtonDown(MOUSE_BUTTON_LEFT) &&
             CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 144, 188, 28 })) {
-            itemNameSelectionEnd = GetCursorIndexAtX(items.entries[selectedItemIndex].name,
-                                                      inspectorMousePosition.x - 724.0f, 17.0f);
-            itemNameCursorIndex = itemNameSelectionEnd;
+            RpgEditorText_UpdatePointerSelection(items.entries[selectedItemIndex].name,
+                                                  inspectorMousePosition.x - 724.0f, 17.0f,
+                                                  &itemNameCursorIndex, &itemNameSelectionEnd);
         }
         if (isItemNameEditing && selectedItemIndex >= 0) UpdateImeCandidateWindowAt(724, 172);
         if (isDoorInspectorClicked && !isCloseInspectorClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             int signalIndex = RpgSignalBlocks_FindAtCell(&signalBlocks, &stage, selectedDoorRow, selectedDoorColumn);
             RpgKeyDoor *keyDoor = RpgStage_GetKeyDoorAtCell(&stage, selectedDoorRow, selectedDoorColumn);
-            if (keyDoor != NULL && CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 166, 188, 26 })) {
+            RpgEditorFilePickerLayout keyPickerLayout = GetKeyDoorFilePickerLayout(keyDoor);
+            Rectangle keyFailureBounds = { 716.0f, keyPickerLayout.contentBottom + 30.0f, 188.0f, 30.0f };
+            if (keyDoor != NULL && CheckCollisionPointRec(inspectorMousePosition, keyPickerLayout.selectBounds)) {
                 char selectedPath[RPG_STAGE_REFERENCE_PATH_LENGTH] = { 0 };
-                if (FileDialog_SelectFile(selectedPath, sizeof(selectedPath),
-                                          TextFormat("%s../assets/Files", GetApplicationDirectory()))) {
+                FileDialogRequest keyDialog = MakeFilesFileDialogRequest("鍵ファイルを選択");
+                if (FileDialog_Select(selectedPath, sizeof(selectedPath), &keyDialog)) {
                     snprintf(keyDoor->keyPath, sizeof(keyDoor->keyPath), "%s", selectedPath);
                     GameFont_AddText(keyDoor->keyPath);
                     message = "Key file selected";
                 }
-            } else if (keyDoor != NULL && CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 238, 188, 30 })) {
+            } else if (keyDoor != NULL && CheckCollisionPointRec(inspectorMousePosition, keyFailureBounds)) {
                 isKeyDoorFailureEditing = true;
-                keyDoorFailureCursorIndex = GetCursorIndexAtX(keyDoor->failureText, inspectorMousePosition.x - 722.0f, 15.0f);
-                keyDoorFailureSelectionAnchor = keyDoorFailureCursorIndex;
-                keyDoorFailureSelectionEnd = keyDoorFailureCursorIndex;
+                RpgEditorText_BeginPointerSelection(keyDoor->failureText,
+                                                     inspectorMousePosition.x - 722.0f, 15.0f,
+                                                     &keyDoorFailureCursorIndex,
+                                                     &keyDoorFailureSelectionAnchor,
+                                                     &keyDoorFailureSelectionEnd);
             } else if (signalIndex >= 0 && CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 816, 144, 38, 24 })) {
                 signalBlocks.entries[signalIndex].duration = Clamp(signalBlocks.entries[signalIndex].duration - 0.1f, 0.1f, 30.0f);
                 message = "Signal shrink duration changed";
@@ -6077,6 +7665,17 @@ int main(void)
             else {
                 UpdateShortText(keyDoor->failureText, sizeof(keyDoor->failureText), &keyDoorFailureCursorIndex,
                                 &keyDoorFailureSelectionAnchor, &keyDoorFailureSelectionEnd);
+                RpgEditorFilePickerLayout keyPickerLayout = GetKeyDoorFilePickerLayout(keyDoor);
+                Rectangle failureBounds = { 716.0f, keyPickerLayout.contentBottom + 30.0f, 188.0f, 30.0f };
+                if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) &&
+                    CheckCollisionPointRec(inspectorMousePosition, failureBounds))
+                    RpgEditorText_UpdatePointerSelection(keyDoor->failureText,
+                                                          inspectorMousePosition.x - 722.0f, 15.0f,
+                                                          &keyDoorFailureCursorIndex,
+                                                          &keyDoorFailureSelectionEnd);
+                if (RpgEditorText_ShouldEndEditingOnOutsideClick(failureBounds,
+                                                                 inspectorMousePosition))
+                    isKeyDoorFailureEditing = false;
                 UpdateImeCandidateWindowAt(722, 268);
             }
         }
@@ -6088,6 +7687,20 @@ int main(void)
                     /* 旗の開始要求は既存のPlay初期化で処理し、クリックをマップへ伝搬させない。 */
                     pendingSaveFlagPlayIndex = selectedAttachmentIndex;
                     message = "Starting play from save flag";
+                }
+            } else if (attachment->type == RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET) {
+                if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 232, 42, 24 })) {
+                    attachment->socketRightLightAngle = Clamp(attachment->socketRightLightAngle - 5.0f, 0.0f, 80.0f);
+                    message = "Socket light angle changed";
+                } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 772, 232, 42, 24 })) {
+                    attachment->socketRightLightAngle = Clamp(attachment->socketRightLightAngle + 5.0f, 0.0f, 80.0f);
+                    message = "Socket light angle changed";
+                } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 296, 42, 24 })) {
+                    attachment->socketLightOpacity = Clamp(attachment->socketLightOpacity - 0.05f, 0.05f, 0.95f);
+                    message = "Socket light opacity changed";
+                } else if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 772, 296, 42, 24 })) {
+                    attachment->socketLightOpacity = Clamp(attachment->socketLightOpacity + 0.05f, 0.05f, 0.95f);
+                    message = "Socket light opacity changed";
                 }
             } else if (attachment->type != RPG_BLOCK_ATTACHMENT_RADIO_EMITTER) {
                 if (CheckCollisionPointRec(inspectorMousePosition, (Rectangle){ 716, 176, 188, 26 })) {
@@ -6138,6 +7751,7 @@ int main(void)
             }
         }
         if (isAttachmentCapacityEditing) {
+            RpgEditorText_ClaimKeyboard();
             if (selectedAttachmentIndex < 0 || selectedAttachmentIndex >= attachments.count ||
                 attachments.entries[selectedAttachmentIndex].type != RPG_BLOCK_ATTACHMENT_RADIO_EMITTER) {
                 isAttachmentCapacityEditing = false;
@@ -6168,6 +7782,7 @@ int main(void)
             }
         }
         if (isAttachmentSpeedEditing) {
+            RpgEditorText_ClaimKeyboard();
             if (selectedAttachmentIndex < 0 || selectedAttachmentIndex >= attachments.count ||
                 attachments.entries[selectedAttachmentIndex].type != RPG_BLOCK_ATTACHMENT_RADIO_EMITTER) {
                 isAttachmentSpeedEditing = false;
@@ -6199,6 +7814,7 @@ int main(void)
             }
         }
         if (isZipperCapacityEditing) {
+            RpgEditorText_ClaimKeyboard();
             if (!isStageSettingsOpen || selected != RPG_EDITOR_STAGE_SETTINGS_INSPECTOR) {
                 isZipperCapacityEditing = false;
             } else if (IsKeyPressed(KEY_ESCAPE)) {
@@ -6230,16 +7846,20 @@ int main(void)
         if (!isCloseDialogueEditorClicked && isDialogueEditorClicked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             if (CheckCollisionPointRec(mousePosition, (Rectangle){ 224, 96, 260, 26 }) &&
                 activeDialogueLine >= 0) {
+                isDialogueTextEditing = false;
                 isSpeakerEditing = true;
-                speakerCursorIndex = GetCursorIndexAtX(editedDialogue->speakers[activeDialogueLine],
-                                                       mousePosition.x - 232.0f, 17.0f);
-                speakerSelectionAnchor = speakerCursorIndex;
-                speakerSelectionEnd = speakerCursorIndex;
+                RpgEditorText_BeginPointerSelection(editedDialogue->speakers[activeDialogueLine],
+                                                     mousePosition.x - 232.0f, 17.0f,
+                                                     &speakerCursorIndex, &speakerSelectionAnchor,
+                                                     &speakerSelectionEnd);
             } else if (CheckCollisionPointRec(mousePosition, (Rectangle){ 680, 64, 42, 22 })) {
+                isDialogueTextEditing = false;
                 isSpeakerEditing = false;
                 if (dialogueFontSize > 12) dialogueFontSize--;
                 dialogueBlockHeight = dialogueFontSize + 10;
             } else if (CheckCollisionPointRec(mousePosition, (Rectangle){ 730, 64, 42, 22 })) {
+                isDialogueTextEditing = false;
+                isSpeakerEditing = false;
                 if (dialogueFontSize < 32) dialogueFontSize++;
                 dialogueBlockHeight = dialogueFontSize + 10;
             } else if (CheckCollisionPointRec(mousePosition, (Rectangle){ 154, 128, 652, 252 })) {
@@ -6247,15 +7867,17 @@ int main(void)
                 int line = dialogueScroll + (int)((mousePosition.y - 128.0f) / (dialogueBlockHeight + 4));
                 activeDialogueLine = line < editedDialogue->lineCount ? line : -1;
                 if (activeDialogueLine >= 0) {
-                    dialogueCursorIndex = GetCursorIndexAtX(editedDialogue->lines[activeDialogueLine],
-                                                            mousePosition.x - (isInspectDialogueEditing ? 280.0f : 200.0f), (float)dialogueFontSize);
-                    selectionAnchor = dialogueCursorIndex;
-                    selectionEnd = dialogueCursorIndex;
+                    isDialogueTextEditing = true;
+                    RpgEditorText_BeginPointerSelection(editedDialogue->lines[activeDialogueLine],
+                                                         mousePosition.x - (isInspectDialogueEditing ? 280.0f : 200.0f),
+                                                         (float)dialogueFontSize, &dialogueCursorIndex,
+                                                         &selectionAnchor, &selectionEnd);
                 }
                 draggedDialogueLine = activeDialogueLine;
             } else if (CheckCollisionPointRec(mousePosition, (Rectangle){ 156, 414, 210, 32 })) {
                 if (RpgDialogue_AddLine(editedDialogue)) {
                     activeDialogueLine = editedDialogue->lineCount - 1;
+                    isDialogueTextEditing = true;
                     dialogueCursorIndex = 0;
                     selectionAnchor = 0;
                     selectionEnd = 0;
@@ -6263,12 +7885,15 @@ int main(void)
                     message = "Dialogue line added";
                 } else message = "Dialogue line limit reached";
             } else if (CheckCollisionPointRec(mousePosition, (Rectangle){ 382, 414, 116, 32 })) {
+                isDialogueTextEditing = false;
+                isSpeakerEditing = false;
                 message = SaveEditedDialogue(isInspectDialogueEditing, isStage3DialogueEditing, isAreaEntryDialogueEditing,
                                               &stage, &dialogue, &stage3Event, &savedSnapshot) ? "Saved" : "Save failed";
             } else if (CheckCollisionPointRec(mousePosition, (Rectangle){ 510, 414, 116, 32 })) {
                 RevertEditedDialogue(isInspectDialogueEditing, isStage3DialogueEditing, isAreaEntryDialogueEditing,
                                      &dialogue, &stage3Event, &savedSnapshot);
                 activeDialogueLine = -1;
+                isDialogueTextEditing = false;
                 isSpeakerEditing = false;
                 message = "Reverted to saved";
             }
@@ -6278,23 +7903,25 @@ int main(void)
             int line = dialogueScroll + (int)((mousePosition.y - 128.0f) / (dialogueBlockHeight + 4));
             if (RpgDialogue_DeleteLine(editedDialogue, line)) {
                 activeDialogueLine = -1;
+                isDialogueTextEditing = false;
                 message = "Dialogue line deleted";
             } else message = "Keep at least one dialogue line";
         }
         if (isSpeakerEditing && IsMouseButtonDown(MOUSE_BUTTON_LEFT) &&
             CheckCollisionPointRec(mousePosition, (Rectangle){ 224, 96, 260, 26 }) &&
             activeDialogueLine >= 0) {
-            speakerSelectionEnd = GetCursorIndexAtX(editedDialogue->speakers[activeDialogueLine],
-                                                     mousePosition.x - 232.0f, 17.0f);
-            speakerCursorIndex = speakerSelectionEnd;
+            RpgEditorText_UpdatePointerSelection(editedDialogue->speakers[activeDialogueLine],
+                                                  mousePosition.x - 232.0f, 17.0f,
+                                                  &speakerCursorIndex, &speakerSelectionEnd);
         }
         if (draggedDialogueLine >= 0 && IsMouseButtonDown(MOUSE_BUTTON_LEFT) &&
             isDialogueEditorClicked && CheckCollisionPointRec(mousePosition, (Rectangle){ 154, 128, 652, 252 })) {
             int hoveredLine = dialogueScroll + (int)((mousePosition.y - 128.0f) / (dialogueBlockHeight + 4));
             if (hoveredLine == draggedDialogueLine) {
-                selectionEnd = GetCursorIndexAtX(editedDialogue->lines[activeDialogueLine], mousePosition.x - (isInspectDialogueEditing ? 280.0f : 200.0f),
-                                                  (float)dialogueFontSize);
-                dialogueCursorIndex = selectionEnd;
+                RpgEditorText_UpdatePointerSelection(editedDialogue->lines[activeDialogueLine],
+                                                      mousePosition.x - (isInspectDialogueEditing ? 280.0f : 200.0f),
+                                                      (float)dialogueFontSize, &dialogueCursorIndex,
+                                                      &selectionEnd);
             }
         }
         if (draggedDialogueLine >= 0 && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
@@ -6312,14 +7939,24 @@ int main(void)
             }
             draggedDialogueLine = -1;
         }
+        /* Keep the selected row highlighted after committing, but release the
+           shared keyboard focus.  Selection and text focus are intentionally
+           independent. */
+        if ((isDialogueTextEditing || isSpeakerEditing) &&
+            (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_ESCAPE))) {
+            isDialogueTextEditing = false;
+            isSpeakerEditing = false;
+        }
         if (isDialogueEditorOpen) {
             if (isSpeakerEditing) UpdateSpeakerText(editedDialogue, activeDialogueLine,
                                                     &speakerCursorIndex, &speakerSelectionAnchor,
                                                     &speakerSelectionEnd);
-            else UpdateDialogueText(editedDialogue, activeDialogueLine, &dialogueCursorIndex,
-                                    &selectionAnchor, &selectionEnd);
+            else if (isDialogueTextEditing)
+                UpdateDialogueText(editedDialogue, activeDialogueLine, &dialogueCursorIndex,
+                                   &selectionAnchor, &selectionEnd);
         }
-        if (IsKeyPressed(KEY_TAB) && (isDialogueEditorOpen || isExamineFunctionListOpen || isFunctionTypeListOpen || isMoveFunctionEditorOpen || isWaitFunctionEditorOpen || isLayerChangeFunctionEditorOpen)) {
+        if (!isKeyboardCaptured && IsKeyPressed(KEY_TAB) &&
+            (isDialogueEditorOpen || isExamineFunctionListOpen || isFunctionTypeListOpen || isMoveFunctionEditorOpen || isWaitFunctionEditorOpen || isLayerChangeFunctionEditorOpen)) {
             isMoveTargetPicking = false;
             isMoveEasingListOpen = false;
             if (isMovePreviewPlaying) {
@@ -6363,11 +8000,129 @@ int main(void)
                                isStageSettingsPanelClicked || isStageSettingsPointerHeld ||
                                isAreaInspectorButtonClicked ||
                                isAreaInspectorPanelClicked || isAreaInspectorPointerHeld;
-        bool isWirePropertySelected = selectedBlockType == RPG_BLOCK_PROPERTY_WIRE;
+        bool blockContextMenuPointerConsumed = false;
+        if (isBlockContextMenuOpen && (isEditorPlaying || blockMode)) {
+            isBlockContextMenuOpen = false;
+            blockContextMenuRow = -1;
+            blockContextMenuColumn = -1;
+        }
+        if (isBlockContextMenuOpen && (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) ||
+                                       IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))) {
+            blockContextMenuPointerConsumed = true;
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && blockContextMenuRow >= 0 &&
+                blockContextMenuRow < RPG_STAGE_ROWS && blockContextMenuColumn >= 0 &&
+                blockContextMenuColumn < RPG_STAGE_WORLD_COLUMNS) {
+                if (CheckCollisionPointRec(mousePosition, GetBlockContextDropBounds(blockContextMenuBounds))) {
+                    int dropped = 0;
+                    if (RpgStaticObjectDrop_Expand(&stage, currentStageNumber, blockContextMenuRow,
+                                                   blockContextMenuColumn, &dropped)) {
+                        blockEditedThisFrame = true;
+                        message = TextFormat("Dropped %d file%s", dropped, dropped == 1 ? "" : "s");
+                    } else message = "Drop needs files in this object folder";
+                } else if (CheckCollisionPointRec(mousePosition, GetBlockContextRestoreBounds(blockContextMenuBounds))) {
+                    if (RpgStaticObjectDrop_Restore(&stage, currentStageNumber, blockContextMenuRow,
+                                                    blockContextMenuColumn)) {
+                        blockEditedThisFrame = true;
+                        message = "Object restored";
+                    } else message = "Restore needs a dropped object";
+                } else if (CheckCollisionPointRec(mousePosition, GetBlockContextDeleteBounds(blockContextMenuBounds)) &&
+                           RemoveBlockAt(&stage, &items, &blockHistory, blockContextMenuRow, blockContextMenuColumn)) {
+                    RpgWires_RemoveBroken(&wires, &stage);
+                    RpgReceivers_RemoveBroken(&receivers, &stage);
+                    RpgAttachments_RemoveBroken(&attachments, &stage);
+                    RpgSignalBlocks_RemoveBroken(&signalBlocks, &stage);
+                    blockEditedThisFrame = true;
+                    message = "Block deleted";
+                }
+            }
+            isBlockContextMenuOpen = false;
+            blockContextMenuRow = -1;
+            blockContextMenuColumn = -1;
+        }
+        /* Context actions belong to the normal editor.  In block mode, right
+           click is the existing direct erase gesture. */
+        if (!blockMode && !isBlockContextMenuOpen && !isEditorPlaying && isMapPointer && !isGlobalMapOpen &&
+            !globalMapInteractionThisFrame && !wasModalOpenAtFrameStart &&
+            !isFunctionPreviewPlaying && !didCancelFunctionPreview &&
+            IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+            Vector2 worldPosition = { mapMousePosition.x + mapIndex * RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE,
+                                      mapMousePosition.y };
+            int contextColumn = (int)(worldPosition.x / RPG_STAGE_TILE_SIZE);
+            int contextRow = (int)(worldPosition.y / RPG_STAGE_TILE_SIZE);
+            /* Drop/Restore belongs to a concrete cell object.  Do not open a
+               menu for empty map space: it would look like the clicked block
+               had been ignored and has no object folder to operate on. */
+            if (contextRow >= 0 && contextRow < RPG_STAGE_ROWS && contextColumn >= 0 &&
+                contextColumn < RPG_STAGE_WORLD_COLUMNS &&
+                stage.blocks[contextRow][contextColumn] != 0) {
+                Rectangle mapContentBounds = GetEditorMapContentBounds();
+                const float menuWidth = 118.0f;
+                const float menuHeight = 99.0f;
+                blockContextMenuBounds = (Rectangle){
+                    Clamp(mousePosition.x, mapContentBounds.x, mapContentBounds.x + mapContentBounds.width - menuWidth),
+                    Clamp(mousePosition.y, mapContentBounds.y, mapContentBounds.y + mapContentBounds.height - menuHeight),
+                    menuWidth, menuHeight
+                };
+                blockContextMenuRow = contextRow;
+                blockContextMenuColumn = contextColumn;
+                isBlockContextMenuOpen = true;
+                blockContextMenuPointerConsumed = true;
+            }
+        }
+        isUiBlockingMap = isUiBlockingMap || isBlockContextMenuOpen || blockContextMenuPointerConsumed;
+        bool isWirePropertySelected = selectedBlockType == RPG_BLOCK_PROPERTY_CONVEYOR;
         bool isBlockPropertySelected = FindBlockPropertyPlacement(selectedBlockType) != NULL;
         bool isMapEventPropertySelected = RpgBlockInventory_IsMapEventProperty(selectedBlockType);
         bool isAttachmentSelected = RpgBlockInventory_IsAttachment(selectedBlockType);
-        if (blockMode && !isUiBlockingMap && !isAttachmentErasePointerHeld &&
+        if (conveyorPreviewRemaining > 0.0f) {
+            conveyorPreviewRemaining = fmaxf(0.0f, conveyorPreviewRemaining - GetFrameTime());
+            if (selectedConveyorIndex >= 0 && selectedConveyorIndex < wires.count)
+                wires.entries[selectedConveyorIndex].conveyorPreviewElapsed += GetFrameTime();
+            if (conveyorPreviewRemaining <= 0.0f && selectedConveyorIndex >= 0 &&
+                selectedConveyorIndex < wires.count)
+                wires.entries[selectedConveyorIndex].conveyorPreviewElapsed = 0.0f;
+        }
+        if (!isEditorPlaying && selected == RPG_EDITOR_CONVEYOR_INSPECTOR &&
+            selectedConveyorIndex >= 0 && selectedConveyorIndex < wires.count &&
+            RpgWires_IsConveyor(&wires.entries[selectedConveyorIndex]) &&
+            IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+            IsInspectorContentScreenPoint(RPG_EDITOR_CONVEYOR_INSPECTOR, mousePosition)) {
+            Vector2 pointer = GetInspectorLocalPointer(mousePosition, RPG_EDITOR_CONVEYOR_INSPECTOR);
+            RpgWire *conveyor = &wires.entries[selectedConveyorIndex];
+            if (CheckCollisionPointRec(pointer, (Rectangle){ 716, 182, 42, 26 })) {
+                PushWireChangedHistory(&blockHistory, selectedConveyorIndex, *conveyor);
+                conveyor->conveyorSpeed = Clamp(conveyor->conveyorSpeed - 16.0f, 16.0f, 960.0f);
+                blockEditedThisFrame = true;
+            } else if (CheckCollisionPointRec(pointer, (Rectangle){ 862, 182, 42, 26 })) {
+                PushWireChangedHistory(&blockHistory, selectedConveyorIndex, *conveyor);
+                conveyor->conveyorSpeed = Clamp(conveyor->conveyorSpeed + 16.0f, 16.0f, 960.0f);
+                blockEditedThisFrame = true;
+            } else if (CheckCollisionPointRec(pointer, (Rectangle){ 716, 246, 188, 26 })) {
+                PushWireChangedHistory(&blockHistory, selectedConveyorIndex, *conveyor);
+                conveyor->conveyorDirection = -conveyor->conveyorDirection;
+                blockEditedThisFrame = true;
+            } else if (CheckCollisionPointRec(pointer, (Rectangle){ 716, 306, 188, 26 })) {
+                PushWireChangedHistory(&blockHistory, selectedConveyorIndex, *conveyor);
+                conveyor->conveyorHasFloor = !conveyor->conveyorHasFloor;
+                blockEditedThisFrame = true;
+                message = conveyor->conveyorHasFloor ? "Conveyor floor enabled" : "Conveyor floor disabled";
+            } else if (CheckCollisionPointRec(pointer, (Rectangle){ 716, 366, 42, 26 })) {
+                PushWireChangedHistory(&blockHistory, selectedConveyorIndex, *conveyor);
+                conveyor->conveyorSlideAngleDegrees = Clamp(conveyor->conveyorSlideAngleDegrees - 5.0f,
+                                                            0.0f, 85.0f);
+                blockEditedThisFrame = true;
+            } else if (CheckCollisionPointRec(pointer, (Rectangle){ 862, 366, 42, 26 })) {
+                PushWireChangedHistory(&blockHistory, selectedConveyorIndex, *conveyor);
+                conveyor->conveyorSlideAngleDegrees = Clamp(conveyor->conveyorSlideAngleDegrees + 5.0f,
+                                                            0.0f, 85.0f);
+                blockEditedThisFrame = true;
+            } else if (CheckCollisionPointRec(pointer, (Rectangle){ 716, 406, 188, 26 })) {
+                conveyorPreviewRemaining = 3.0f;
+                conveyor->conveyorPreviewElapsed = 0.001f;
+                message = "Conveyor preview started";
+            }
+        }
+        if (blockMode && !isBlockContextMenuOpen && !isUiBlockingMap && !isAttachmentErasePointerHeld &&
             IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
             Vector2 worldPosition = { mapMousePosition.x + mapIndex * RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE,
                                       mapMousePosition.y };
@@ -6376,7 +8131,8 @@ int main(void)
                                                    RPG_STAGE_TILE_SIZE * 0.5f))
                     message = "Event deleted";
             } else {
-            int attachmentIndex = RpgAttachments_FindAtPosition(&attachments, worldPosition, 30.0f);
+            int attachmentIndex = RpgAttachments_FindAtWorldPosition(&attachments, &stage,
+                                                                       worldPosition, 30.0f);
             if (attachmentIndex >= 0) {
                 RpgAttachment removedAttachment = attachments.entries[attachmentIndex];
                 if (RpgAttachments_Remove(&attachments, removedAttachment)) {
@@ -6392,9 +8148,9 @@ int main(void)
         }
         if (!RpgEditorDrag_IsBusy(&attachmentDrag) && blockMode && !isUiBlockingMap &&
             IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-            Vector2 worldPosition = { mapMousePosition.x + mapIndex * RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE,
-                                      mapMousePosition.y };
-            int clickedAttachmentIndex = RpgAttachments_FindAtPosition(&attachments, worldPosition, 14.0f);
+            Vector2 worldPosition = GetEditorReferenceWorldPosition(&stage, mapIndex, mapMousePosition);
+            int clickedAttachmentIndex = RpgAttachments_FindAtWorldPosition(&attachments, &stage,
+                                                                              worldPosition, 14.0f);
             if (clickedAttachmentIndex >= 0) {
                 RpgEditorDrag_Begin(&attachmentDrag, mousePosition);
                 draggedAttachmentIndex = clickedAttachmentIndex;
@@ -6435,6 +8191,8 @@ int main(void)
                 snappedAttachment.speedPerKilobyte = draggedAttachmentBeforeEdit.speedPerKilobyte;
                 snappedAttachment.previewFileCount = draggedAttachmentBeforeEdit.previewFileCount;
                 snappedAttachment.previewTotalBytes = draggedAttachmentBeforeEdit.previewTotalBytes;
+                snappedAttachment.socketRightLightAngle = draggedAttachmentBeforeEdit.socketRightLightAngle;
+                snappedAttachment.socketLightOpacity = draggedAttachmentBeforeEdit.socketLightOpacity;
                 snappedAttachment.dataPath = draggedAttachmentBeforeEdit.dataPath;
                 RpgGridCell newStart = RpgGridPath_GetSideNeighbor(snappedAttachment.cell,
                                                                     snappedAttachment.side);
@@ -6540,6 +8298,16 @@ int main(void)
             EditorMapObjectHit topmost = GetTopmostEditableObject(&stage, &player, &npc, &zipperData,
                                                                     mapIndex, mapMousePosition, &imageIndex);
             if (topmost == EDITOR_MAP_OBJECT_HIT_IMAGE && imageIndex >= 0) {
+                /* A normal click and a drag share this entry point.  Select the
+                   object before the drag state owns the pointer, so a simple
+                   click always opens its inspector; the drag promotion below
+                   still hides it once the pointer actually moves. */
+                if (!blockMode) {
+                    selected = RPG_EDITOR_IMAGE_INSPECTOR;
+                    selectedImageObjectIndex = imageIndex;
+                    activeDialogueLine = -1;
+                    isItemNameEditing = false;
+                }
                 RpgEditorDrag_Begin(&imageObjectDrag, mousePosition);
                 draggedImageObjectIndex = imageIndex;
                 imageObjectDragPreviewId = stage.imageObjects.entries[imageIndex].id;
@@ -6552,25 +8320,23 @@ int main(void)
                 characterDragPreviewKind = topmost;
                 isCharacterDragPreviewVisible = false;
                 if (!blockMode) {
-                    selected = draggedCharacterKind;
+                    /* Player parameters live in 全体設定 > プレイヤー. */
+                    selected = draggedCharacterKind == 1 ? 0 : draggedCharacterKind;
                     activeDialogueLine = -1;
                     if (draggedCharacterKind == 3) isZipperPointerFeedbackSuppressed = false;
                 } else selected = 0;
                 RpgEditorDrag_Begin(&characterDrag, mousePosition);
-                message = "Click or drag character";
+                if (draggedCharacterKind != 1) message = "Click or drag character";
             }
         }
         // 参照オブジェクトは通常ブロックの設置処理へ渡す前に、単体ドラッグを優先する。
         if (blockMode && !isAttachmentPathDragActive && !RpgEditorDrag_IsBusy(&attachmentDrag) && !isReceiverClickPending &&
             !isUiBlockingMap && !RpgEditorDrag_IsBusy(&referenceDrag) && !RpgEditorDrag_IsBusy(&imageObjectDrag) &&
             IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-            int column = (int)((mapMousePosition.x + mapIndex * RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE) / RPG_STAGE_TILE_SIZE);
-            int row = (int)(mapMousePosition.y / RPG_STAGE_TILE_SIZE);
-            if (row >= 0 && row < RPG_STAGE_ROWS && column >= 0 && column < RPG_STAGE_WORLD_COLUMNS &&
-                RpgBlockInventory_IsReferenceObject(stage.blocks[row][column])) {
+            int referenceIndex = FindEditorReferenceObjectAtMapPoint(&stage, mapIndex, mapMousePosition);
+            if (referenceIndex >= 0) {
                 RpgEditorDrag_Begin(&referenceDrag, mousePosition);
-                draggedReferenceRow = row;
-                draggedReferenceColumn = column;
+                draggedReferenceObjectIndex = referenceIndex;
                 isReferenceDragPreviewVisible = false;
                 message = "Click or drag reference object";
             }
@@ -6744,32 +8510,21 @@ int main(void)
             imageObjectDragPreviewId = 0;
         } else if (referenceDrag.pending && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
             RpgEditorDrag_End(&referenceDrag);
-            draggedReferenceRow = -1;
-            draggedReferenceColumn = -1;
+            draggedReferenceObjectIndex = -1;
         } else if (referenceDrag.active && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
-            int destinationColumn = (int)((mapMousePosition.x + mapIndex * RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE) / RPG_STAGE_TILE_SIZE);
-            int destinationRow = (int)(mapMousePosition.y / RPG_STAGE_TILE_SIZE);
-            if (!isUiBlockingMap && destinationRow >= 0 && destinationRow < RPG_STAGE_ROWS &&
-                destinationColumn >= 0 && destinationColumn < RPG_STAGE_WORLD_COLUMNS &&
-                stage.blocks[destinationRow][destinationColumn] == 0 &&
-                (destinationRow != draggedReferenceRow || destinationColumn != draggedReferenceColumn)) {
-                char movedPath[RPG_STAGE_REFERENCE_PATH_LENGTH];
-                int movedBlockType = stage.blocks[draggedReferenceRow][draggedReferenceColumn];
-                snprintf(movedPath, sizeof(movedPath), "%s", RpgStage_GetReferencePathAtCell(&stage, draggedReferenceRow, draggedReferenceColumn));
-                PushBlockHistory(&blockHistory, draggedReferenceRow, draggedReferenceColumn,
-                                 stage.blocks[draggedReferenceRow][draggedReferenceColumn], NULL);
-                PushBlockHistory(&blockHistory, destinationRow, destinationColumn, 0, NULL);
-                RpgStage_SetBlockTypeAtPosition(&stage,
-                    (Vector2){ ((float)draggedReferenceColumn + 0.5f) * RPG_STAGE_TILE_SIZE,
-                               ((float)draggedReferenceRow + 0.5f) * RPG_STAGE_TILE_SIZE }, 0);
-                stage.blocks[destinationRow][destinationColumn] = movedBlockType;
-                RpgStage_SetReferencePathAtCell(&stage, destinationRow, destinationColumn, movedPath);
+            Vector2 destination = GetEditorReferenceWorldPosition(&stage, mapIndex, mapMousePosition);
+            int destinationRow = -1, destinationColumn = -1;
+            if (!isUiBlockingMap && draggedReferenceObjectIndex >= 0 &&
+                draggedReferenceObjectIndex < stage.referenceObjects.count &&
+                RpgStage_GetWorldCellAtPosition(&stage, destination, &destinationRow, &destinationColumn)) {
+                stage.referenceObjects.entries[draggedReferenceObjectIndex].position =
+                    RpgStage_GetWorldPositionForCell(&stage, destinationRow, destinationColumn);
+                selectedReferenceObjectIndex = draggedReferenceObjectIndex;
                 blockEditedThisFrame = true;
                 message = "Reference object moved";
             }
             RpgEditorDrag_End(&referenceDrag);
-            draggedReferenceRow = -1;
-            draggedReferenceColumn = -1;
+            draggedReferenceObjectIndex = -1;
             isReferenceDragPreviewVisible = false;
         } else if (effectBlockDrag.active && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
             if (!isUiBlockingMap) {
@@ -6809,6 +8564,13 @@ int main(void)
                     blockEditedThisFrame = true;
                     message = "Wire endpoint updated";
                 }
+            }
+            if (!hasRecordedDraggedWireHistory && draggedWireIndex >= 0 &&
+                draggedWireIndex < wires.count && RpgWires_IsConveyor(&wires.entries[draggedWireIndex])) {
+                selectedConveyorIndex = draggedWireIndex;
+                selected = RPG_EDITOR_CONVEYOR_INSPECTOR;
+                conveyorPreviewRemaining = 0.0f;
+                message = "Conveyor Inspector opened";
             }
             isWireEndpointDragActive = false;
             hasRecordedDraggedWireHistory = false;
@@ -6899,7 +8661,8 @@ int main(void)
             if (imageIndex < 0) message = "Image object limit reached";
             else {
                 char imagePath[RPG_IMAGE_OBJECT_PATH_LENGTH] = { 0 };
-                if (FileDialog_SelectPng(imagePath, sizeof(imagePath))) {
+                FileDialogRequest imageDialog = MakeSpriteFileDialogRequest("画像PNGを選択");
+                if (FileDialog_Select(imagePath, sizeof(imagePath), &imageDialog)) {
                     snprintf(stage.imageObjects.entries[imageIndex].path,
                              sizeof(stage.imageObjects.entries[imageIndex].path), "%s", imagePath);
                     GameFont_AddText(imagePath);
@@ -6922,29 +8685,55 @@ int main(void)
             int column = (int)(worldPosition.x / RPG_STAGE_TILE_SIZE);
             int row = (int)(worldPosition.y / RPG_STAGE_TILE_SIZE);
             if (row >= 0 && row < RPG_STAGE_ROWS && column >= 0 && column < RPG_STAGE_WORLD_COLUMNS) {
-            if (PlaceBlockType(&stage, &attachments, &blockHistory, row, column, selectedBlockType)) {
+            if (RpgBlockInventory_IsReferenceObject(selectedBlockType)) {
+                RpgReferenceObjectKind referenceKind =
+                    RpgBlockInventory_IsReferenceFolder(selectedBlockType) ?
+                    RPG_REFERENCE_OBJECT_FOLDER : RPG_REFERENCE_OBJECT_FILE;
+                char referencePath[RPG_STAGE_REFERENCE_PATH_LENGTH] = { 0 };
+                if (referenceKind == RPG_REFERENCE_OBJECT_FOLDER) {
+                    char folderName[64];
+                    snprintf(folderName, sizeof(folderName), "Folder_%d_%d", row + 1, column + 1);
+                    if (!RpgStageStorage_CreateBuildFolder(currentStageNumber, folderName, referencePath,
+                                                           (int)sizeof(referencePath))) {
+                        message = "Folder creation failed";
+                        continue;
+                    }
+                }
+                if (!RpgReferenceObjects_Add(&stage.referenceObjects, referenceKind,
+                                             RpgStage_GetWorldPositionForCell(&stage, row, column),
+                                             referencePath, 0)) message = "Reference object limit reached";
+                else {
+                    blockEditedThisFrame = true;
+                    message = referenceKind == RPG_REFERENCE_OBJECT_FOLDER ? "Folder created" : "File object created";
+                }
+            } else if (PlaceBlockType(&stage, &attachments, &blockHistory, row, column, selectedBlockType)) {
+                if (!RpgBlockInventory_IsReferenceObject(selectedBlockType) &&
+                    !RpgBlockInventory_IsAttachment(selectedBlockType) &&
+                    selectedBlockType < RPG_BLOCK_PROPERTY_ITEM) {
+                    char objectFolder[RPG_STAGE_PATH_LENGTH];
+                    (void)RpgStaticObjectDrop_EnsureFolder(currentStageNumber, row, column,
+                                                           selectedBlockType, objectFolder,
+                                                           (int)sizeof(objectFolder));
+                }
                 if (selectedBlockType == RPG_BLOCK_SIGNAL_SHRINK_ROOT_HORIZONTAL)
                     RpgSignalBlocks_Add(&signalBlocks, row, column);
-                if (selectedBlockType == RPG_BLOCK_REFERENCE_FOLDER) {
-                    char folderName[64];
-                    char folderPath[RPG_STAGE_REFERENCE_PATH_LENGTH] = { 0 };
-                    snprintf(folderName, sizeof(folderName), "Folder_%d_%d", row + 1, column + 1);
-                    if (!RpgStageStorage_CreateBuildFolder(currentStageNumber, folderName,
-                                                          folderPath, (int)sizeof(folderPath)) ||
-                        !RpgStage_SetReferencePathAtCell(&stage, row, column, folderPath)) {
-                        stage.blocks[row][column] = 0;
-                        message = "Folder creation failed";
-                    } else message = "Folder created";
-                }
                 blockEditedThisFrame = true;
             }
             }
-        } else if (blockMode && !isMapEventPropertySelected && !isAttachmentErasePointerHeld && !isUiBlockingMap && IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) {
-            Vector2 worldPosition = { mapMousePosition.x + mapIndex * RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE,
-                                      mapMousePosition.y };
+        } else if (blockMode && !isBlockContextMenuOpen && !isMapEventPropertySelected &&
+                   !isAttachmentErasePointerHeld && !isUiBlockingMap && IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) {
+            Vector2 worldPosition = GetEditorReferenceWorldPosition(&stage, mapIndex, mapMousePosition);
             int column = (int)(worldPosition.x / RPG_STAGE_TILE_SIZE);
             int row = (int)(worldPosition.y / RPG_STAGE_TILE_SIZE);
-            if (row >= 0 && row < RPG_STAGE_ROWS && column >= 0 && column < RPG_STAGE_WORLD_COLUMNS) {
+            int referenceIndex = FindEditorReferenceObjectAtMapPoint(&stage, mapIndex, mapMousePosition);
+            if (referenceIndex >= 0 && RemoveEditorReferenceObjectAt(&stage.referenceObjects, referenceIndex)) {
+                if (selectedReferenceObjectIndex == referenceIndex) {
+                    selected = 0;
+                    selectedReferenceObjectIndex = -1;
+                } else if (selectedReferenceObjectIndex > referenceIndex) selectedReferenceObjectIndex--;
+                blockEditedThisFrame = true;
+                message = "Reference object removed";
+            } else if (row >= 0 && row < RPG_STAGE_ROWS && column >= 0 && column < RPG_STAGE_WORLD_COLUMNS) {
             int removedImageIndex = RpgImageObjects_FindAtCell(&stage.imageObjects, row, column);
             if (removedImageIndex >= 0 && RpgImageObjects_RemoveAtCell(&stage.imageObjects, row, column)) {
                 if (selected == RPG_EDITOR_IMAGE_INSPECTOR) {
@@ -6967,21 +8756,27 @@ int main(void)
            伝播させると、終点設定や対象選択と同時にPNGインスペクターが開いてしまう。 */
         } else if (!isMoveFunctionEditorOpen && !isAttachmentPathEditing && !RpgEditorDrag_IsBusy(&attachmentDrag) && !RpgEditorDrag_IsBusy(&effectBlockDrag) && !RpgEditorDrag_IsBusy(&referenceDrag) && !RpgEditorDrag_IsBusy(&imageObjectDrag) && !RpgEditorDrag_IsBusy(&characterDrag) && !isWireEndpointDragActive && !isUiBlockingMap && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             int clickedItemIndex = GetClickedItemIndex(&items, mapIndex, mapMousePosition);
-            Vector2 eventClickPosition = { mapMousePosition.x + mapIndex * RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE, mapMousePosition.y };
+            Vector2 eventClickPosition = GetEditorReferenceWorldPosition(&stage, mapIndex, mapMousePosition);
             int clickedEventIndex = RpgMapEvents_FindAtPosition(&mapEvents, eventClickPosition,
                                                                  RPG_STAGE_TILE_SIZE * 0.5f);
             int clickedDoorRow = -1;
             int clickedDoorColumn = -1;
-            int clickedColumn = (int)(eventClickPosition.x / RPG_STAGE_TILE_SIZE);
-            int clickedRow = (int)(eventClickPosition.y / RPG_STAGE_TILE_SIZE);
+            int clickedColumn = -1;
+            int clickedRow = -1;
+            (void)RpgStage_GetWorldCellAtPosition(&stage, eventClickPosition,
+                                                   &clickedRow, &clickedColumn);
             int clickedImageObjectIndex = -1;
             EditorMapObjectHit topmostObject = GetTopmostEditableObject(&stage, &player, &npc, &zipperData,
                                                                           mapIndex, mapMousePosition,
                                                                           &clickedImageObjectIndex);
-            bool isReferenceClicked = clickedRow >= 0 && clickedRow < RPG_STAGE_ROWS &&
-                                      clickedColumn >= 0 && clickedColumn < RPG_STAGE_WORLD_COLUMNS &&
-                                      RpgBlockInventory_IsReferenceObject(stage.blocks[clickedRow][clickedColumn]);
-            int clickedAttachmentIndex = RpgAttachments_FindAtPosition(&attachments, eventClickPosition, 30.0f);
+            int clickedReferenceObjectIndex = FindEditorReferenceObjectAtMapPoint(&stage, mapIndex,
+                                                                                     mapMousePosition);
+            bool isReferenceClicked = clickedReferenceObjectIndex >= 0 ||
+                                      (clickedRow >= 0 && clickedRow < RPG_STAGE_ROWS &&
+                                       clickedColumn >= 0 && clickedColumn < RPG_STAGE_WORLD_COLUMNS &&
+                                       RpgBlockInventory_IsReferenceObject(stage.blocks[clickedRow][clickedColumn]));
+            int clickedAttachmentIndex = RpgAttachments_FindAtWorldPosition(&attachments, &stage,
+                                                                              eventClickPosition, 30.0f);
             int clickedReceiverIndex = RpgReceivers_FindAtCell(&receivers,
                                                                (RpgGridCell){ clickedRow, clickedColumn });
             int clickedSignalBlockIndex = RpgSignalBlocks_FindAtCell(&signalBlocks, &stage, clickedRow, clickedColumn);
@@ -6995,13 +8790,14 @@ int main(void)
                 }
             }
             if (!blockMode && topmostObject == EDITOR_MAP_OBJECT_HIT_PLAYER) {
-                selected = 1;
+                /* Player parameters are edited only through 全体設定 > プレイヤー.
+                 * Keep direct map dragging, but do not open the retired player inspector. */
+                selected = 0;
                 activeDialogueLine = -1;
                 draggedCharacterKind = 1;
                 characterDragPreviewKind = EDITOR_MAP_OBJECT_HIT_PLAYER;
                 isCharacterDragPreviewVisible = false;
                 RpgEditorDrag_Begin(&characterDrag, mousePosition);
-                message = "Hero selected - drag to move";
             } else if (!blockMode && topmostObject == EDITOR_MAP_OBJECT_HIT_NPC) {
                 selected = 2;
                 activeDialogueLine = -1;
@@ -7060,21 +8856,21 @@ int main(void)
                 selectedDoorColumn = clickedDoorColumn;
                 isItemNameEditing = false;
                 message = "Door selected";
-            } else if (isReferenceClicked) {
+            } else if (clickedReferenceObjectIndex >= 0) {
                 selected = 7;
-                selectedReferenceRow = clickedRow;
-                selectedReferenceColumn = clickedColumn;
+                selectedReferenceObjectIndex = clickedReferenceObjectIndex;
                 isReferencePathEditing = false;
                 isReferencePointerFeedbackSuppressed = false;
-                if (RpgBlockInventory_IsReferenceFolder(stage.blocks[clickedRow][clickedColumn]))
+                const RpgReferenceObject *reference = &stage.referenceObjects.entries[clickedReferenceObjectIndex];
+                if (reference->objectKind == RPG_REFERENCE_OBJECT_FOLDER)
                     snprintf(referenceFolderNameInput, sizeof(referenceFolderNameInput), "%s",
-                             GetReferenceLeafName(RpgStage_GetReferencePathAtCell(&stage, clickedRow, clickedColumn)));
+                             GetReferenceLeafName(reference->path));
                 else referenceFolderNameInput[0] = '\0';
-                referencePathCursorIndex = (int)strlen(RpgBlockInventory_IsReferenceFolder(stage.blocks[clickedRow][clickedColumn]) ?
-                                                        referenceFolderNameInput : RpgStage_GetReferencePathAtCell(&stage, clickedRow, clickedColumn));
+                referencePathCursorIndex = (int)strlen(reference->objectKind == RPG_REFERENCE_OBJECT_FOLDER ?
+                                                        referenceFolderNameInput : reference->path);
                 referencePathSelectionAnchor = referencePathCursorIndex;
                 referencePathSelectionEnd = referencePathCursorIndex;
-                message = RpgBlockInventory_IsReferenceFolder(stage.blocks[clickedRow][clickedColumn]) ?
+                message = reference->objectKind == RPG_REFERENCE_OBJECT_FOLDER ?
                           "Folder selected" : "FILE.png selected";
             } else if (clickedItemIndex >= 0) {
                 selected = 4;
@@ -7125,7 +8921,15 @@ int main(void)
                                       mapMousePosition.y };
             (void)RpgMapEvents_Move(&mapEvents, draggedMapEventIndex, eventPosition);
         }
-        if (IsKeyPressed(KEY_S) &&
+        if (!isKeyboardCaptured && !isEditorPlaying && !isReferencePathEditing && selected == 7 &&
+            IsKeyPressed(KEY_DELETE) &&
+            RemoveEditorReferenceObjectAt(&stage.referenceObjects, selectedReferenceObjectIndex)) {
+            selected = 0;
+            selectedReferenceObjectIndex = -1;
+            blockEditedThisFrame = true;
+            message = "Reference object removed";
+        }
+        if (!isKeyboardCaptured && IsKeyPressed(KEY_S) &&
             (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) && activeDialogueLine < 0) {
             bool saved = SaveEditorAndUpdateSnapshot(&layout, &player, &npc, &stage, &dialogue, &stage3Event,
                                                       &items, &savedSnapshot, &savedItems) &&
@@ -7134,6 +8938,17 @@ int main(void)
         }
         }
         (void)blockEditedThisFrame;
+        }
+        /* Keep editing entirely memory-first.  A quiet editor frame publishes
+           only a changed static stage package, so Play can consume the recent
+           package without every placement/removal performing file IO. */
+        if (!isEditorPlaying) {
+            SyncEditorStageFolderWhenIdle(&layout, &stage, &dialogue, &stage3Event, &items,
+                                          currentStageNumber, &lastStageFolderSync,
+                                          &hasStageFolderSync, &lastStageFolderSyncNumber,
+                                          &nextStageFolderComparisonTime,
+                                          &nextStageFolderSyncTime, &editorPreviewBuildDirty,
+                                          &editorPreviewBuildReady, &editorPreviewBuildStageNumber);
         }
         if (!isEditorPlaying)
         DrawEditor(&player, &npc, &stage, &layout, &stage3Event, &areaEntryEvents, &zipperData, zipperTexture, fileTexture,
@@ -7152,14 +8967,19 @@ int main(void)
                    selectedAttachmentIndex, isAttachmentPathEditing,
                    selectedBlockInventory, selectedBlockType,
                    isBlockInventoryListOpen,
+                   &paletteBlockDrag, paletteBlockDragSourcePalette, paletteBlockDragSourceSlot,
+                   &paletteRowDrag, paletteRowDragSource,
+                   selectedPaletteInspectorIndex,
+                   paletteNameEditingIndex == selectedPaletteInspectorIndex,
+                   paletteNameCursorIndex, paletteNameSelectionAnchor, paletteNameSelectionEnd,
                    isZipperPointerFeedbackSuppressed,
-                    selectedReferenceRow, selectedReferenceColumn, isReferencePathEditing,
+                     selectedReferenceObjectIndex, isReferencePathEditing,
                     isReferencePointerFeedbackSuppressed,
                    referencePathCursorIndex, referencePathSelectionAnchor, referencePathSelectionEnd, referenceFolderNameInput, explorerMode,
                    isGlobalSettingsOpen, isStageSettingsOpen, isAreaInspectorOpen,
                     editorPlayDialogueIndex, editorPlayInspectTarget, editorPlayInspectFunctionIndex,
-                    editorPlayInspectLineIndex, editorPlayZipperFollowsPlayer, &editorScene,
-                    isGlobalMapOpen);
+                     editorPlayInspectLineIndex, editorPlayZipperFollowsPlayer, &editorScene,
+                     isGlobalMapOpen, isBlockContextMenuOpen, blockContextMenuBounds);
     }
     RpgCharacter_UnloadPlayerSprites();
     RpgImageObjects_UnloadTextures();

@@ -4,6 +4,9 @@
 
 #include "rpg_block_inventory.h"
 
+#define RPG_TEXT_ROUTE_RAYLIB_CALLS
+#include "../game_font.h"
+
 #include <stdio.h>
 #include <string.h>
 
@@ -190,7 +193,7 @@ void RpgSignalBlocks_Update(RpgSignalBlocks *blocks, RpgStage *stage,
                             const RpgButtonEvent *signal, float deltaTime)
 {
     if (blocks == NULL || stage == NULL) return;
-    if (RpgButtonEvent_Consume(signal, &blocks->lastSignalSequence))
+    if (RpgButtonEvent_Consume(signal, &blocks->lastSignalSequence) && signal->isActive)
         for (int index = 0; index < blocks->count; index++)
             if (signal->sourceMapIndex >= 0 &&
                 blocks->entries[index].column / RPG_STAGE_COLUMNS == signal->sourceMapIndex)

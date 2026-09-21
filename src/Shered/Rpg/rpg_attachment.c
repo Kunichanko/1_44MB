@@ -1,5 +1,9 @@
 // 依存する自プロジェクト内ファイル: rpg_attachment.h
 #include "rpg_attachment.h"
+
+#include "rpg_light_source.h"
+
+#include "rpg_stage_background.h"
 #include "rpg_gimic_sprites.h"
 
 #include "raymath.h"
@@ -115,7 +119,7 @@ bool RpgAttachments_Load(const char *filePath, RpgAttachments *attachments)
     bool currentFormat = false;
     bool previewFormat = false;
     if (fscanf(file, "%15s", format) != 1) { fclose(file); return false; }
-    currentFormat = strcmp(format, "v2") == 0 || strcmp(format, "v3") == 0 || strcmp(format, "v4") == 0 || strcmp(format, "v5") == 0 || strcmp(format, "v6") == 0;
+    currentFormat = strcmp(format, "v2") == 0 || strcmp(format, "v3") == 0 || strcmp(format, "v4") == 0 || strcmp(format, "v5") == 0 || strcmp(format, "v6") == 0 || strcmp(format, "v7") == 0;
     previewFormat = strcmp(format, "v3") == 0 || strcmp(format, "v4") == 0;
     if ((currentFormat ? fscanf(file, "%d", &loaded.count) : sscanf(format, "%d", &loaded.count)) != 1 || loaded.count < 0 ||
         loaded.count > RPG_ATTACHMENT_MAX_COUNT) {
@@ -126,7 +130,7 @@ bool RpgAttachments_Load(const char *filePath, RpgAttachments *attachments)
         RpgAttachment *attachment = &loaded.entries[index];
         int side = 0;
         int folderId = index + 1;
-        bool folderIdFormat = strcmp(format, "v4") == 0 || strcmp(format, "v5") == 0 || strcmp(format, "v6") == 0;
+        bool folderIdFormat = strcmp(format, "v4") == 0 || strcmp(format, "v5") == 0 || strcmp(format, "v6") == 0 || strcmp(format, "v7") == 0;
         int fieldCount = folderIdFormat ?
             fscanf(file, "%d %d %d %d %d", &attachment->type, &folderId, &attachment->cell.row,
                    &attachment->cell.column, &side) :
@@ -150,6 +154,8 @@ bool RpgAttachments_Load(const char *filePath, RpgAttachments *attachments)
         attachment->speedPerKilobyte = 1.0f / 64.0f;
         attachment->previewFileCount = 2;
         attachment->previewTotalBytes = 0;
+        attachment->socketRightLightAngle = 18.0f;
+        attachment->socketLightOpacity = 0.45f;
         attachment->dataPath = (RpgGridPath){ .cellCount = 1, .cells = { outerCell } };
         if (attachment->type == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER)
             RpgAttachments_SetDefaultShooterPath(attachment);
@@ -157,9 +163,15 @@ bool RpgAttachments_Load(const char *filePath, RpgAttachments *attachments)
             int previewEnabled = 0;
             float ignoredLegacyPreviewSize = 0.0f;
             float ignoredLegacyPreviewSpeed = 0.0f;
-            bool currentSettingsFormat = strcmp(format, "v6") == 0;
+            bool currentSettingsFormat = strcmp(format, "v6") == 0 || strcmp(format, "v7") == 0;
+            bool socketLightSettingsFormat = strcmp(format, "v7") == 0;
             bool legacyPreviewSettingsFormat = strcmp(format, "v5") == 0;
-            int readCount = currentSettingsFormat ?
+            int readCount = socketLightSettingsFormat ?
+                fscanf(file, "%f %f %f %d %f %f %d %llu %d %f %f", &attachment->dataSize, &attachment->dataSpeed,
+                       &attachment->dataInterval, &previewEnabled, &attachment->sizePerFile,
+                       &attachment->speedPerKilobyte, &attachment->previewFileCount,
+                       &attachment->previewTotalBytes, &attachment->dataPath.cellCount,
+                       &attachment->socketRightLightAngle, &attachment->socketLightOpacity) : currentSettingsFormat ?
                 fscanf(file, "%f %f %f %d %f %f %d %llu %d", &attachment->dataSize, &attachment->dataSpeed,
                        &attachment->dataInterval, &previewEnabled, &attachment->sizePerFile,
                        &attachment->speedPerKilobyte, &attachment->previewFileCount,
@@ -171,7 +183,7 @@ bool RpgAttachments_Load(const char *filePath, RpgAttachments *attachments)
                        &attachment->dataInterval, &previewEnabled, &attachment->dataPath.cellCount) :
                 fscanf(file, "%f %f %f %d", &attachment->dataSize, &attachment->dataSpeed,
                        &attachment->dataInterval, &attachment->dataPath.cellCount);
-            if (readCount != (currentSettingsFormat ? 9 : legacyPreviewSettingsFormat ? 7 : previewFormat ? 5 : 4) ||
+            if (readCount != (socketLightSettingsFormat ? 11 : currentSettingsFormat ? 9 : legacyPreviewSettingsFormat ? 7 : previewFormat ? 5 : 4) ||
                 attachment->dataSize < 2.0f || attachment->dataSize > 24.0f ||
                 attachment->dataSpeed < 20.0f || attachment->dataSpeed > 480.0f ||
                 attachment->dataInterval < 0.1f || attachment->dataInterval > 10.0f ||
@@ -181,6 +193,8 @@ bool RpgAttachments_Load(const char *filePath, RpgAttachments *attachments)
                 attachment->dataPath.cellCount < 1 || attachment->dataPath.cellCount > RPG_GRID_PATH_MAX_CELLS) {
                 fclose(file); return false;
             }
+            attachment->socketRightLightAngle = Clamp(attachment->socketRightLightAngle, 0.0f, 80.0f);
+            attachment->socketLightOpacity = Clamp(attachment->socketLightOpacity, 0.05f, 0.95f);
             attachment->sizePerFile = RpgAttachments_NormalizeShotSizePerFile(attachment->sizePerFile);
             attachment->dataPreviewEnabled = previewEnabled != 0;
             for (int pathIndex = 0; pathIndex < attachment->dataPath.cellCount; pathIndex++)
@@ -209,14 +223,15 @@ bool RpgAttachments_Save(const char *filePath, const RpgAttachments *attachments
 {
     FILE *file = fopen(filePath, "w");
     if (file == NULL) return false;
-    fprintf(file, "v6 %d\n", attachments->count);
+    fprintf(file, "v7 %d\n", attachments->count);
     for (int index = 0; index < attachments->count; index++) {
         const RpgAttachment *attachment = &attachments->entries[index];
-        fprintf(file, "%d %d %d %d %d %.2f %.2f %.2f %d %.2f %.6f %d %llu %d", attachment->type, attachment->folderId, attachment->cell.row,
+        fprintf(file, "%d %d %d %d %d %.2f %.2f %.2f %d %.2f %.6f %d %llu %d %.1f %.3f", attachment->type, attachment->folderId, attachment->cell.row,
                 attachment->cell.column, attachment->side, attachment->dataSize,
                 attachment->dataSpeed, attachment->dataInterval, attachment->dataPreviewEnabled ? 1 : 0,
                 attachment->sizePerFile, attachment->speedPerKilobyte, attachment->previewFileCount,
-                attachment->previewTotalBytes, attachment->dataPath.cellCount);
+                attachment->previewTotalBytes, attachment->dataPath.cellCount,
+                attachment->socketRightLightAngle, attachment->socketLightOpacity);
         for (int pathIndex = 0; pathIndex < attachment->dataPath.cellCount; pathIndex++)
             fprintf(file, " %d %d", attachment->dataPath.cells[pathIndex].row,
                     attachment->dataPath.cells[pathIndex].column);
@@ -233,11 +248,15 @@ bool RpgAttachments_Add(RpgAttachments *attachments, const RpgStage *stage, int 
                                  .dataSpeed = 120.0f, .dataInterval = 1.0f,
                                  .sizePerFile = RPG_STAGE_TILE_SIZE * 0.25f, .speedPerKilobyte = 1.0f / 64.0f,
                                  .previewFileCount = 2, .previewTotalBytes = 0,
+                                 .socketRightLightAngle = 18.0f, .socketLightOpacity = 0.45f,
                                  .dataPath = { .cellCount = 1, .cells = { outerCell } } };
     if (attachments->count >= RPG_ATTACHMENT_MAX_COUNT || !RpgBlockInventory_IsAttachment(type) ||
         !RpgAttachments_IsCellInStage(cell) || stage->blocks[cell.row][cell.column] == 0 ||
         !RpgAttachments_HasOuterEmptyCell(stage, cell, side) ||
         side < RPG_GRID_SIDE_TOP || side > RPG_GRID_SIDE_LEFT) return false;
+    /* A block socket has a gravity-facing recess and is deliberately only
+       mountable on the top face of its supporting block. */
+    if (type == RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET && side != RPG_GRID_SIDE_TOP) return false;
     if (type == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER)
         RpgAttachments_SetDefaultShooterPath(&attachment);
     if (RpgBlockInventory_IsCellAttachment(type) && RpgAttachments_IsCellOccupied(attachments, outerCell))
@@ -342,6 +361,132 @@ bool RpgAttachments_IsButtonPressedWorld(const RpgAttachments *attachments, cons
     return false;
 }
 
+int RpgAttachments_FindBlockSocketAtBoundsWorld(const RpgAttachments *attachments,
+                                                const RpgStage *stage, Rectangle blockBounds)
+{
+    const float horizontalTolerance = 0.75f;
+    /* A fixed block visibly settles into the 4px recess.  It still fully
+       covers the source, so occupancy must tolerate only that intentional
+       vertical descent, never a loose side-to-side overlap. */
+    const float verticalTolerance = RPG_BLOCK_SOCKET_RECESS_DEPTH + 0.75f;
+    if (attachments == NULL || stage == NULL) return -1;
+    for (int index = 0; index < attachments->count; index++) {
+        const RpgAttachment *attachment = &attachments->entries[index];
+        RpgGridCell socketCell;
+        Rectangle socketBounds;
+        if (attachment->isZipperHeld || attachment->type != RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET ||
+            attachment->side != RPG_GRID_SIDE_TOP) continue;
+        socketCell = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
+        if (!RpgAttachments_IsCellInStage(socketCell)) continue;
+        socketBounds = RpgStage_GetWorldBoundsForCell(stage, socketCell.row, socketCell.column);
+        /* The blue beam is blocked only when the whole 32px moving block is
+           seated in this exact cell, not merely overlapping the rim. */
+        if (fabsf(blockBounds.x - socketBounds.x) <= horizontalTolerance &&
+            fabsf(blockBounds.y - socketBounds.y) <= verticalTolerance &&
+            fabsf(blockBounds.width - socketBounds.width) <= horizontalTolerance &&
+            fabsf(blockBounds.height - socketBounds.height) <= horizontalTolerance)
+            return index;
+    }
+    return -1;
+}
+
+bool RpgAttachments_HasBlockSocketAtBaseCell(const RpgAttachments *attachments, int row, int column)
+{
+    if (attachments == NULL) return false;
+    for (int index = 0; index < attachments->count; index++) {
+        const RpgAttachment *attachment = &attachments->entries[index];
+        if (!attachment->isZipperHeld && attachment->type == RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET &&
+            attachment->side == RPG_GRID_SIDE_TOP && attachment->cell.row == row &&
+            attachment->cell.column == column) return true;
+    }
+    return false;
+}
+
+void RpgAttachments_DrawBlockSocketRecesses(const RpgAttachments *attachments, int mapIndex,
+                                            const struct RpgStageBackground *background,
+                                            Rectangle mapBounds, float brightness)
+{
+    if (attachments == NULL || background == NULL || mapIndex < 0 || mapIndex >= RPG_STAGE_MAP_COUNT)
+        return;
+    int firstColumn = mapIndex * RPG_STAGE_COLUMNS;
+    int lastColumn = firstColumn + RPG_STAGE_COLUMNS;
+    for (int index = 0; index < attachments->count; index++) {
+        const RpgAttachment *attachment = &attachments->entries[index];
+        if (attachment->isZipperHeld || attachment->type != RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET ||
+            attachment->side != RPG_GRID_SIDE_TOP || attachment->cell.row < 0 ||
+            attachment->cell.row >= RPG_STAGE_ROWS || attachment->cell.column < firstColumn ||
+            attachment->cell.column >= lastColumn) continue;
+        Rectangle recess = {
+            (attachment->cell.column - firstColumn) * RPG_STAGE_TILE_SIZE,
+            attachment->cell.row * RPG_STAGE_TILE_SIZE,
+            RPG_STAGE_TILE_SIZE, RPG_BLOCK_SOCKET_RECESS_DEPTH
+        };
+        RpgStageBackground_DrawRegion(background, mapBounds, recess, brightness);
+    }
+}
+
+typedef struct RpgSocketLightOcclusionContext {
+    const RpgStage *stage;
+    Vector2 localToWorld;
+} RpgSocketLightOcclusionContext;
+
+static float RpgAttachments_RaycastSocketLight(void *rawContext, Vector2 localOrigin,
+                                                Vector2 direction, float maximumLength)
+{
+    const RpgSocketLightOcclusionContext *context = rawContext;
+    if (context == NULL || context->stage == NULL) return maximumLength;
+    /* The 4px recess is intentionally empty; start testing after it so the
+       supporting terrain does not self-occlude the embedded source. */
+    const float sampleStep = 0.5f;
+    for (float distance = (float)RPG_BLOCK_SOCKET_RECESS_DEPTH + sampleStep;
+         distance <= maximumLength; distance += sampleStep) {
+        Vector2 localPoint = Vector2Add(localOrigin, Vector2Scale(direction, distance));
+        Vector2 worldPoint = Vector2Add(localPoint, context->localToWorld);
+        Rectangle probe = { worldPoint.x - 0.15f, worldPoint.y - 0.15f, 0.30f, 0.30f };
+        if (RpgStage_CheckSolidCollision(context->stage, probe))
+            return fmaxf(0.0f, distance - sampleStep);
+    }
+    return maximumLength;
+}
+
+void RpgAttachments_DrawSocketLightsMap(const RpgAttachments *attachments, const RpgStage *stage,
+                                        int mapIndex)
+{
+    int firstColumn;
+    int lastColumn;
+    if (attachments == NULL || mapIndex < 0 || mapIndex >= RPG_STAGE_MAP_COUNT) return;
+    firstColumn = mapIndex * RPG_STAGE_COLUMNS;
+    lastColumn = firstColumn + RPG_STAGE_COLUMNS;
+    for (int index = 0; index < attachments->count; index++) {
+        const RpgAttachment *attachment = &attachments->entries[index];
+        float left;
+        float bottom;
+        RpgLightSourceSegment source;
+        RpgSocketLightOcclusionContext occlusion;
+        if (attachment->isZipperHeld || attachment->type != RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET ||
+            attachment->side != RPG_GRID_SIDE_TOP || attachment->cell.row < 0 ||
+            attachment->cell.row >= RPG_STAGE_ROWS || attachment->cell.column < firstColumn ||
+            attachment->cell.column >= lastColumn) continue;
+        left = (attachment->cell.column - firstColumn) * RPG_STAGE_TILE_SIZE;
+        bottom = attachment->cell.row * RPG_STAGE_TILE_SIZE + RPG_BLOCK_SOCKET_RECESS_DEPTH - 1.0f;
+        Rectangle worldCell = RpgStage_GetWorldBoundsForCell(stage, attachment->cell.row,
+                                                             attachment->cell.column);
+        occlusion = (RpgSocketLightOcclusionContext){
+            .stage = stage,
+            .localToWorld = { worldCell.x - left,
+                              worldCell.y - attachment->cell.row * RPG_STAGE_TILE_SIZE }
+        };
+        source = (RpgLightSourceSegment){
+            .first = { left, bottom }, .second = { left + RPG_STAGE_TILE_SIZE, bottom },
+            .firstDirectionDegrees = -attachment->socketRightLightAngle,
+            .secondDirectionDegrees = attachment->socketRightLightAngle,
+            .rayLength = RPG_STAGE_TILE_SIZE, .opacity = attachment->socketLightOpacity,
+            .color = { 70, 197, 255, 255 }
+        };
+        RpgLightSource_DrawSegmentFanOccluded(&source, RpgAttachments_RaycastSocketLight, &occlusion);
+    }
+}
+
 int RpgAttachments_FindTouchedSaveFlag(const RpgAttachments *attachments, Vector2 playerPosition)
 {
     if (attachments == NULL) return -1;
@@ -423,7 +568,14 @@ Vector2 RpgAttachments_GetPosition(const RpgAttachment *attachment, int firstCol
     float y = outerCell.row * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f;
     /* Cell attachments live in the adjacent empty cell, so both their visual and hit position
        are the center of that occupied cell rather than the supporting block's edge. */
-    if (RpgBlockInventory_IsCellAttachment(attachment->type)) return (Vector2){ x, y };
+    if (RpgBlockInventory_IsCellAttachment(attachment->type) &&
+        attachment->type != RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET) return (Vector2){ x, y };
+    /* The socket reserves the empty cell above for a seated block, but its
+       actual body is a recess cut into the supporting block. */
+    if (attachment->type == RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET)
+        return (Vector2){ (attachment->cell.column - firstColumn) * RPG_STAGE_TILE_SIZE +
+                              RPG_STAGE_TILE_SIZE * 0.5f,
+                          attachment->cell.row * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f };
     // 外側1マスのうち、土台だけを取付先ブロック側の辺へ寄せる。
     // 支持ブロックと空気マスの境界を唯一の取付基準にする。描画・当たり判定・ドラッグはすべてこの値を使う。
     float offset = RPG_STAGE_TILE_SIZE * 0.5f;
@@ -460,6 +612,28 @@ int RpgAttachments_FindAtPosition(const RpgAttachments *attachments, Vector2 pos
     return -1;
 }
 
+int RpgAttachments_FindAtWorldPosition(const RpgAttachments *attachments, const RpgStage *stage,
+                                       Vector2 position, float distance)
+{
+    if (attachments == NULL || stage == NULL) return -1;
+    for (int index = attachments->count - 1; index >= 0; index--) {
+        const RpgAttachment *attachment = &attachments->entries[index];
+        Vector2 storedPosition = RpgAttachments_GetPosition(attachment, 0);
+        Vector2 storedCellCenter = {
+            (attachment->cell.column + 0.5f) * RPG_STAGE_TILE_SIZE,
+            (attachment->cell.row + 0.5f) * RPG_STAGE_TILE_SIZE
+        };
+        Vector2 worldCellCenter = RpgStage_GetWorldPositionForCell(stage, attachment->cell.row,
+                                                                    attachment->cell.column);
+        /* Preserve the attachment's side/socket offset while replacing only
+         * the packed-cell origin with the actual stage-world origin. */
+        Vector2 worldPosition = Vector2Add(worldCellCenter,
+                                           Vector2Subtract(storedPosition, storedCellCenter));
+        if (Vector2Distance(worldPosition, position) <= distance) return index;
+    }
+    return -1;
+}
+
 bool RpgAttachments_FindSnap(const RpgAttachments *attachments, const RpgStage *stage, int type,
                              Vector2 position, int ignoredAttachmentIndex, RpgAttachment *attachment)
 {
@@ -468,6 +642,7 @@ bool RpgAttachments_FindSnap(const RpgAttachments *attachments, const RpgStage *
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
         if (stage->blocks[row][column] == 0) continue;
         for (int side = RPG_GRID_SIDE_TOP; side <= RPG_GRID_SIDE_LEFT; side++) {
+            if (type == RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET && side != RPG_GRID_SIDE_TOP) continue;
             RpgAttachment candidate = { .type = type, .cell = { row, column },
                                         .side = (RpgGridSide)side };
             if (!RpgAttachments_HasOuterEmptyCell(stage, candidate.cell, candidate.side)) continue;
@@ -550,6 +725,22 @@ static void RpgAttachments_DrawIcon(int type, Vector2 position, RpgGridSide side
         DrawRectangleLinesEx(base, 1.0f, Fade(RAYWHITE, alpha));
         DrawCircleV(center, 4.5f, Fade(RED, alpha));
         DrawCircleLines((int)center.x, (int)center.y, 4.5f, Fade(MAROON, alpha));
+        return;
+    }
+    if (type == RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET) {
+        /* Terrain leaves this recessed region entirely transparent.  The
+           small blue bottom/side strips are the embedded sensor, not a fill. */
+        Rectangle recess = { position.x - 16.0f, position.y - 16.0f,
+                              RPG_STAGE_TILE_SIZE, RPG_BLOCK_SOCKET_RECESS_DEPTH };
+        DrawRectangleRec((Rectangle){ recess.x, recess.y, 2.0f, recess.height },
+                         Fade((Color){ 43, 166, 235, 255 }, alpha));
+        DrawRectangleRec((Rectangle){ recess.x + recess.width - 2.0f, recess.y,
+                                       2.0f, recess.height },
+                         Fade((Color){ 43, 166, 235, 255 }, alpha));
+        DrawRectangleGradientV((int)recess.x + 2, (int)(recess.y + recess.height - 1.0f),
+                               (int)recess.width - 4, 1,
+                               Fade((Color){ 28, 103, 165, 255 }, alpha),
+                               Fade((Color){ 114, 229, 255, 255 }, alpha));
         return;
     }
     if (type != RPG_BLOCK_ATTACHMENT_RADIO_EMITTER) return;

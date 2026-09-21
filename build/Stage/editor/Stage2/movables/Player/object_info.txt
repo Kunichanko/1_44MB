@@ -1,0 +1,5 @@
+kind=player
+type=0
+id=1
+world_x=4144.0
+world_y=288.0

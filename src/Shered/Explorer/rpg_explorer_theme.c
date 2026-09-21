@@ -298,6 +298,18 @@ static Vector2 DrawOrMeasureTextRuns(const RpgExplorerTheme *theme, const char *
     return result;
 }
 
+static void ExplorerTextDrawBackend(const void *context, const char *text,
+                                    Vector2 position, float size, Color color)
+{
+    DrawOrMeasureTextRuns((const RpgExplorerTheme *)context, text, position, size, color, true);
+}
+
+static Vector2 ExplorerTextMeasureBackend(const void *context, const char *text, float size)
+{
+    return DrawOrMeasureTextRuns((const RpgExplorerTheme *)context, text,
+                                 (Vector2){ 0.0f, 0.0f }, size, BLANK, false);
+}
+
 static Font LoadJapaneseFont(const char *path)
 {
     {
@@ -586,14 +598,22 @@ void RpgExplorerTheme_Unload(RpgExplorerTheme *theme)
     memset(theme, 0, sizeof(*theme));
 }
 
+RpgTextRenderer RpgExplorerTheme_GetTextRenderer(const RpgExplorerTheme *theme)
+{
+    return (RpgTextRenderer){ .context = theme, .draw = ExplorerTextDrawBackend,
+                              .measure = ExplorerTextMeasureBackend };
+}
+
 void RpgExplorerTheme_DrawText(const RpgExplorerTheme *theme, const char *text, Vector2 position, float size, Color color)
 {
-    DrawOrMeasureTextRuns(theme, text, position, size, color, true);
+    RpgTextRenderer renderer = RpgExplorerTheme_GetTextRenderer(theme);
+    RpgText_Draw(&renderer, text, position, size, color);
 }
 
 Vector2 RpgExplorerTheme_MeasureText(const RpgExplorerTheme *theme, const char *text, float size)
 {
-    return DrawOrMeasureTextRuns(theme, text, (Vector2){ 0.0f, 0.0f }, size, BLANK, false);
+    RpgTextRenderer renderer = RpgExplorerTheme_GetTextRenderer(theme);
+    return RpgText_Measure(&renderer, text, size);
 }
 
 void RpgExplorerTheme_DrawIcon(const RpgExplorerTheme *theme, int codepoint, Rectangle bounds, Color color)

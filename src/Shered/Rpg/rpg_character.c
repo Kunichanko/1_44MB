@@ -8,6 +8,9 @@
 
 #include "raymath.h"
 
+#define RPG_TEXT_ROUTE_RAYLIB_CALLS
+#include "../game_font.h"
+
 enum { RPG_CHARACTER_SPRITE_FRAME_SIZE = 32, RPG_CHARACTER_SPRITE_FRAME_COUNT = 9 };
 static const float rpgCharacterAnimationFrameDuration = 0.10f;
 static Texture2D playerWalkTexture = { 0 };
@@ -273,6 +276,14 @@ static bool RpgCharacter_HasGroundBelowShared(const RpgCharacter *character, con
                                      RpgCharacter_CheckMovingSolidCollisionCallback, (void *)movingSolids);
 }
 
+void RpgCharacter_ApplySurfaceMotion(RpgCharacter *character, const RpgStage *stage,
+                                     const RpgMovingSolidSet *movingSolids, float movementX)
+{
+    if (character == NULL || stage == NULL || !character->isGrounded || fabsf(movementX) < 0.001f)
+        return;
+    (void)RpgCharacter_MoveAxisShared(character, stage, movingSolids, movementX, false);
+}
+
 void RpgCharacter_UpdatePlayerWithStage(RpgCharacter *character, float deltaTime,
                                         const RpgStage *stage, float minimumX, float maximumX)
 {
@@ -299,32 +310,32 @@ void RpgCharacter_UpdatePlayerWithStageAndMovingSolidsControlled(RpgCharacter *c
     Vector2 previousPosition = character->position;
     bool wasGrounded = character->isGrounded;
     float direction = 0.0f;
+    Rectangle bounds;
+    RpgPhysicsBody body;
     if (allowHorizontalInput) {
         if (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT)) direction -= 1.0f;
         if (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT)) direction += 1.0f;
     }
 
-    RpgCharacter_MoveAxisShared(character, stage, movingSolids,
-                          direction * character->moveSpeed * deltaTime, false);
-    character->position.x = Clamp(character->position.x, minimumX, maximumX);
     if (allowJumpInput && character->isGrounded && IsKeyPressed(KEY_W)) {
         character->verticalSpeed = -460.0f;
         character->isGrounded = false;
     }
-
-    character->verticalSpeed += 1200.0f * deltaTime;
-    bool collidedVertically = RpgCharacter_MoveAxisShared(character, stage, movingSolids,
-                                                     character->verticalSpeed * deltaTime, true);
-    if (collidedVertically) {
-        character->isGrounded = character->verticalSpeed > 0.0f;
-        character->verticalSpeed = 0.0f;
-    } else if (character->verticalSpeed >= 0.0f &&
-               RpgCharacter_HasGroundBelowShared(character, stage, movingSolids)) {
-        character->isGrounded = true;
-        character->verticalSpeed = 0.0f;
-    } else {
-        character->isGrounded = false;
-    }
+    bounds = RpgCharacter_GetCollisionBounds(character);
+    body = (RpgPhysicsBody){
+        .position = character->position,
+        .verticalSpeed = character->verticalSpeed,
+        .isGrounded = character->isGrounded,
+        .localBounds = { bounds.x - character->position.x, bounds.y - character->position.y,
+                         bounds.width, bounds.height }
+    };
+    RpgPhysics_UpdateBody(stage, &body, direction * character->moveSpeed * deltaTime,
+                          1200.0f, deltaTime,
+                          RpgCharacter_CheckMovingSolidCollisionCallback, (void *)movingSolids);
+    character->position = body.position;
+    character->position.x = Clamp(character->position.x, minimumX, maximumX);
+    character->verticalSpeed = body.verticalSpeed;
+    character->isGrounded = body.isGrounded;
     UpdateAnimationState(character, previousPosition, wasGrounded, deltaTime);
 }
 
@@ -342,12 +353,15 @@ static void RpgCharacter_ResolveSingleMovingSolid(RpgCharacter *character, const
     bool wasStandingOnSolid = RpgCharacter_OverlapsHorizontally(playerBounds, solid.previousBounds) &&
         fabsf((playerBounds.y + playerBounds.height) - solid.previousBounds.y) <= 2.0f;
 
-    /* 横に動いた足場へ接地している時だけ、足場と同じ量をプレイヤーへ渡す。 */
-    if (wasStandingOnSolid && fabsf(deltaX) > 0.0001f) {
+    /* 接地中は固体の移動量を同じ共通処理で渡す。コンベアの回転床を
+       含め、固体側はプレイヤー追従を意識しない。 */
+    if (wasStandingOnSolid && (fabsf(deltaX) > 0.0001f || fabsf(deltaY) > 0.0001f)) {
         character->position.x += deltaX;
+        character->position.y += deltaY;
         playerBounds = RpgCharacter_GetCollisionBounds(character);
         if (RpgStage_CheckSolidCollision(stage, playerBounds)) {
             character->position.x -= deltaX;
+            character->position.y -= deltaY;
             playerBounds = RpgCharacter_GetCollisionBounds(character);
         }
     }

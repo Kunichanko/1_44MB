@@ -18,5 +18,9 @@ void RpgStageBackground_Unload(RpgStageBackground *background);
 // 描画先はゲーム画面ではなく、対応するステージのワールド領域を指定する。
 void RpgStageBackground_Draw(const RpgStageBackground *background, Rectangle destination,
                              float brightness);
+/* Restore a rectangular part of the same background.  This is used by a
+   terrain cut-out after all opaque terrain for that cell has been drawn. */
+void RpgStageBackground_DrawRegion(const RpgStageBackground *background, Rectangle destination,
+                                   Rectangle region, float brightness);
 
 #endif

@@ -8,6 +8,9 @@
 
 #include "raymath.h"
 
+#define RPG_TEXT_ROUTE_RAYLIB_CALLS
+#include "../game_font.h"
+
 #include <stdio.h>
 #include <string.h>
 
@@ -38,13 +41,16 @@ static Texture2D LoadTextureFromUtf8PngPath(const char *path)
 
 static Texture2D GetTexture(const char *path)
 {
+    char resolvedPath[1200];
     if (path == NULL || path[0] == '\0') return (Texture2D){ 0 };
     for (int index = 0; index < RPG_IMAGE_OBJECT_TEXTURE_CACHE_COUNT; index++)
         if (strcmp(textureCache[index].path, path) == 0) return textureCache[index].texture;
     for (int index = 0; index < RPG_IMAGE_OBJECT_TEXTURE_CACHE_COUNT; index++) {
         if (textureCache[index].path[0] != '\0') continue;
         snprintf(textureCache[index].path, sizeof(textureCache[index].path), "%s", path);
-        textureCache[index].texture = LoadTextureFromUtf8PngPath(path);
+        if (!RpgFileIo_ResolveAssetPath("Sprite", path, resolvedPath, (int)sizeof(resolvedPath)))
+            return (Texture2D){ 0 };
+        textureCache[index].texture = LoadTextureFromUtf8PngPath(resolvedPath);
         if (textureCache[index].texture.id != 0) SetTextureFilter(textureCache[index].texture, TEXTURE_FILTER_POINT);
         return textureCache[index].texture;
     }

@@ -6,6 +6,9 @@
 
 enum {
     RPG_BLOCK_INVENTORY_MAX_SLOTS = 10,
+    /* Ten palettes matches the keyboard shortcuts 1..0 and bounds the
+       expanded editor list to the usable workspace. */
+    RPG_BLOCK_INVENTORY_MAX_PALETTES = 10,
     RPG_BLOCK_EFFECT_MAX_SHAPE_CELLS = 8,
     RPG_BLOCK_EFFECT_BOUNCE = 11,
     RPG_BLOCK_EFFECT_SLOW = 12,
@@ -51,23 +54,62 @@ enum {
     RPG_BLOCK_KEY_DOOR_OPEN_BOTTOM = 47,
     /* Player can hold this gravity block with G; it is not magnetizable. */
     RPG_BLOCK_PUSH_BLOCK = 48,
+    /* Inactive by default: a block socket signal makes these physical only
+       within the same area.  The platform variant keeps one-way-floor rules. */
+    RPG_BLOCK_SOCKET_SIGNAL_SOLID = 49,
+    RPG_BLOCK_SOCKET_SIGNAL_ONE_WAY = 50,
     RPG_BLOCK_ATTACHMENT_RADIO_EMITTER = 200,
     RPG_BLOCK_ATTACHMENT_DATA_BUTTON = 201,
     RPG_BLOCK_ATTACHMENT_SAVE_FLAG = 202,
+    /* A top-mounted one-cell socket that locks a fully seated movable block. */
+    RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET = 203,
     RPG_BLOCK_PROPERTY_ITEM = 100,
+    /* Reserved: the standalone wire palette entry was removed.  Do not reuse
+       this value; existing stage files may still contain it. */
     RPG_BLOCK_PROPERTY_WIRE = 101,
     RPG_BLOCK_PROPERTY_RECEIVER = 102,
     /* 通常イベントはブロックモードのパレットから、マスに沿って配置する。 */
     RPG_BLOCK_PROPERTY_MAP_EVENT = 103,
+    /* Applies a directional conveyor path to ordinary blocks. */
+    RPG_BLOCK_PROPERTY_CONVEYOR = 104,
     /* ビルド出力から対応フォルダが失われたマスを表す、実行時専用の壁。 */
     RPG_BLOCK_BUILD_MISSING = 300
 };
-typedef struct RpgBlockInventory { const char *name; int blockTypes[RPG_BLOCK_INVENTORY_MAX_SLOTS]; int count; bool isProperty; bool isAttachment; } RpgBlockInventory;
+
+enum { RPG_BLOCK_INVENTORY_NAME_LENGTH = 64 };
+typedef enum RpgBlockInventoryBorderColor {
+    RPG_BLOCK_INVENTORY_BORDER_WHITE = 0,
+    RPG_BLOCK_INVENTORY_BORDER_RED,
+    RPG_BLOCK_INVENTORY_BORDER_BLUE,
+    RPG_BLOCK_INVENTORY_BORDER_YELLOW,
+    RPG_BLOCK_INVENTORY_BORDER_COLOR_COUNT
+} RpgBlockInventoryBorderColor;
+
+typedef struct RpgBlockInventory {
+    char name[RPG_BLOCK_INVENTORY_NAME_LENGTH];
+    int blockTypes[RPG_BLOCK_INVENTORY_MAX_SLOTS];
+    int count;
+    bool isProperty;
+    bool isAttachment;
+    RpgBlockInventoryBorderColor borderColor;
+} RpgBlockInventory;
 typedef struct RpgEffectShapeCell { int offsetX; int offsetY; int blockType; } RpgEffectShapeCell;
 typedef struct RpgEffectShape { int rootType; RpgEffectShapeCell cells[RPG_BLOCK_EFFECT_MAX_SHAPE_CELLS]; int cellCount; } RpgEffectShape;
 
 int RpgBlockInventory_Count(void);
 const RpgBlockInventory *RpgBlockInventory_Get(int index);
+RpgBlockInventory *RpgBlockInventory_GetMutable(int index);
+bool RpgBlockInventory_SetName(int index, const char *name);
+bool RpgBlockInventory_SetBorderColor(int index, RpgBlockInventoryBorderColor color);
+int RpgBlockInventory_Add(void);
+bool RpgBlockInventory_Remove(int index);
+/* Moves one palette to the current destination index; returns its new index,
+   or -1 when the indices are invalid. */
+int RpgBlockInventory_MovePalette(int sourceIndex, int destinationIndex);
+bool RpgBlockInventory_MoveBlock(int sourcePalette, int sourceSlot,
+                                 int destinationPalette, int destinationSlot);
+bool RpgBlockInventory_LoadPreferences(const char *path);
+bool RpgBlockInventory_SavePreferences(const char *path);
 bool RpgBlockInventory_IsEffectBlock(int blockType);
 bool RpgBlockInventory_IsEffectBlockPart(int blockType);
 bool RpgBlockInventory_IsBounceEffect(int blockType);
@@ -83,11 +125,14 @@ bool RpgBlockInventory_IsSignalShrinkBlock(int blockType);
 bool RpgBlockInventory_IsAttachment(int blockType);
 bool RpgBlockInventory_IsCellAttachment(int blockType);
 bool RpgBlockInventory_IsMapEventProperty(int blockType);
+bool RpgBlockInventory_IsConveyorProperty(int blockType);
 bool RpgBlockInventory_IsOneWayPlatform(int blockType);
 bool RpgBlockInventory_IsMagnetBlock(int blockType);
 bool RpgBlockInventory_IsMagnetActive(int blockType);
 bool RpgBlockInventory_IsMetalBlock(int blockType);
 bool RpgBlockInventory_IsPushBlock(int blockType);
+bool RpgBlockInventory_IsSocketSignalBlock(int blockType);
+bool RpgBlockInventory_IsSocketSignalOneWayBlock(int blockType);
 bool RpgBlockInventory_IsOrdinaryBlock(int blockType);
 int RpgBlockInventory_GetEffectRootType(int blockType);
 const RpgEffectShape *RpgBlockInventory_GetEffectShape(int blockType);

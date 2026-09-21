@@ -18,6 +18,7 @@
 #include <shellapi.h>
 #endif
 
+#define RPG_TEXT_ROUTE_RAYLIB_CALLS
 #include "game_font.h"
 #include "rpg_character.h"
 #include "rpg_attachment.h"
@@ -118,10 +119,9 @@ static bool IsTextReferenceFile(const char *filePath)
 
 static void RegisterReferenceFileNames(const RpgStage *stage)
 {
-    for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
-        if (RpgBlockInventory_IsReferenceObject(stage->blocks[row][column]))
-            GameFont_AddText(GetReferenceFileName(RpgStage_GetReferencePathAtCell(stage, row, column)));
-    }
+    if (stage == NULL) return;
+    for (int index = 0; index < stage->referenceObjects.count; index++)
+        GameFont_AddText(GetReferenceFileName(stage->referenceObjects.entries[index].path));
 }
 
 static void OpenTextFile(const char *path, char *fileName, size_t fileNameSize,
@@ -174,10 +174,17 @@ static void DrawReferenceTextPanel(const char *fileName, const char *text)
 
 static void DrawZipper(Texture2D zipperTexture, const RpgCharacter *zipper, float animationElapsed)
 {
-    int frameCount = zipperTexture.width / 32;
-    int frameIndex = animationElapsed >= 0.0f && frameCount > 1 ?
+    enum { ZIPPER_FRAME_WIDTH = 32, ZIPPER_FRAME_HEIGHT = 40, ZIPPER_FRAME_COUNT = 5 };
+    const int columns = (zipperTexture.width / ZIPPER_FRAME_WIDTH) > 0 ?
+        zipperTexture.width / ZIPPER_FRAME_WIDTH : 1;
+    const int rows = zipperTexture.height / ZIPPER_FRAME_HEIGHT;
+    const int availableFrames = columns * rows;
+    const int frameCount = availableFrames < ZIPPER_FRAME_COUNT ? availableFrames : ZIPPER_FRAME_COUNT;
+    const int frameIndex = animationElapsed >= 0.0f && frameCount > 1 ?
         (int)Clamp(animationElapsed / 0.60f * frameCount, 0.0f, (float)(frameCount - 1)) : 0;
-    Rectangle source = { frameIndex * 32.0f, 0.0f, 32.0f, 40.0f };
+    Rectangle source = { (float)((frameIndex % columns) * ZIPPER_FRAME_WIDTH),
+                         (float)((frameIndex / columns) * ZIPPER_FRAME_HEIGHT),
+                         ZIPPER_FRAME_WIDTH, ZIPPER_FRAME_HEIGHT };
     Rectangle destination = RpgZipper_GetPixelAlignedSpriteBounds(zipper, 380.0f);
     DrawTexturePro(zipperTexture, source, destination, (Vector2){ 0.0f, 0.0f }, 0.0f, WHITE);
 }
@@ -282,12 +289,12 @@ static Rectangle GetZipperForwardCollisionBounds(Rectangle bounds, Vector2 veloc
 
 static bool DoesZipperHitReferenceFile(const RpgStage *stage, Rectangle bounds, Vector2 *center)
 {
-    for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
-        if (!RpgBlockInventory_IsReferenceObject(stage->blocks[row][column])) continue;
-        Rectangle cell = { column * RPG_STAGE_TILE_SIZE, row * RPG_STAGE_TILE_SIZE,
-                           RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE };
-        if (CheckCollisionRecs(bounds, cell)) {
-            *center = (Vector2){ cell.x + cell.width * 0.5f, cell.y + cell.height * 0.5f };
+    if (stage == NULL) return false;
+    for (int index = 0; index < stage->referenceObjects.count; index++) {
+        const RpgReferenceObject *object = &stage->referenceObjects.entries[index];
+        Rectangle objectBounds = { object->position.x - 24.0f, object->position.y - 24.0f, 48.0f, 48.0f };
+        if (CheckCollisionRecs(bounds, objectBounds)) {
+            *center = object->position;
             return true;
         }
     }
@@ -474,7 +481,7 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
     /* 最背面PNGは背景の後、ブロックより前に描画する。 */
     RpgImageObjects_DrawLayer(&stage->imageObjects, 0, RPG_STAGE_WORLD_COLUMNS,
                               RPG_STAGE_TILE_SIZE, WHITE, RPG_IMAGE_OBJECT_LAYER_BACK);
-    RpgStage_Draw(stage, false, blockBrightness);
+    RpgStage_DrawWithAttachments(stage, attachments, false, blockBrightness);
     // 通常ブロックへ紐づけたファイルは、そのブロック自体を強調する。
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
         RpgObjectFolder objectFolder = { .cell = { row, column } };
@@ -499,11 +506,6 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
         DrawCircleV(shot->position, shot->size + 8.0f, Fade(GOLD, 0.30f));
         DrawCircleLines((int)shot->position.x, (int)shot->position.y, shot->size + 8.0f, ORANGE);
     }
-    RpgStage_DrawReferenceObjectsExcept(stage, fileTexture,
-                                        isReferenceDragActive && draggedReferenceTarget.kind == RPG_REFERENCE_TARGET_CELL ?
-                                            draggedReferenceTarget.row : -1,
-                                        isReferenceDragActive && draggedReferenceTarget.kind == RPG_REFERENCE_TARGET_CELL ?
-                                            draggedReferenceTarget.column : -1);
     RpgReferenceObjects_DrawExcept(referenceDrops, fileTexture,
                                    isReferenceDragActive && draggedReferenceTarget.kind == RPG_REFERENCE_TARGET_DROP ?
                                        draggedReferenceTarget.dropIndex : -1);
@@ -652,12 +654,13 @@ int main(void)
     RpgStage_SetGroundTexture(groundBlockTexture.texture);
     RpgStage_SetGroundAppearance(layout.groundHue, layout.groundSaturation,
                                  layout.groundLightness);
+    GameFont_BeginTextBatch();
     static RpgStage stage;
     stage = stageData.stage;
     // 保存済みの日本語ファイル名を描画より先にフォントへ登録し、? 表示を防ぐ。
     RegisterReferenceFileNames(&stage);
     RpgItems items = stageData.items;
-    RpgReferenceObjects referenceDrops = RpgReferenceObjects_Default();
+    RpgReferenceObjects referenceDrops = stage.referenceObjects;
     RpgWires wires = stageData.wires;
     RpgReceivers receivers = stageData.receivers;
     RpgAttachments attachments = stageData.attachments;
@@ -707,6 +710,7 @@ int main(void)
             GameFont_AddText(zipper.inspect.functions[functionIndex].dialogue.lines[lineIndex]);
         }
     }
+    (void)GameFont_EndTextBatch();
     RpgCharacter player = RpgCharacter_Create(layout.playerPosition, BLUE, BROWN);
     RpgCharacter_SetUsesPlayerSpriteCollision(&player, true);
     RpgCharacter npc = RpgCharacter_Create(layout.npcPosition, PURPLE, DARKBROWN);
@@ -735,6 +739,8 @@ int main(void)
     Vector2 zipperLaunchVelocity = { 0.0f, 0.0f };
     int attachedDataShotIndex = -1;
     int attachedAttachmentIndex = -1;
+    int attachedDynamicBlockIndex = -1;
+    int attachedReferenceObjectIndex = -1;
     Vector2 attachedDataShotOffset = { 0.0f, 0.0f };
     bool isZipperAttachedToBlock = false;
     RpgGridCell zipperAttachedBlockCell = { -1, -1 };
@@ -777,7 +783,7 @@ int main(void)
                         .zoom = RPG_SCREEN_WIDTH / (float)(RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE) };
     RpgRuntimeContext runtime = {
         .layout=&layout, .stageBackground=&stageBackground, .stage=&stage, .items=&items, .referenceDrops=&referenceDrops, .wires=&wires, .receivers=&receivers, .attachments=&attachments, .signalBlocks=&signalBlocks, .dataShots=&dataShots, .buttonEvent=&buttonEvent, .events=&events, .dialogue=&dialogue, .stage3Event=&stage3Event, .areaEntryEvents=&areaEntryEvents, .zipper=&zipper, .inspect=&inspect, .player=&player, .npc=&npc, .magnetRuntime=&magnetRuntime,
-        .dialogueIndex=&dialogueIndex, .stage3IntroIndex=&stage3IntroIndex, .inspectFunctionIndex=&inspectFunctionIndex, .inspectLineIndex=&inspectLineIndex, .inspectTarget=&inspectTarget, .isInspectMoveRunning=&isInspectMoveRunning, .inspectMoveElapsed=&inspectMoveElapsed, .inspectMoveStartX=&inspectMoveStartX, .inspectMoveStartY=&inspectMoveStartY, .activeInspectMove=&activeInspectMove, .inspectMoveTransitionElapsed=&inspectMoveTransitionElapsed, .activeWaitFunctionIndex=&activeWaitFunctionIndex, .inspectWaitElapsed=&inspectWaitElapsed, .stage3IntroShown=&stage3IntroShown, .areaEntryShown=areaEntryShown, .activeEntryEvent=&activeEntryEvent, .zipperFollowsPlayer=&zipperFollowsPlayer, .isZipperLaunched=&isZipperLaunched, .zipperLaunchVelocity=&zipperLaunchVelocity, .attachedDataShotIndex=&attachedDataShotIndex, .attachedAttachmentIndex=&attachedAttachmentIndex, .attachedDataShotOffset=&attachedDataShotOffset, .isZipperAttachedToBlock=&isZipperAttachedToBlock, .zipperAttachedBlockCell=&zipperAttachedBlockCell,
+        .dialogueIndex=&dialogueIndex, .stage3IntroIndex=&stage3IntroIndex, .inspectFunctionIndex=&inspectFunctionIndex, .inspectLineIndex=&inspectLineIndex, .inspectTarget=&inspectTarget, .isInspectMoveRunning=&isInspectMoveRunning, .inspectMoveElapsed=&inspectMoveElapsed, .inspectMoveStartX=&inspectMoveStartX, .inspectMoveStartY=&inspectMoveStartY, .activeInspectMove=&activeInspectMove, .inspectMoveTransitionElapsed=&inspectMoveTransitionElapsed, .activeWaitFunctionIndex=&activeWaitFunctionIndex, .inspectWaitElapsed=&inspectWaitElapsed, .stage3IntroShown=&stage3IntroShown, .areaEntryShown=areaEntryShown, .activeEntryEvent=&activeEntryEvent, .zipperFollowsPlayer=&zipperFollowsPlayer, .isZipperLaunched=&isZipperLaunched, .zipperLaunchVelocity=&zipperLaunchVelocity, .attachedDataShotIndex=&attachedDataShotIndex, .attachedAttachmentIndex=&attachedAttachmentIndex, .attachedDataShotOffset=&attachedDataShotOffset, .isZipperAttachedToBlock=&isZipperAttachedToBlock, .zipperAttachedBlockCell=&zipperAttachedBlockCell, .attachedDynamicBlockIndex=&attachedDynamicBlockIndex, .attachedReferenceObjectIndex=&attachedReferenceObjectIndex,
         .zipperPointerSelected=&zipperPointerSelected, .isZipperPointerFeedbackSuppressed=&isZipperPointerFeedbackSuppressed, .lastZipperPointerClickTime=&lastZipperPointerClickTime, .selectedReferencePointerTarget=&selectedReferencePointerTarget, .isReferencePointerFeedbackSuppressed=&isReferencePointerFeedbackSuppressed, .isReferencePointerPressed=&isReferencePointerPressed, .pressedReferenceTarget=&pressedReferenceTarget, .referencePressPosition=&referencePressPosition, .isReferenceDragActive=&isReferenceDragActive, .draggedReferenceTarget=&draggedReferenceTarget, .referenceDragPosition=&referenceDragPosition, .lastReferencePointerClickTime=&lastReferencePointerClickTime, .zipperAnimationElapsed=&zipperAnimationElapsed, .npcInspectCompleted=&npcInspectCompleted, .zipperInspectCompleted=&zipperInspectCompleted, .isZipperControllable=&isZipperControllable, .wasDataButtonPressed=&wasDataButtonPressed, .previousMap=&previousMap, .worldCoordinatesInitialized=&runtimeWorldCoordinatesInitialized, .cameraFollowsPlayer=&cameraFollowsPlayer, .itemMessage=itemMessage, .itemMessageSize=(int)sizeof(itemMessage), .itemMessageTimer=&itemMessageTimer, .referenceText=referenceText, .referenceTextSize=(int)sizeof(referenceText), .referenceFileName=referenceFileName, .referenceFileNameSize=(int)sizeof(referenceFileName), .isReferenceTextOpen=&isReferenceTextOpen, .camera=&camera, .zipperTexture=zipperTexture, .fileTexture=fileTexture, .scene=&scene
     };
     (void)OpenTextFile;
@@ -828,7 +834,7 @@ int main(void)
                 stage = stageData.stage;
                 RegisterReferenceFileNames(&stage);
                 items = stageData.items;
-                referenceDrops = RpgReferenceObjects_Default();
+                referenceDrops = stage.referenceObjects;
                 wires = stageData.wires;
                 receivers = stageData.receivers;
                 attachments = stageData.attachments;
@@ -863,7 +869,7 @@ int main(void)
                 memset(areaEntryShown, 0, sizeof(areaEntryShown)); activeEntryEvent = &stage3Event; zipperFollowsPlayer = false;
                 isZipperConnected = false; activeSaveFlagId = 0;
                 isZipperLaunched = false; zipperLaunchVelocity = (Vector2){ 0.0f, 0.0f };
-                attachedDataShotIndex = -1; attachedAttachmentIndex = -1;
+                attachedDataShotIndex = -1; attachedAttachmentIndex = -1; attachedDynamicBlockIndex = -1; attachedReferenceObjectIndex = -1;
                 attachedDataShotOffset = (Vector2){ 0.0f, 0.0f }; isZipperAttachedToBlock = false;
                 zipperAttachedBlockCell = (RpgGridCell){ -1, -1 }; zipperPointerSelected = false;
                 isReferenceTextOpen = false; itemMessage[0] = '\0'; itemMessageTimer = 0.0f;
@@ -884,13 +890,9 @@ int main(void)
                     /* 接続状態は保存フラグではなく、StageN に残る Zipper 構造の有無から復帰する。 */
                     isZipperConnected = continueSave.zipperConnected;
                     if (isZipperConnected) {
-                        // エリア3の Zipper は調べ済みとして接続状態を再開する。
-                        zipperInspectCompleted = true;
-                        isZipperControllable = true;
-                        zipperFollowsPlayer = true;
-                        zipper.character.position = player.position;
-                        zipper.character.verticalSpeed = 0.0f;
-                        zipper.character.isGrounded = true;
+                        RpgRuntime_StartFollowingZipper(&zipper, &player, &zipperFollowsPlayer,
+                                                         &isZipperControllable, &zipperInspectCompleted,
+                                                         &zipperAnimationElapsed);
                     }
                 }
                 runtimeWorldCoordinatesInitialized = continueRespawnAreaId >= 0;
@@ -916,12 +918,19 @@ int main(void)
                         runtimeState = stageData;
                         runtimeState.layout = layout;
                         runtimeState.stage = stage;
+                        runtimeState.stage.referenceObjects = referenceDrops;
                         runtimeState.attachments = attachments;
                         if (!RpgStageStorage_SaveRuntimeState(currentStageNumber, &runtimeState))
                             buildReady = false;
                     }
                     if (buildReady && shouldContinue && resumedRuntimeBuild)
                         RpgObjectFolders_LoadReferenceDrops(&referenceDrops);
+                    /* Flag Continue establishes the follower before the build
+                       directory is active.  Bind assyuku.cmd to this build's
+                       concrete Zipper/Inbox path once activation succeeds. */
+                    if (buildReady && isZipperConnected &&
+                        !RpgObjectFolder_EnsureRuntimeZipperDirectory())
+                        buildReady = false;
                     if (!buildReady)
                         RpgObjectFolders_EndStageBuild();
                 } else {
@@ -930,6 +939,7 @@ int main(void)
                     RpgObjectFolders_PrepareAttachmentFolders(&attachments);
                     RpgObjectFolder_PrepareZipperAnimationCommand();
                 }
+                GameFont_BeginTextBatch();
                 for (int index = 0; index < items.count; index++) GameFont_AddText(items.entries[index].name);
                 for (int lineIndex = 0; lineIndex < dialogue.lineCount; lineIndex++) {
                     GameFont_AddText(dialogue.lines[lineIndex]);
@@ -946,6 +956,7 @@ int main(void)
                             GameFont_AddText(areaEntryEvents.entries[areaIndex].inspect.functions[functionIndex].dialogue.speakers[lineIndex]);
                             GameFont_AddText(areaEntryEvents.entries[areaIndex].inspect.functions[functionIndex].dialogue.lines[lineIndex]);
                         }
+                (void)GameFont_EndTextBatch();
             }
             RpgStageBuild_Update(&stage);
             RpgRuntime_UpdateAndDraw(&runtime);

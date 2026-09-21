@@ -26,6 +26,7 @@ RpgStageGroundTexture RpgStageGroundTexture_Default(void)
 
 bool RpgStageGroundTexture_Load(RpgStageGroundTexture *groundTexture, const char *path)
 {
+    char resolvedPath[1200];
     if (groundTexture == NULL) return false;
     if (path == NULL) path = "";
     if (strcmp(groundTexture->loadedPath, path) == 0)
@@ -34,7 +35,8 @@ bool RpgStageGroundTexture_Load(RpgStageGroundTexture *groundTexture, const char
         RpgStageGroundTexture_Unload(groundTexture);
         return true;
     }
-    Texture2D texture = LoadPngUtf8(path);
+    if (!RpgFileIo_ResolveAssetPath("Sprite", path, resolvedPath, (int)sizeof(resolvedPath))) return false;
+    Texture2D texture = LoadPngUtf8(resolvedPath);
     if (texture.id == 0) return false;
     RpgStageGroundTexture_Unload(groundTexture);
     groundTexture->texture = texture;

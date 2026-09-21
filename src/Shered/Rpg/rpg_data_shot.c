@@ -6,6 +6,9 @@
 
 #include "raymath.h"
 
+#define RPG_TEXT_ROUTE_RAYLIB_CALLS
+#include "../game_font.h"
+
 #include <stddef.h>
 
 static Vector2 RpgDataShots_GetCellCenter(RpgGridCell cell)
@@ -129,7 +132,7 @@ static int RpgDataShots_FindWireFromReceiver(const RpgWires *wires, RpgGridCell 
     if (wires == NULL) return -1;
     for (int wireIndex = 0; wireIndex < wires->count; wireIndex++) {
         const RpgWire *wire = &wires->entries[wireIndex];
-        if (wire->hasReceiverSource && wire->receiverCell.row == receiverCell.row &&
+        if (!RpgWires_IsConveyor(wire) && wire->hasReceiverSource && wire->receiverCell.row == receiverCell.row &&
             wire->receiverCell.column == receiverCell.column && wire->receiverSide == receiverSide)
             return wireIndex;
     }
@@ -142,7 +145,7 @@ static bool RpgDataShots_UpdateElectric(RpgDataShot *shot, const RpgWires *wires
     if (wires == NULL || shot->electricWireIndex < 0 || shot->electricWireIndex >= wires->count)
         return false;
     const RpgWire *wire = &wires->entries[shot->electricWireIndex];
-    if (wire->path.cellCount <= 0 || shot->electricCellIndex < 0 ||
+    if (RpgWires_IsConveyor(wire) || wire->path.cellCount <= 0 || shot->electricCellIndex < 0 ||
         shot->electricCellIndex >= wire->path.cellCount) return false;
     if (cellDelay < 0.01f) cellDelay = 0.01f;
     shot->electricDelayElapsed += deltaTime;
@@ -202,7 +205,8 @@ void RpgDataShots_TriggerAllInMap(RpgDataShots *shots, RpgAttachments *attachmen
 void RpgDataShots_ConsumeButtonEvent(RpgDataShots *shots, RpgAttachments *attachments,
                                      const RpgButtonEvent *buttonEvent)
 {
-    if (RpgButtonEvent_Consume(buttonEvent, &shots->lastButtonEventSequence))
+    if (RpgButtonEvent_Consume(buttonEvent, &shots->lastButtonEventSequence) &&
+        buttonEvent->isActive)
         RpgDataShots_TriggerAllInMap(shots, attachments, buttonEvent->sourceMapIndex);
 }
 

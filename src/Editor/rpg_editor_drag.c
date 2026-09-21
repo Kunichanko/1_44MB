@@ -45,3 +45,9 @@ Vector2 RpgEditorDrag_SnapToGrid(Vector2 position, float tileSize)
     return (Vector2){ floorf(position.x / tileSize) * tileSize,
                       floorf(position.y / tileSize) * tileSize };
 }
+
+Rectangle RpgEditorDrag_GetPreviewBounds(const RpgEditorDrag *drag, float width, float height)
+{
+    Vector2 pointer = drag != NULL ? drag->pointerPosition : (Vector2){ 0.0f, 0.0f };
+    return (Rectangle){ pointer.x - width * 0.5f, pointer.y - height * 0.5f, width, height };
+}

@@ -26,14 +26,84 @@ void RpgZipper_ClearHeldObject(RpgZipper *zipper)
     if (zipper == NULL) return;
     zipper->heldObject = (RpgZipperHeldObject){ .kind = RPG_ZIPPER_HELD_OBJECT_NONE,
                                                  .blockCell = { -1, -1 },
-                                                 .attachmentIndex = -1, .dataShotIndex = -1 };
+                                                 .movableKind = RPG_ZIPPER_MOVABLE_NONE, .dataShotIndex = -1,
+                                                 .dynamicBlockIndex = -1, .referenceObjectIndex = -1 };
     zipper->returningObject = zipper->heldObject;
+    memset(zipper->heldQueue, 0, sizeof(zipper->heldQueue));
+    zipper->heldQueueCount = 0;
     zipper->isFolderReturnPending = false;
+    zipper->isSpitCommandPending = false;
     zipper->isFolderReturnAnimating = false;
     zipper->isFolderReturnCommitPending = false;
     zipper->folderReturnDelayElapsed = 0.0f;
     zipper->folderReturnElapsed = 0.0f;
     zipper->folderReturnDuration = 0.45f;
+}
+
+bool RpgZipper_CanEnqueueHeldObject(const RpgZipper *zipper)
+{
+    return zipper != NULL && (zipper->heldObject.kind == RPG_ZIPPER_HELD_OBJECT_NONE ||
+                              zipper->heldQueueCount < RPG_ZIPPER_HELD_QUEUE_CAPACITY);
+}
+
+bool RpgZipper_EnqueueHeldObject(RpgZipper *zipper, RpgZipperHeldObject object)
+{
+    if (zipper == NULL || object.kind == RPG_ZIPPER_HELD_OBJECT_NONE) return false;
+    if (zipper->heldObject.kind == RPG_ZIPPER_HELD_OBJECT_NONE) {
+        zipper->heldObject = object;
+        return true;
+    }
+    if (zipper->heldQueueCount >= RPG_ZIPPER_HELD_QUEUE_CAPACITY) return false;
+    zipper->heldQueue[zipper->heldQueueCount++] = object;
+    return true;
+}
+
+void RpgZipper_RemoveNextHeldObject(RpgZipper *zipper)
+{
+    if (zipper == NULL) return;
+    if (zipper->heldQueueCount <= 0) {
+        zipper->heldObject = (RpgZipperHeldObject){ .kind = RPG_ZIPPER_HELD_OBJECT_NONE,
+                                                     .blockCell = { -1, -1 },
+                                                     .movableKind = RPG_ZIPPER_MOVABLE_NONE, .dataShotIndex = -1,
+                                                     .dynamicBlockIndex = -1, .referenceObjectIndex = -1 };
+        return;
+    }
+    zipper->heldObject = zipper->heldQueue[0];
+    for (int index = 1; index < zipper->heldQueueCount; index++)
+        zipper->heldQueue[index - 1] = zipper->heldQueue[index];
+    zipper->heldQueue[--zipper->heldQueueCount] = (RpgZipperHeldObject){ .kind = RPG_ZIPPER_HELD_OBJECT_NONE,
+                                                                            .blockCell = { -1, -1 },
+                                                                            .movableKind = RPG_ZIPPER_MOVABLE_NONE,
+                                                                            .dataShotIndex = -1,
+                                                                            .dynamicBlockIndex = -1,
+                                                                            .referenceObjectIndex = -1 };
+}
+
+bool RpgZipper_TryToggleLaunch(RpgZipper *zipper, RpgCharacter *player,
+                               Vector2 aimWorldPosition, bool *followsPlayer,
+                               bool *isLaunched, Vector2 *launchVelocity)
+{
+    if (zipper == NULL || player == NULL || followsPlayer == NULL ||
+        isLaunched == NULL || launchVelocity == NULL) return false;
+    if (*followsPlayer) {
+        Rectangle bounds;
+        Vector2 center;
+        Vector2 direction;
+        zipper->character.position = player->position;
+        bounds = RpgCharacter_GetCollisionBounds(&zipper->character);
+        center = (Vector2){ bounds.x + bounds.width * 0.5f,
+                            bounds.y + bounds.height * 0.5f };
+        direction = Vector2Subtract(aimWorldPosition, center);
+        if (Vector2LengthSqr(direction) < 0.001f) direction = (Vector2){ 1.0f, 0.0f };
+        *launchVelocity = Vector2Scale(Vector2Normalize(direction), zipper->launchSpeed);
+        *isLaunched = true;
+        *followsPlayer = false;
+        RpgCharacter_ResetAnimation(player);
+        return true;
+    }
+    if (*isLaunched) return false;
+    *followsPlayer = true;
+    return true;
 }
 
 // 旧設定は5項目、新設定は6項目。整数読込が小数部を別項目として扱わないよう、先に項目数を数える。

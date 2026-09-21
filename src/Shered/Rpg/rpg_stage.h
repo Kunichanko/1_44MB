@@ -3,8 +3,12 @@
 #define RPG_STAGE_H
 
 #include "raylib.h"
+
+struct RpgAttachments;
 #include "rpg_block_inventory.h"
 #include "rpg_image_object.h"
+
+struct RpgAttachments;
 
 enum { RPG_STAGE_TILE_SIZE = 32, RPG_STAGE_COLUMNS = 20, RPG_STAGE_ROWS = 12,
        RPG_STAGE_INITIAL_MAP_COUNT = 6, RPG_STAGE_MAP_COUNT = 24,
@@ -30,16 +34,59 @@ typedef struct RpgKeyDoor {
     char failureText[RPG_KEY_DOOR_FAILURE_TEXT_LENGTH];
 } RpgKeyDoor;
 
+typedef enum RpgReferenceObjectKind {
+    RPG_REFERENCE_OBJECT_FILE = 0,
+    RPG_REFERENCE_OBJECT_FOLDER = 1
+} RpgReferenceObjectKind;
+
+enum { RPG_REFERENCE_OBJECT_MAX_COUNT = 32 };
+typedef struct RpgReferenceObject {
+    int id;
+    RpgReferenceObjectKind objectKind;
+    Vector2 position;
+    /* Only populated while importing the retired cell-based reference format.
+       It is not persistent runtime state: stage storage writes the resolved
+       world position after the import has completed. */
+    int legacySourceRow;
+    int legacySourceColumn;
+    /* The editor selection is kept separately from the transient build copy.
+       It is always relative to the file-picker base (assets/Files) and is the
+       value shown back to the author in the inspector. */
+    char sourcePath[RPG_STAGE_REFERENCE_PATH_LENGTH];
+    char path[RPG_STAGE_REFERENCE_PATH_LENGTH];
+    bool isFalling;
+    float fallSpeed;
+    bool followsPlayer;
+    float drawScale;
+    bool isCompressing;
+    bool isCompressed;
+    float compressionElapsed;
+} RpgReferenceObject;
+typedef struct RpgReferenceObjects {
+    int count;
+    int nextId;
+    RpgReferenceObject entries[RPG_REFERENCE_OBJECT_MAX_COUNT];
+} RpgReferenceObjects;
+
 typedef struct RpgStage {
     // エリアの実体は固定スロットに置き、使用中のスロットだけを台帳で管理する。
     bool mapActive[RPG_STAGE_MAP_COUNT];
     int mapGridX[RPG_STAGE_MAP_COUNT];
     int mapGridY[RPG_STAGE_MAP_COUNT];
+    /* Runtime-only level state for block-socket signals.  It deliberately is
+       not written into the static stage file. */
+    bool socketSignalActive[RPG_STAGE_MAP_COUNT];
     /* Transient query origin: never serialized.  It lets a movement step cross
        a map edge in the continuous stage space before its storage slot changes. */
     int spatialReferenceMap;
     int blocks[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS];
+    /* Static editor tombstone for a dropped object folder.  It stores only
+       the original object type, never any generated FILE objects. */
+    int missingBlockTypes[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS];
     char referencePaths[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS][RPG_STAGE_REFERENCE_PATH_LENGTH];
+    /* Legacy cell paths are migration input only; reference objects are
+       movable and serialize under the per-area movables tree. */
+    RpgReferenceObjects referenceObjects;
     int keyDoorCount;
     RpgKeyDoor keyDoors[RPG_KEY_DOOR_MAX_COUNT];
     /* PNG画像はFolderやFILE.pngと別の、見た目専用オブジェクトとして管理する。 */
@@ -84,6 +131,7 @@ RpgKeyDoor *RpgStage_GetKeyDoorAtCell(RpgStage *stage, int row, int column);
 const RpgKeyDoor *RpgStage_GetKeyDoorAtCellConst(const RpgStage *stage, int row, int column);
 bool RpgStage_SetReferencePathAtCell(RpgStage *stage, int row, int column, const char *path);
 const char *RpgStage_GetReferencePathAtCell(const RpgStage *stage, int row, int column);
+#if 0 /* obsolete pre-movable reference-object declaration */
 enum { RPG_REFERENCE_OBJECT_MAX_COUNT = 32 };
 typedef struct RpgReferenceObject {
     Vector2 position;
@@ -99,9 +147,12 @@ typedef struct RpgReferenceObject {
     float compressionElapsed;
 } RpgReferenceObject;
 typedef struct RpgReferenceObjects { int count; RpgReferenceObject entries[RPG_REFERENCE_OBJECT_MAX_COUNT]; } RpgReferenceObjects;
+#endif
 typedef enum RpgReferenceTargetKind { RPG_REFERENCE_TARGET_NONE, RPG_REFERENCE_TARGET_CELL, RPG_REFERENCE_TARGET_DROP } RpgReferenceTargetKind;
 typedef struct RpgReferenceTarget { RpgReferenceTargetKind kind; int row; int column; int dropIndex; } RpgReferenceTarget;
 RpgReferenceObjects RpgReferenceObjects_Default(void);
+bool RpgReferenceObjects_Add(RpgReferenceObjects *objects, RpgReferenceObjectKind objectKind,
+                             Vector2 position, const char *path, int id);
 bool RpgReferenceObjects_AddDrop(RpgReferenceObjects *objects, Vector2 position, const char *path);
 void RpgReferenceObjects_Update(RpgReferenceObjects *objects, float deltaTime);
 void RpgReferenceObjects_UpdateFollowers(RpgReferenceObjects *objects, Vector2 playerPosition,
@@ -115,8 +166,8 @@ void RpgReferenceObjects_DrawExcept(const RpgReferenceObjects *objects, Texture2
 int RpgReferenceObjects_FindNearby(const RpgReferenceObjects *objects, Vector2 position, float distance);
 bool RpgReferenceObjects_FindNearbyTarget(const RpgStage *stage, const RpgReferenceObjects *objects,
                                           Vector2 position, float distance, RpgReferenceTarget *target);
-/* Fileの追従先とは別に、近くのFolderだけを検索して格納操作へ利用する。 */
-bool RpgReferenceObjects_FindNearbyFolderTarget(const RpgStage *stage, Vector2 position,
+/* Fileの追従先とは別に、現在の可動Object一覧から近くのFolderだけを検索する。 */
+bool RpgReferenceObjects_FindNearbyFolderTarget(const RpgReferenceObjects *objects, Vector2 position,
                                                 float distance, RpgReferenceTarget *target);
 int RpgReferenceObjects_FindFollowerIndex(const RpgReferenceObjects *objects);
 bool RpgReferenceObjects_FindTarget(const RpgStage *stage, const RpgReferenceObjects *objects,
@@ -126,8 +177,13 @@ const char *RpgReferenceObjects_GetTargetPath(const RpgStage *stage, const RpgRe
 bool RpgReferenceObjects_RemoveTarget(RpgStage *stage, RpgReferenceObjects *objects,
                                       RpgReferenceTarget target);
 bool RpgStage_IsSolidBlock(int blockType);
+void RpgStage_SetSocketSignalActive(RpgStage *stage, int mapIndex, bool isActive);
+bool RpgStage_IsSocketSignalActive(const RpgStage *stage, int mapIndex);
 bool RpgStage_IsSolidAtPosition(const RpgStage *stage, Vector2 position);
 bool RpgStage_CheckSolidCollision(const RpgStage *stage, Rectangle bounds);
+/* Collision geometry normally belongs to the stage.  The optional attachment
+   view only subtracts socket recesses from their supporting tiles. */
+void RpgStage_SetCollisionAttachments(const struct RpgAttachments *attachments);
 bool RpgStage_FindSolidCollisionCenter(const RpgStage *stage, Rectangle bounds, Vector2 *center);
 /* 一方向床を上から横切った落下だけを検出し、着地すべき足元Y座標を返す。 */
 bool RpgStage_FindOneWayPlatformLanding(const RpgStage *stage, Rectangle previousBounds,
@@ -155,7 +211,15 @@ Rectangle RpgStage_SnapRenderRectangle(Rectangle rectangle);
 // 1マス=32px基準の特殊ブロック記号を、ゲームとエディターで共通描画する。
 void RpgStage_DrawEffectSymbol(Rectangle cell, int blockType);
 void RpgStage_Draw(const RpgStage *stage, bool showGrid, float brightness);
+void RpgStage_DrawWithAttachments(const RpgStage *stage,
+                                  const struct RpgAttachments *attachments,
+                                  bool showGrid, float brightness);
 void RpgStage_DrawMap(const RpgStage *stage, int mapIndex, bool showGrid, float brightness);
+/* Variant used by gameplay/editor rendering: top-mounted block sockets leave
+   a transparent recess in their supporting terrain cell. */
+void RpgStage_DrawMapWithAttachments(const RpgStage *stage,
+                                     const struct RpgAttachments *attachments,
+                                     int mapIndex, bool showGrid, float brightness);
 void RpgStage_DrawEffects(const RpgStage *stage);
 void RpgStage_DrawMapEffects(const RpgStage *stage, int mapIndex);
 void RpgStage_DrawReferenceObject(Texture2D fileTexture, Rectangle cell, Color tint);

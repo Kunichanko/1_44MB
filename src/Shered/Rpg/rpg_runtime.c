@@ -15,6 +15,7 @@
 #define NOUSER
 #include <windows.h>
 #endif
+#define RPG_TEXT_ROUTE_RAYLIB_CALLS
 #include "game_font.h"
 #include "rpg_block_inventory.h"
 #include "rpg_object_folder.h"
@@ -22,6 +23,8 @@
 #include "rpg_explorer_launcher.h"
 #include "rpg_explorer_shell.h"
 #include "rpg_magnet.h"
+#include "rpg_interaction.h"
+#include "rpg_zipper_transfer.h"
 #include "rpg_runtime_update.h"
 #include "rpg_scene.h"
 static const float zipperImportAnimationDuration = 0.60f;
@@ -116,11 +119,11 @@ static void InitializeRuntimeWorldCoordinates(RpgRuntimeContext *context)
         int mapIndex = (int)floorf(context->npc->position.x / mapWidth);
         context->npc->position = StoragePositionToWorld(context->stage, context->npc->position, mapIndex);
     }
-    if (context->referenceDrops != NULL) for (int index = 0; index < context->referenceDrops->count; index++) {
-        RpgReferenceObject *object = &context->referenceDrops->entries[index];
-        int mapIndex = (int)floorf(object->position.x / mapWidth);
-        object->position = StoragePositionToWorld(context->stage, object->position, mapIndex);
-    }
+    /* Reference FILE/FOLDER objects are saved as stage-wide world positions.
+       Unlike the player/NPC legacy slot positions, they have already been
+       resolved through RpgStage_GetWorldPositionForCell when created or
+       migrated.  Converting them again here applies a second area offset and
+       makes them appear to disappear as soon as Play begins. */
     if (context->previousMap != NULL)
         *context->previousMap = RpgStage_GetMapAtWorldPosition(context->stage, context->player->position);
     *context->worldCoordinatesInitialized = true;
@@ -147,7 +150,14 @@ static void DrawConnectedStageMaps(const RpgStage *stage, const RpgMagnetRuntime
                                 backgroundBrightness);
         RpgImageObjects_DrawLayer(&stage->imageObjects, mapIndex, RPG_STAGE_COLUMNS,
                                   RPG_STAGE_TILE_SIZE, WHITE, RPG_IMAGE_OBJECT_LAYER_BACK);
-        RpgStage_DrawMap(stage, mapIndex, false, blockBrightness);
+        RpgStage_DrawMapWithAttachments(stage, attachments, mapIndex, false, blockBrightness);
+        /* A socket is a real opening: restore its background after every
+           opaque terrain pass, then draw its blue sensor later with attachments. */
+        RpgAttachments_DrawBlockSocketRecesses(attachments, mapIndex, stageBackground,
+                                                (Rectangle){ 0.0f, 0.0f,
+                                                             (float)(RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE),
+                                                             (float)(RPG_STAGE_ROWS * RPG_STAGE_TILE_SIZE) },
+                                                backgroundBrightness);
 
         for (int row = 0; row < RPG_STAGE_ROWS; row++) {
             for (int localColumn = 0; localColumn < RPG_STAGE_COLUMNS; localColumn++) {
@@ -161,7 +171,6 @@ static void DrawConnectedStageMaps(const RpgStage *stage, const RpgMagnetRuntime
             }
         }
 
-        RpgStage_DrawMapReferenceObjects(stage, mapIndex, fileTexture);
         RpgStage_DrawMapEffects(stage, mapIndex);
         rlPushMatrix();
         rlTranslatef(-(float)(firstColumn * RPG_STAGE_TILE_SIZE), 0.0f, 0.0f);
@@ -170,6 +179,7 @@ static void DrawConnectedStageMaps(const RpgStage *stage, const RpgMagnetRuntime
         RpgWires_DrawMap(wires, stage, mapIndex);
         RpgWires_DrawElectric(wires, dataShots, firstColumn, RPG_STAGE_COLUMNS);
         RpgReceivers_DrawMap(receivers, mapIndex);
+        RpgAttachments_DrawSocketLightsMap(attachments, stage, mapIndex);
         RpgAttachments_DrawMap(attachments, mapIndex);
         RpgDataShots_DrawMap(dataShots, mapIndex);
         RpgImageObjects_DrawLayer(&stage->imageObjects, mapIndex, RPG_STAGE_COLUMNS,
@@ -205,43 +215,6 @@ static void TranslatePlayerFollowers(RpgRuntimeContext *context, Vector2 delta)
         RpgReferenceObject *object = &context->referenceDrops->entries[index];
         if (object->followsPlayer) object->position = Vector2Add(object->position, delta);
     }
-}
-
-static bool MovePlayerToAdjacentArea(RpgRuntimeContext *context, int *mapIndex,
-                                     RpgAreaDirection direction)
-{
-    const float mapWidth = RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE;
-    const float mapHeight = RPG_STAGE_ROWS * RPG_STAGE_TILE_SIZE;
-    int targetMap;
-    float localX;
-    float localY;
-    Vector2 previousPosition;
-    if (context == NULL || mapIndex == NULL || context->stage == NULL || context->player == NULL) return false;
-    *mapIndex = RpgStage_FindNearestActiveMap(context->stage, *mapIndex);
-    if (*mapIndex < 0) return false;
-    targetMap = RpgStage_GetAdjacentMap(context->stage, *mapIndex, direction);
-    if (targetMap < 0) return false;
-    previousPosition = context->player->position;
-    localX = context->player->position.x - context->stage->mapGridX[*mapIndex] * mapWidth;
-    localY = context->player->position.y + context->stage->mapGridY[*mapIndex] * mapHeight;
-    context->player->position.x = context->stage->mapGridX[targetMap] * mapWidth + localX;
-    context->player->position.y = -context->stage->mapGridY[targetMap] * mapHeight + localY;
-    Vector2 transitionDelta = Vector2Subtract(context->player->position, previousPosition);
-    TranslatePlayerFollowers(context, transitionDelta);
-    RpgMagnets_TranslateHeldPushBlock(context->magnetRuntime, &playerPushState, transitionDelta);
-    *mapIndex = targetMap;
-    return true;
-}
-
-static bool GetAreaMoveDirectionFromArrowKey(RpgAreaDirection *direction)
-{
-    if (direction == NULL) return false;
-    if (IsKeyPressed(KEY_LEFT)) *direction = RPG_AREA_LEFT;
-    else if (IsKeyPressed(KEY_RIGHT)) *direction = RPG_AREA_RIGHT;
-    else if (IsKeyPressed(KEY_UP)) *direction = RPG_AREA_UP;
-    else if (IsKeyPressed(KEY_DOWN)) *direction = RPG_AREA_DOWN;
-    else return false;
-    return true;
 }
 
 static void TransitionPlayerBetweenAreas(RpgRuntimeContext *context, int *mapIndex)
@@ -296,6 +269,16 @@ typedef struct RpgNearbyKeyDoor {
     int column;
 } RpgNearbyKeyDoor;
 
+typedef struct RpgRuntimeInteractionFrame {
+    RpgRuntimeContext *context;
+    bool canTalk;
+    bool canReadReference;
+    bool canStoreReference;
+    RpgReferenceTarget nearbyReferenceTarget;
+    RpgReferenceTarget nearbyFolderTarget;
+    RpgNearbyKeyDoor nearbyKeyDoor;
+} RpgRuntimeInteractionFrame;
+
 void RpgRuntime_ResetTransientState(void)
 {
     referenceFolderTransfer = (RpgReferenceFolderTransfer){
@@ -308,11 +291,21 @@ void RpgRuntime_ResetTransientState(void)
 static const char *npcTalkPrompt = u8"[E] \u8a71\u3057\u304b\u3051\u308b";
 static const Rectangle referenceTextCloseButton = { 648.0f, 262.0f, 144.0f, 26.0f };
 
-static bool IsReferenceFolderTarget(const RpgStage *stage, RpgReferenceTarget target)
+static bool IsReferenceFolderTarget(const RpgStage *stage, const RpgReferenceObjects *objects,
+                                    RpgReferenceTarget target)
 {
-    return stage != NULL && target.kind == RPG_REFERENCE_TARGET_CELL && target.row >= 0 &&
-           target.row < RPG_STAGE_ROWS && target.column >= 0 && target.column < RPG_STAGE_WORLD_COLUMNS &&
-           RpgBlockInventory_IsReferenceFolder(stage->blocks[target.row][target.column]);
+    if (stage == NULL) return false;
+    if (target.kind == RPG_REFERENCE_TARGET_CELL)
+        return target.row >= 0 && target.row < RPG_STAGE_ROWS && target.column >= 0 &&
+               target.column < RPG_STAGE_WORLD_COLUMNS &&
+               RpgBlockInventory_IsReferenceFolder(stage->blocks[target.row][target.column]);
+    /* Runtime File/Folder objects change order when eat/spit removes or
+       restores them.  Their target index is therefore valid only against the
+       runtime list, never the immutable stage source list. */
+    if (target.kind == RPG_REFERENCE_TARGET_DROP)
+        return objects != NULL && target.dropIndex >= 0 && target.dropIndex < objects->count &&
+               objects->entries[target.dropIndex].objectKind == RPG_REFERENCE_OBJECT_FOLDER;
+    return false;
 }
 
 static RpgNearbyKeyDoor FindNearbyKeyDoor(const RpgStage *stage, Vector2 position, float maximumDistance)
@@ -358,11 +351,21 @@ static bool StartReferenceFolderTransfer(RpgRuntimeContext *context, RpgReferenc
 {
     int followerIndex;
     RpgReferenceObject *follower;
+    Vector2 folderPosition;
     const char *destinationDirectory;
-    if (context == NULL || referenceFolderTransfer.active || !IsReferenceFolderTarget(context->stage, folderTarget))
+    if (context == NULL || referenceFolderTransfer.active ||
+        !IsReferenceFolderTarget(context->stage, context->referenceDrops, folderTarget))
         return false;
     followerIndex = RpgReferenceObjects_FindFollowerIndex(context->referenceDrops);
-    if (followerIndex < 0 || folderTarget.row < 0 || folderTarget.column < 0) return false;
+    if (followerIndex < 0) return false;
+    if (folderTarget.kind == RPG_REFERENCE_TARGET_CELL) {
+        if (folderTarget.row < 0 || folderTarget.row >= RPG_STAGE_ROWS ||
+            folderTarget.column < 0 || folderTarget.column >= RPG_STAGE_WORLD_COLUMNS) return false;
+        folderPosition = RpgStage_GetWorldPositionForCell(context->stage, folderTarget.row, folderTarget.column);
+    } else if (folderTarget.kind == RPG_REFERENCE_TARGET_DROP && folderTarget.dropIndex >= 0 &&
+               folderTarget.dropIndex < context->referenceDrops->count) {
+        folderPosition = context->referenceDrops->entries[folderTarget.dropIndex].position;
+    } else return false;
     follower = &context->referenceDrops->entries[followerIndex];
     destinationDirectory = RpgReferenceObjects_GetTargetPath(context->stage, context->referenceDrops, folderTarget);
     if (follower->path[0] == '\0' || destinationDirectory[0] == '\0') return false;
@@ -374,8 +377,7 @@ static bool StartReferenceFolderTransfer(RpgRuntimeContext *context, RpgReferenc
         .sourcePath = { 0 },
         .destinationDirectory = { 0 },
         .startPosition = follower->position,
-        .destinationPosition = { (folderTarget.column + 0.5f) * RPG_STAGE_TILE_SIZE,
-                                 (folderTarget.row + 0.5f) * RPG_STAGE_TILE_SIZE },
+        .destinationPosition = folderPosition,
         .drawScale = follower->drawScale > 0.0f ? follower->drawScale : 1.0f,
         .elapsed = 0.0f,
         .active = true
@@ -587,7 +589,8 @@ static Rectangle GetReferenceTargetBounds(const RpgStage *stage, const RpgRefere
         return RpgStage_GetWorldBoundsForCell(stage, target.row, target.column);
     if (target.kind == RPG_REFERENCE_TARGET_DROP && target.dropIndex >= 0 && target.dropIndex < objects->count) {
         const RpgReferenceObject *object = &objects->entries[target.dropIndex];
-        float size = 48.0f * (object->drawScale > 0.0f ? object->drawScale : 1.0f);
+        float size = (float)RPG_STAGE_TILE_SIZE *
+                     (object->drawScale > 0.0f ? object->drawScale : 1.0f);
         return (Rectangle){ object->position.x - size * 0.5f, object->position.y - size * 0.5f,
                             size, size };
     }
@@ -620,6 +623,23 @@ static void StartZipperImportAnimation(float *animationElapsed)
     if (animationElapsed != NULL) *animationElapsed = 0.0f;
 }
 
+void RpgRuntime_StartFollowingZipper(RpgZipper *zipper, const RpgCharacter *player,
+                                     bool *zipperFollowsPlayer, bool *isZipperControllable,
+                                     bool *zipperInspectCompleted, float *animationElapsed)
+{
+    if (zipper == NULL || player == NULL) return;
+    /* Keep save-flag starts on the same placement and connected state as a
+       normal follower.  This does not start an import animation. */
+    zipper->character.position = (Vector2){ player->position.x - RPG_STAGE_TILE_SIZE * player->scale,
+                                            player->position.y };
+    zipper->character.verticalSpeed = 0.0f;
+    zipper->character.isGrounded = true;
+    if (zipperFollowsPlayer != NULL) *zipperFollowsPlayer = true;
+    if (isZipperControllable != NULL) *isZipperControllable = true;
+    if (zipperInspectCompleted != NULL) *zipperInspectCompleted = true;
+    if (animationElapsed != NULL) *animationElapsed = -1.0f;
+}
+
 static Texture2D GetFolderReturnIcon(void)
 {
     if (!hasLoadedFolderReturnIcon) {
@@ -629,6 +649,7 @@ static Texture2D GetFolderReturnIcon(void)
     return folderReturnIcon;
 }
 
+#if 0 /* superseded by rpg_zipper_transfer: keep the prior local path as reference only */
 static Vector2 GetHeldObjectReturnDestination(const RpgRuntimeContext *context)
 {
     const RpgZipperHeldObject *held = &(*context->zipper).heldObject;
@@ -638,9 +659,21 @@ static Vector2 GetHeldObjectReturnDestination(const RpgRuntimeContext *context)
     if (held->kind == RPG_ZIPPER_HELD_OBJECT_ATTACHMENT && held->attachmentIndex >= 0 &&
         held->attachmentIndex < (*context->attachments).count)
         return RpgAttachments_GetPosition(&(*context->attachments).entries[held->attachmentIndex], 0);
-    if (held->kind == RPG_ZIPPER_HELD_OBJECT_BLOCK)
-        return (Vector2){ (held->blockCell.column + 0.5f) * RPG_STAGE_TILE_SIZE,
-                          (held->blockCell.row + 0.5f) * RPG_STAGE_TILE_SIZE };
+    if (held->kind == RPG_ZIPPER_HELD_OBJECT_BLOCK && context->stage != NULL)
+        /* blockCell is storage-space (Area ID packed horizontally), while
+         * the return animation is drawn in the connected stage's world
+         * space.  Use the same conversion as movable objects and cameras. */
+        return RpgStage_GetWorldPositionForCell(context->stage,
+                                                held->blockCell.row,
+                                                held->blockCell.column);
+    if (held->kind == RPG_ZIPPER_HELD_OBJECT_DYNAMIC_BLOCK && context->magnetRuntime != NULL &&
+        held->dynamicBlockIndex >= 0 && held->dynamicBlockIndex < context->magnetRuntime->metalCount) {
+        const RpgMagnetMetal *block = &context->magnetRuntime->metals[held->dynamicBlockIndex];
+        return (Vector2){ block->position.x + RPG_STAGE_TILE_SIZE * 0.5f,
+                          block->position.y + RPG_STAGE_TILE_SIZE * 0.5f };
+    }
+    if (held->kind == RPG_ZIPPER_HELD_OBJECT_REFERENCE_FILE)
+        return held->referenceObject.position;
     return (*context->zipper).character.position;
 }
 
@@ -667,6 +700,23 @@ static void SetHeldAttachmentCellError(RpgStage *stage, RpgAttachment *attachmen
         stage->blocks[occupiedCell.row][occupiedCell.column] = 0;
 }
 
+/* A captured grid block is absent from build/blocks until spit completes.
+ * Keep this state on the stage itself so rendering, collision and save-state
+ * all agree immediately; movable objects deliberately do not use this path. */
+static void SetHeldBlockCellError(RpgStage *stage, const RpgZipperHeldObject *held, bool isMissing)
+{
+    const RpgGridCell cell = held == NULL ? (RpgGridCell){ -1, -1 } : held->blockCell;
+    if (stage == NULL || held == NULL || cell.row < 0 || cell.row >= RPG_STAGE_ROWS ||
+        cell.column < 0 || cell.column >= RPG_STAGE_WORLD_COLUMNS) return;
+    if (isMissing) {
+        stage->missingBlockTypes[cell.row][cell.column] = held->blockType;
+        stage->blocks[cell.row][cell.column] = RPG_BLOCK_BUILD_MISSING;
+    } else if (stage->blocks[cell.row][cell.column] == RPG_BLOCK_BUILD_MISSING) {
+        stage->blocks[cell.row][cell.column] = held->blockType;
+        stage->missingBlockTypes[cell.row][cell.column] = 0;
+    }
+}
+
 /* 返却開始時は Inbox から StageN へ移すだけにする。演出中はフォルダを build に戻さない。 */
 static bool BeginZipperHeldObjectReturn(RpgRuntimeContext *context)
 {
@@ -684,7 +734,14 @@ static bool BeginZipperHeldObjectReturn(RpgRuntimeContext *context)
     else if (held->kind == RPG_ZIPPER_HELD_OBJECT_BLOCK && held->blockCell.row >= 0 && held->blockCell.column >= 0) {
         RpgObjectFolder folder = { .cell = held->blockCell };
         returned = RpgObjectFolder_BeginReturnBlockFromZipper(&folder, held->blockType);
+    } else if (held->kind == RPG_ZIPPER_HELD_OBJECT_DYNAMIC_BLOCK && context->magnetRuntime != NULL &&
+               held->dynamicBlockIndex >= 0 && held->dynamicBlockIndex < context->magnetRuntime->metalCount) {
+        RpgMagnetMetal *block = &context->magnetRuntime->metals[held->dynamicBlockIndex];
+        returned = RpgObjectFolder_BeginReturnDynamicBlockFromZipper(block->objectCell, block->blockType,
+                                                                       block->position);
     }
+    else if (held->kind == RPG_ZIPPER_HELD_OBJECT_REFERENCE_FILE)
+        returned = RpgObjectFolder_BeginReturnReferenceFileFromZipper(&held->referenceObject);
     return returned;
 }
 
@@ -715,10 +772,29 @@ static bool CompleteZipperHeldObjectReturn(RpgRuntimeContext *context)
     } else if (held->kind == RPG_ZIPPER_HELD_OBJECT_BLOCK && held->blockCell.row >= 0 && held->blockCell.column >= 0) {
         RpgObjectFolder folder = { .cell = held->blockCell };
         returned = RpgObjectFolder_ReturnBlockFromZipper(&folder, held->blockType);
+        if (returned) SetHeldBlockCellError(context->stage, held, false);
+    } else if (held->kind == RPG_ZIPPER_HELD_OBJECT_DYNAMIC_BLOCK && context->magnetRuntime != NULL &&
+               held->dynamicBlockIndex >= 0 && held->dynamicBlockIndex < context->magnetRuntime->metalCount) {
+        RpgMagnetMetal *block = &context->magnetRuntime->metals[held->dynamicBlockIndex];
+        returned = RpgObjectFolder_ReturnDynamicBlockFromZipper(block->objectCell, block->blockType,
+                                                                  block->position);
+        if (returned)
+            (void)RpgMagnets_SetBlockZipperHeld(context->magnetRuntime, held->dynamicBlockIndex, false);
     }
-    if (returned)
+    else if (held->kind == RPG_ZIPPER_HELD_OBJECT_REFERENCE_FILE && context->referenceDrops != NULL) {
+        returned = RpgObjectFolder_ReturnReferenceFileFromZipper(&held->referenceObject) &&
+            RpgReferenceObjects_Add(&(*context->referenceDrops), held->referenceObject.objectKind,
+                                    held->referenceObject.position, held->referenceObject.path,
+                                    held->referenceObject.id);
+        if (returned)
+            (*context->referenceDrops).entries[(*context->referenceDrops).count - 1] = held->referenceObject;
+    }
+    if (returned) {
         *held = (RpgZipperHeldObject){ .kind = RPG_ZIPPER_HELD_OBJECT_NONE,
-                                       .blockCell = { -1, -1 }, .attachmentIndex = -1, .dataShotIndex = -1 };
+                                       .blockCell = { -1, -1 }, .attachmentIndex = -1, .dataShotIndex = -1,
+                                       .dynamicBlockIndex = -1 };
+        RpgZipper_RemoveNextHeldObject(zipper);
+    }
     if (returned) zipper->isFolderReturnCommitPending = false;
     return returned;
 }
@@ -726,14 +802,42 @@ static bool CompleteZipperHeldObjectReturn(RpgRuntimeContext *context)
 static bool CaptureCurrentZipperObject(RpgRuntimeContext *context)
 {
     RpgZipperHeldObject held = { .kind = RPG_ZIPPER_HELD_OBJECT_NONE,
-                                 .blockCell = { -1, -1 }, .attachmentIndex = -1, .dataShotIndex = -1 };
+                                 .blockCell = { -1, -1 }, .attachmentIndex = -1, .dataShotIndex = -1,
+                                 .dynamicBlockIndex = -1 };
     bool captured = false;
+    if (context == NULL || context->zipper == NULL || !RpgZipper_CanEnqueueHeldObject(context->zipper)) return false;
     if ((*context->attachedDataShotIndex) >= 0 && (*context->attachedDataShotIndex) < RPG_DATA_SHOT_MAX_COUNT &&
         (*context->dataShots).entries[(*context->attachedDataShotIndex)].active) {
         captured = RpgObjectFolder_MoveDataShotToZipper(&(*context->dataShots).entries[(*context->attachedDataShotIndex)]);
         if (captured) (*context->dataShots).entries[(*context->attachedDataShotIndex)].isZipperHeld = true;
         held.kind = RPG_ZIPPER_HELD_OBJECT_DATA_SHOT;
         held.dataShotIndex = (*context->attachedDataShotIndex);
+    } else if (context->attachedDynamicBlockIndex != NULL && (*context->attachedDynamicBlockIndex) >= 0 &&
+               context->magnetRuntime != NULL && (*context->attachedDynamicBlockIndex) < context->magnetRuntime->metalCount) {
+        int dynamicIndex = *context->attachedDynamicBlockIndex;
+        RpgMagnetMetal *block = &context->magnetRuntime->metals[dynamicIndex];
+        if (playerPushState.heldBlockIndex == dynamicIndex)
+            playerPushState = RpgPlayerPushState_Default();
+        captured = block->active && RpgObjectFolder_MoveDynamicBlockToZipper(block->objectCell,
+                    block->blockType, block->position) &&
+                   RpgMagnets_SetBlockZipperHeld(context->magnetRuntime, dynamicIndex, true);
+        held.kind = RPG_ZIPPER_HELD_OBJECT_DYNAMIC_BLOCK;
+        held.dynamicBlockIndex = dynamicIndex;
+        held.blockType = block->blockType;
+        held.blockCell = block->objectCell;
+    } else if (context->attachedReferenceObjectIndex != NULL && context->referenceDrops != NULL &&
+               (*context->attachedReferenceObjectIndex) >= 0 &&
+               (*context->attachedReferenceObjectIndex) < (*context->referenceDrops).count) {
+        const int referenceIndex = *context->attachedReferenceObjectIndex;
+        RpgReferenceObject *object = &(*context->referenceDrops).entries[referenceIndex];
+        held.kind = RPG_ZIPPER_HELD_OBJECT_REFERENCE_FILE;
+        held.referenceObject = *object;
+        captured = object->objectKind == RPG_REFERENCE_OBJECT_FILE &&
+                   RpgObjectFolder_MoveReferenceFileToZipper(object) &&
+                   RpgReferenceObjects_RemoveTarget(context->stage, &(*context->referenceDrops),
+                                                    (RpgReferenceTarget){ .kind = RPG_REFERENCE_TARGET_DROP,
+                                                                          .row = -1, .column = -1,
+                                                                          .dropIndex = referenceIndex });
     } else if ((*context->isZipperAttachedToBlock) && (*context->zipperAttachedBlockCell).row >= 0 &&
                (*context->zipperAttachedBlockCell).column >= 0) {
         if ((*context->attachedAttachmentIndex) >= 0 && (*context->attachedAttachmentIndex) < (*context->attachments).count) {
@@ -751,16 +855,142 @@ static bool CaptureCurrentZipperObject(RpgRuntimeContext *context)
             held.blockCell = (*context->zipperAttachedBlockCell);
             held.blockType = (*context->stage).blocks[held.blockCell.row][held.blockCell.column];
             captured = RpgObjectFolder_MoveBlockToZipper(&blockFolder, held.blockType);
+            if (captured) SetHeldBlockCellError(context->stage, &held, true);
         }
     }
     if (!captured) return false;
-    (*context->zipper).heldObject = held;
-    (*context->zipperFollowsPlayer) = true;
+    if (!RpgZipper_EnqueueHeldObject(context->zipper, held)) return false;
+    /* A successful eat leaves Zipper at the target.  The next Space press is
+       the explicit return-to-player action. */
+    (*context->zipperFollowsPlayer) = false;
     (*context->isZipperLaunched) = false;
     (*context->attachedDataShotIndex) = -1;
     (*context->attachedAttachmentIndex) = -1;
+    if (context->attachedDynamicBlockIndex != NULL) *context->attachedDynamicBlockIndex = -1;
+    if (context->attachedReferenceObjectIndex != NULL) *context->attachedReferenceObjectIndex = -1;
     (*context->isZipperAttachedToBlock) = false;
     (*context->zipperAttachedBlockCell) = (RpgGridCell){ -1, -1 };
+    return true;
+}
+
+#endif
+
+static RpgZipperTransferContext GetZipperTransferContext(RpgRuntimeContext *context)
+{
+    return (RpgZipperTransferContext){
+        .stage = context == NULL ? NULL : context->stage,
+        .attachments = context == NULL ? NULL : context->attachments,
+        .dataShots = context == NULL ? NULL : context->dataShots,
+        .magnetRuntime = context == NULL ? NULL : context->magnetRuntime,
+        .referenceObjects = context == NULL ? NULL : context->referenceDrops,
+        .playerPushState = &playerPushState
+    };
+}
+
+static Vector2 GetHeldObjectReturnDestination(const RpgRuntimeContext *context)
+{
+    RpgZipperTransferContext transfer = GetZipperTransferContext((RpgRuntimeContext *)context);
+    return RpgZipperTransfer_GetReturnDestination(&transfer, &context->zipper->heldObject,
+                                                  context->zipper->character.position);
+}
+
+static void StartZipperFolderReturnVisual(RpgRuntimeContext *context)
+{
+    RpgZipper *zipper = context->zipper;
+    zipper->isFolderReturnAnimating = true;
+    zipper->folderReturnDelayElapsed = context->layout != NULL ?
+        Clamp(context->layout->zipperFolderReturnAnimationDelay, 0.0f, 5.0f) : 0.0f;
+    zipper->folderReturnElapsed = 0.0f;
+    zipper->folderReturnDuration = context->layout != NULL ?
+        Clamp(context->layout->zipperFolderReturnDuration, 0.10f, 5.0f) : 0.45f;
+    zipper->folderReturnStart = zipper->character.position;
+    zipper->folderReturnDestination = GetHeldObjectReturnDestination(context);
+}
+
+static bool BeginZipperHeldObjectReturn(RpgRuntimeContext *context)
+{
+    RpgZipperTransferContext transfer = GetZipperTransferContext(context);
+    return RpgZipperTransfer_BeginSpit(&transfer, &context->zipper->heldObject);
+}
+
+static bool CompleteZipperHeldObjectReturn(RpgRuntimeContext *context)
+{
+    RpgZipperTransferContext transfer = GetZipperTransferContext(context);
+    RpgZipperHeldObject *target = &context->zipper->returningObject;
+    bool returned = RpgZipperTransfer_CompleteSpit(&transfer, target);
+    if (returned) {
+        *target = (RpgZipperHeldObject){ .kind = RPG_ZIPPER_HELD_OBJECT_NONE,
+                                         .blockCell = { -1, -1 }, .movableKind = RPG_ZIPPER_MOVABLE_NONE,
+                                         .dataShotIndex = -1, .dynamicBlockIndex = -1,
+                                         .referenceObjectIndex = -1 };
+        RpgZipper_RemoveNextHeldObject(context->zipper);
+        context->zipper->isFolderReturnCommitPending = false;
+    } else {
+        /* A failed file-system return must not leave Zipper permanently busy.
+         * Keep the held object queued so a later spit can retry the same item. */
+        context->zipper->isFolderReturnCommitPending = false;
+    }
+    return returned;
+}
+
+static bool SelectCurrentZipperTarget(RpgRuntimeContext *context, RpgZipperHeldObject *target)
+{
+    if (context == NULL || target == NULL) return false;
+    *target = (RpgZipperHeldObject){ .kind = RPG_ZIPPER_HELD_OBJECT_NONE,
+                                     .blockCell = { -1, -1 }, .movableKind = RPG_ZIPPER_MOVABLE_NONE,
+                                     .dataShotIndex = -1, .dynamicBlockIndex = -1,
+                                     .referenceObjectIndex = -1 };
+    if (context->attachedDataShotIndex != NULL && context->dataShots != NULL &&
+        *context->attachedDataShotIndex >= 0 && *context->attachedDataShotIndex < RPG_DATA_SHOT_MAX_COUNT &&
+        context->dataShots->entries[*context->attachedDataShotIndex].active) {
+        target->kind = RPG_ZIPPER_HELD_OBJECT_MOVABLE;
+        target->movableKind = RPG_ZIPPER_MOVABLE_DATA_SHOT;
+        target->dataShotIndex = *context->attachedDataShotIndex;
+    } else if (context->attachedDynamicBlockIndex != NULL && context->magnetRuntime != NULL &&
+               *context->attachedDynamicBlockIndex >= 0 &&
+               *context->attachedDynamicBlockIndex < context->magnetRuntime->metalCount) {
+        const int index = *context->attachedDynamicBlockIndex;
+        const RpgMagnetMetal *block = &context->magnetRuntime->metals[index];
+        target->kind = RPG_ZIPPER_HELD_OBJECT_MOVABLE;
+        target->movableKind = RPG_ZIPPER_MOVABLE_DYNAMIC_BLOCK;
+        target->dynamicBlockIndex = index;
+        target->blockType = block->blockType;
+        target->blockCell = block->objectCell;
+    } else if (context->attachedReferenceObjectIndex != NULL && context->referenceDrops != NULL &&
+               *context->attachedReferenceObjectIndex >= 0 &&
+               *context->attachedReferenceObjectIndex < context->referenceDrops->count) {
+        target->kind = RPG_ZIPPER_HELD_OBJECT_MOVABLE;
+        target->movableKind = RPG_ZIPPER_MOVABLE_REFERENCE_FILE;
+        target->referenceObjectIndex = *context->attachedReferenceObjectIndex;
+        target->referenceObject = context->referenceDrops->entries[target->referenceObjectIndex];
+    } else if (context->isZipperAttachedToBlock != NULL && *context->isZipperAttachedToBlock &&
+               context->zipperAttachedBlockCell != NULL && context->stage != NULL &&
+               context->zipperAttachedBlockCell->row >= 0 && context->zipperAttachedBlockCell->column >= 0) {
+        /* Attachments are metadata of their owner block.  Zipper may touch an
+         * attachment, but eats/spits the owner block and its metadata together. */
+        target->kind = RPG_ZIPPER_HELD_OBJECT_BLOCK;
+        target->blockCell = *context->zipperAttachedBlockCell;
+        target->blockType = context->stage->blocks[target->blockCell.row][target->blockCell.column];
+    }
+    return target->kind != RPG_ZIPPER_HELD_OBJECT_NONE;
+}
+
+static bool CaptureCurrentZipperObject(RpgRuntimeContext *context)
+{
+    RpgZipperHeldObject target;
+    RpgZipperTransferContext transfer;
+    if (context == NULL || context->zipper == NULL || !RpgZipper_CanEnqueueHeldObject(context->zipper) ||
+        !SelectCurrentZipperTarget(context, &target)) return false;
+    transfer = GetZipperTransferContext(context);
+    if (!RpgZipperTransfer_Eat(&transfer, &target) || !RpgZipper_EnqueueHeldObject(context->zipper, target)) return false;
+    *context->zipperFollowsPlayer = false;
+    *context->isZipperLaunched = false;
+    *context->attachedDataShotIndex = -1;
+    *context->attachedAttachmentIndex = -1;
+    if (context->attachedDynamicBlockIndex != NULL) *context->attachedDynamicBlockIndex = -1;
+    if (context->attachedReferenceObjectIndex != NULL) *context->attachedReferenceObjectIndex = -1;
+    *context->isZipperAttachedToBlock = false;
+    *context->zipperAttachedBlockCell = (RpgGridCell){ -1, -1 };
     return true;
 }
 
@@ -773,6 +1003,7 @@ static void CaptureZipperCommandTarget(RpgRuntimeContext *context)
     (*context->isZipperLaunched) = false;
     (*context->attachedDataShotIndex) = -1;
     (*context->attachedAttachmentIndex) = -1;
+    if (context->attachedReferenceObjectIndex != NULL) *context->attachedReferenceObjectIndex = -1;
     (*context->isZipperAttachedToBlock) = false;
     (*context->zipperAttachedBlockCell) = (RpgGridCell){ -1, -1 };
 }
@@ -780,16 +1011,14 @@ static void CaptureZipperCommandTarget(RpgRuntimeContext *context)
 static void RunZipperCommandFunction(RpgRuntimeContext *context)
 {
     RpgZipper *zipper = context->zipper;
-    if (zipper->heldObject.kind != RPG_ZIPPER_HELD_OBJECT_NONE) {
+    if (zipper->isSpitCommandPending) {
+        zipper->isSpitCommandPending = false;
+        if (zipper->heldObject.kind == RPG_ZIPPER_HELD_OBJECT_NONE) return;
         StartZipperFolderReturnVisual(context);
         if (BeginZipperHeldObjectReturn(context)) {
             /* 返却開始が完了すれば、演出中でも次の対象取得と追従復帰は待たせない。 */
             zipper->returningObject = zipper->heldObject;
-            zipper->heldObject = (RpgZipperHeldObject){ .kind = RPG_ZIPPER_HELD_OBJECT_NONE,
-                                                        .blockCell = { -1, -1 },
-                                                        .attachmentIndex = -1, .dataShotIndex = -1 };
             zipper->isFolderReturnCommitPending = true;
-            CaptureZipperCommandTarget(context);
         } else {
             zipper->isFolderReturnAnimating = false;
             zipper->folderReturnElapsed = 0.0f;
@@ -800,39 +1029,30 @@ static void RunZipperCommandFunction(RpgRuntimeContext *context)
 }
 
 /* cmd起動時は演出だけを始め、ファイル操作はアニメーション終了まで待機する。 */
-static void StartZipperCommand(RpgRuntimeContext *context)
+static void StartZipperCommand(RpgRuntimeContext *context, RpgZipperCommandRequest command)
 {
     RpgZipper *zipper = context->zipper;
     StartZipperImportAnimation(context->zipperAnimationElapsed);
     (void)RpgObjectFolder_CompleteZipperCommandRequest();
     /* cmd入力と同時に旧フォルダを待機場所へ移し、演出後に次の取り込みを確定する。 */
-    if (zipper->heldObject.kind != RPG_ZIPPER_HELD_OBJECT_NONE) {
-        StartZipperFolderReturnVisual(context);
-        if (BeginZipperHeldObjectReturn(context)) {
-            zipper->returningObject = zipper->heldObject;
-            zipper->heldObject = (RpgZipperHeldObject){ .kind = RPG_ZIPPER_HELD_OBJECT_NONE,
-                                                        .blockCell = { -1, -1 },
-                                                        .attachmentIndex = -1, .dataShotIndex = -1 };
-            zipper->isFolderReturnCommitPending = true;
-        } else {
-            zipper->isFolderReturnAnimating = false;
-            zipper->folderReturnElapsed = 0.0f;
-        }
-    }
+    zipper->isSpitCommandPending = command == RPG_ZIPPER_COMMAND_SPIT;
     zipper->isFolderReturnPending = true;
 }
 
 void RpgRuntime_ProcessZipperCommand(RpgRuntimeContext *context)
 {
+    RpgZipperCommandRequest command;
     if (context == NULL || context->zipperAnimationElapsed == NULL ||
         !RpgObjectFolder_BeginZipperCommandRequest()) return;
+    command = RpgObjectFolder_GetPendingZipperCommandRequest();
+    if (command == RPG_ZIPPER_COMMAND_NONE) return;
     /* 実行中のcmdは一つだけにして、状態に関係なく同じ完了手順へ送る。 */
     if ((*context->zipper).isFolderReturnPending || (*context->zipper).isFolderReturnAnimating ||
         (*context->zipper).isFolderReturnCommitPending) {
         (void)RpgObjectFolder_CompleteZipperCommandRequest();
         return;
     }
-    StartZipperCommand(context);
+    StartZipperCommand(context, command);
 }
 
 /* Folder内のCMD要求はbuild監視から一度だけ届く。同じエリアのFolderだけをZipper化し、
@@ -918,10 +1138,21 @@ void RpgRuntime_DrawZipperFolderReturn(const RpgZipper *zipper)
 
 static void DrawZipper(Texture2D zipperTexture, const RpgCharacter *zipper, float animationElapsed)
 {
-    int frameCount = zipperTexture.width / 32;
-    int frameIndex = animationElapsed >= 0.0f && frameCount > 1 ?
-        (int)Clamp(animationElapsed / zipperImportAnimationDuration * frameCount, 0.0f, (float)(frameCount - 1)) : 0;
-    Rectangle source = { frameIndex * 32.0f, 0.0f, 32.0f, 40.0f };
+    enum { ZIPPER_FRAME_WIDTH = 32, ZIPPER_FRAME_HEIGHT = 40, ZIPPER_FRAME_COUNT = 5 };
+    const int columns = (zipperTexture.width / ZIPPER_FRAME_WIDTH) > 0 ?
+        zipperTexture.width / ZIPPER_FRAME_WIDTH : 1;
+    const int rows = zipperTexture.height / ZIPPER_FRAME_HEIGHT;
+    const int availableFrames = columns * rows;
+    /* ZIPPER.png is a 3x2 sheet.  Its final slot is intentionally blank, so
+       the import animation has five visible frames rather than only the first
+       row of three. */
+    const int frameCount = availableFrames < ZIPPER_FRAME_COUNT ? availableFrames : ZIPPER_FRAME_COUNT;
+    const int frameIndex = animationElapsed >= 0.0f && frameCount > 1 ?
+        (int)Clamp(animationElapsed / zipperImportAnimationDuration * frameCount, 0.0f,
+                   (float)(frameCount - 1)) : 0;
+    Rectangle source = { (float)((frameIndex % columns) * ZIPPER_FRAME_WIDTH),
+                         (float)((frameIndex / columns) * ZIPPER_FRAME_HEIGHT),
+                         ZIPPER_FRAME_WIDTH, ZIPPER_FRAME_HEIGHT };
     Rectangle destination = RpgZipper_GetPixelAlignedSpriteBounds(zipper, 380.0f);
     DrawRectangleRounded((Rectangle){ destination.x - 3.0f, destination.y - 3.0f,
                                       destination.width + 6.0f, destination.height + 6.0f },
@@ -1073,12 +1304,35 @@ static int FindDataShotHit(const RpgDataShots *shots, Rectangle bounds)
     return -1;
 }
 
+static int FindDynamicBlockHit(const RpgMagnetRuntime *runtime, Rectangle bounds)
+{
+    return RpgMagnets_FindBlockHit(runtime, bounds);
+}
+
+static int FindReferenceFileHit(const RpgReferenceObjects *objects, Rectangle bounds)
+{
+    if (objects == NULL) return -1;
+    for (int index = objects->count - 1; index >= 0; index--) {
+        const RpgReferenceObject *object = &objects->entries[index];
+        float size = (float)RPG_STAGE_TILE_SIZE *
+                     (object->drawScale > 0.0f ? object->drawScale : 1.0f);
+        Rectangle objectBounds = { object->position.x - size * 0.5f,
+                                   object->position.y - size * 0.5f, size, size };
+        if (object->objectKind == RPG_REFERENCE_OBJECT_FILE && !object->followsPlayer &&
+            CheckCollisionRecs(bounds, objectBounds)) return index;
+    }
+    return -1;
+}
+
 static void UpdateLaunchedZipper(RpgZipper *zipper, Vector2 *velocity, const RpgStage *stage,
                                  const RpgAttachments *attachments, const RpgDataShots *shots,
+                                 const RpgReferenceObjects *referenceObjects,
+                                 const RpgMagnetRuntime *magnetRuntime,
                                  float deltaTime, bool *isLaunched, int *attachedDataShotIndex,
                                  Vector2 *attachedDataShotOffset,
                                  bool *isAttachedToBlock, RpgGridCell *attachedBlockCell,
-                                 int *attachedAttachmentIndex)
+                                 int *attachedAttachmentIndex, int *attachedDynamicBlockIndex,
+                                 int *attachedReferenceObjectIndex)
 {
     // 高速設定でも壁をすり抜けないよう、移動を小さな単位に分けて衝突を確認する。
     float distance = Vector2Length(*velocity) * deltaTime;
@@ -1103,6 +1357,33 @@ static void UpdateLaunchedZipper(RpgZipper *zipper, Vector2 *velocity, const Rpg
             *zipper = candidate;
             return;
         }
+        int dynamicBlockIndex = FindDynamicBlockHit(magnetRuntime, forwardCollisionBounds);
+        if (dynamicBlockIndex >= 0) {
+            const RpgMagnetMetal *block = &magnetRuntime->metals[dynamicBlockIndex];
+            MoveZipperCollisionCenterTo(&candidate, (Vector2){
+                block->position.x + RPG_STAGE_TILE_SIZE * 0.5f,
+                block->position.y + RPG_STAGE_TILE_SIZE * 0.5f
+            });
+            *isLaunched = false;
+            *isAttachedToBlock = false;
+            *attachedAttachmentIndex = -1;
+            *attachedDataShotIndex = -1;
+            *attachedDynamicBlockIndex = dynamicBlockIndex;
+            *zipper = candidate;
+            return;
+        }
+        int referenceObjectIndex = FindReferenceFileHit(referenceObjects, forwardCollisionBounds);
+        if (referenceObjectIndex >= 0) {
+            MoveZipperCollisionCenterTo(&candidate, referenceObjects->entries[referenceObjectIndex].position);
+            *isLaunched = false;
+            *isAttachedToBlock = false;
+            *attachedAttachmentIndex = -1;
+            *attachedDataShotIndex = -1;
+            *attachedDynamicBlockIndex = -1;
+            if (attachedReferenceObjectIndex != NULL) *attachedReferenceObjectIndex = referenceObjectIndex;
+            *zipper = candidate;
+            return;
+        }
         Vector2 collisionCenter;
         RpgGridCell attachmentCell = { -1, -1 };
         int hitAttachmentIndex = -1;
@@ -1114,6 +1395,7 @@ static void UpdateLaunchedZipper(RpgZipper *zipper, Vector2 *velocity, const Rpg
             MoveZipperCollisionCenterTo(&candidate, collisionCenter);
             *isLaunched = false;
             *isAttachedToBlock = true;
+            *attachedDynamicBlockIndex = -1;
             if (hitAttachment) {
                 *attachedBlockCell = attachmentCell;
                 *attachedAttachmentIndex = hitAttachmentIndex;
@@ -1143,6 +1425,7 @@ static void UpdateLaunchedZipper(RpgZipper *zipper, Vector2 *velocity, const Rpg
             *velocity = (Vector2){ 0.0f, 0.0f };
             *isLaunched = false;
             *isAttachedToBlock = true;
+            *attachedDynamicBlockIndex = -1;
             *attachedAttachmentIndex = -1;
             *zipper = candidate;
             return;
@@ -1181,6 +1464,21 @@ static void UpdateZipperAttachedToDataShot(RpgZipper *zipper, const RpgDataShots
         *isAttachedToBlock = false;
     }
     *attachedDataShotIndex = -1;
+}
+
+static void UpdateZipperAttachedToDynamicBlock(RpgZipper *zipper, const RpgMagnetRuntime *runtime,
+                                               int *attachedDynamicBlockIndex, bool *zipperFollowsPlayer)
+{
+    if (zipper == NULL || runtime == NULL || attachedDynamicBlockIndex == NULL ||
+        *attachedDynamicBlockIndex < 0 || *attachedDynamicBlockIndex >= runtime->metalCount) return;
+    const RpgMagnetMetal *block = &runtime->metals[*attachedDynamicBlockIndex];
+    if (!block->active) {
+        *attachedDynamicBlockIndex = -1;
+        if (zipperFollowsPlayer != NULL) *zipperFollowsPlayer = true;
+        return;
+    }
+    MoveZipperCollisionCenterTo(zipper, (Vector2){ block->position.x + RPG_STAGE_TILE_SIZE * 0.5f,
+                                                    block->position.y + RPG_STAGE_TILE_SIZE * 0.5f });
 }
 
 Rectangle RpgRuntime_GetStopButtonBounds(void)
@@ -1243,7 +1541,7 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
     /* 最背面PNGは背景の後、ブロックより前に描画する。 */
     RpgImageObjects_DrawLayer(&stage->imageObjects, 0, RPG_STAGE_WORLD_COLUMNS,
                               RPG_STAGE_TILE_SIZE, WHITE, RPG_IMAGE_OBJECT_LAYER_BACK);
-    RpgStage_Draw(stage, false, blockBrightness);
+    RpgStage_DrawWithAttachments(stage, attachments, false, blockBrightness);
     RpgMagnets_DrawMetals(magnetRuntime, 0, RPG_STAGE_WORLD_COLUMNS, 0.0f,
                           blockBrightness);
     // 通常ブロックへ紐づけたファイルは、そのブロック自体を強調する。
@@ -1282,7 +1580,7 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
     RpgReferenceObjects_DrawExcept(referenceDrops, fileTexture, excludedReferenceDropIndex);
     if (GetReferenceFolderTransferExcludedIndex(referenceDrops) >= 0) {
         Vector2 transferPosition = GetReferenceFolderTransferPosition();
-        float transferSize = 48.0f * referenceFolderTransfer.drawScale;
+        float transferSize = (float)RPG_STAGE_TILE_SIZE * referenceFolderTransfer.drawScale;
         RpgStage_DrawReferenceObject(fileTexture, (Rectangle){ transferPosition.x - transferSize * 0.5f,
                                       transferPosition.y - transferSize * 0.5f, transferSize, transferSize }, WHITE);
     }
@@ -1353,16 +1651,16 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
         DrawRectangle((int)(x - fileNameWidth / 2.0f - 6.0f), (int)y, (int)fileNameWidth + 12, 44,
                       Fade(RAYWHITE, 0.9f));
         GameFont_Draw(referenceFileName, x - fileNameWidth / 2.0f, y + 3.0f, 16.0f, DARKBLUE);
-        if (IsReferenceFolderTarget(stage, nearbyReferenceTarget)) {
+        if (IsReferenceFolderTarget(stage, referenceDrops, nearbyReferenceTarget)) {
             const char *folderPrompt = RpgReferenceObjects_FindFollowerIndex(referenceDrops) >= 0 ?
-                                       "[E] Open  [P] Store" : "[E] Open";
+                                       "[P] Store" : "";
             GameFont_Draw(folderPrompt, x - 48.0f, y + 22.0f, 15.0f, MAROON);
         } else {
             GameFont_Draw("[E] Open  [G] Acquire", x - 48.0f, y + 22.0f, 15.0f, MAROON);
         }
     }
     RpgNearbyKeyDoor nearbyKeyDoor = FindNearbyKeyDoor(stage, player->position, 72.0f);
-    if (nearbyKeyDoor.row >= 0 && !isReferenceTextOpen) {
+    if (player->isGrounded && nearbyKeyDoor.row >= 0 && !isReferenceTextOpen) {
         Rectangle doorBounds = RpgStage_GetWorldBoundsForCell(stage, nearbyKeyDoor.row, nearbyKeyDoor.column);
         float promptX = doorBounds.x - 18.0f;
         float promptY = doorBounds.y - 24.0f;
@@ -1422,7 +1720,9 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
         Rectangle stopButtonBounds = RpgRuntime_GetStopButtonBounds();
         DrawRectangleRec(stopButtonBounds, MAROON);
         DrawRectangleLinesEx(stopButtonBounds, 1.0f, RAYWHITE);
-        DrawText("Stop [F2]", (int)stopButtonBounds.x + 7, (int)stopButtonBounds.y + 6, 15, RAYWHITE);
+        GameFont_DrawPreset(RPG_TEXT_PRESET_UI, "Stop [F2]",
+                            stopButtonBounds.x + 7.0f, stopButtonBounds.y + 6.0f,
+                            GameFont_GetPresetScale(RPG_TEXT_PRESET_UI, 15.0f));
     }
     if (RpgScene_IsGameSettings(scene)) RpgScene_DrawGameSettingsOverlay(scene);
     else if (scene != NULL) RpgScene_DrawGameSettingsButton();
@@ -1522,6 +1822,194 @@ static void CompleteRuntimeInspect(RpgRuntimeContext *context)
     *context->inspectFunctionIndex = -1;
     *context->inspectLineIndex = -1;
 }
+
+/* Object systems retain their own behaviour, but all player input enters
+ * through these small start callbacks.  This keeps key selection, priority,
+ * and input dispatch independent from individual object implementations. */
+static bool StartPushBlockInteraction(void *userData, const RpgInteraction *interaction)
+{
+    RpgRuntimeInteractionFrame *frame = userData;
+    RpgRuntimeContext *context = frame == NULL ? NULL : frame->context;
+    (void)interaction;
+    return context != NULL && RpgMagnets_TogglePlayerPush(context->magnetRuntime, context->stage,
+               &playerPushState, context->player, (float)RPG_PUSH_BLOCK_INTERACTION_RANGE,
+               context->buttonEvent);
+}
+
+static bool StartReferenceCollectInteraction(void *userData, const RpgInteraction *interaction)
+{
+    RpgRuntimeInteractionFrame *frame = userData;
+    RpgRuntimeContext *context = frame == NULL ? NULL : frame->context;
+    (void)interaction;
+    if (context == NULL || !frame->canReadReference ||
+        IsReferenceFolderTarget(context->stage, context->referenceDrops, frame->nearbyReferenceTarget) ||
+        referenceFolderTransfer.active ||
+        !RpgReferenceObjects_CollectTarget(context->stage, context->referenceDrops,
+                                           frame->nearbyReferenceTarget)) return false;
+    snprintf(context->itemMessage, (size_t)context->itemMessageSize, "File acquired: %s",
+             context->referenceFileName);
+    GameFont_AddText(context->itemMessage);
+    *context->itemMessageTimer = 2.0f;
+    context->selectedReferencePointerTarget->kind = RPG_REFERENCE_TARGET_NONE;
+    *context->isReferencePointerFeedbackSuppressed = true;
+    frame->canReadReference = false;
+    return true;
+}
+
+static bool StartReferenceStoreInteraction(void *userData, const RpgInteraction *interaction)
+{
+    RpgRuntimeInteractionFrame *frame = userData;
+    RpgRuntimeContext *context = frame == NULL ? NULL : frame->context;
+    (void)interaction;
+    if (context == NULL || !frame->canStoreReference || referenceFolderTransfer.active ||
+        !StartReferenceFolderTransfer(context, frame->nearbyFolderTarget)) return false;
+    context->selectedReferencePointerTarget->kind = RPG_REFERENCE_TARGET_NONE;
+    *context->isReferencePointerFeedbackSuppressed = true;
+    return true;
+}
+
+static bool StartInspectAdvanceInteraction(void *userData, const RpgInteraction *interaction)
+{
+    RpgRuntimeInteractionFrame *frame = userData;
+    RpgRuntimeContext *context = frame == NULL ? NULL : frame->context;
+    const RpgInspect *activeInspect;
+    (void)interaction;
+    if (context == NULL || *context->inspectTarget < 0) return false;
+    activeInspect = GetRuntimeActiveInspect(context);
+    if (*context->inspectFunctionIndex < 0 ||
+        *context->inspectFunctionIndex >= activeInspect->functionCount) {
+        CompleteRuntimeInspect(context);
+        return true;
+    }
+    if (activeInspect->functions[*context->inspectFunctionIndex].type != RPG_INSPECT_DIALOGUE)
+        return false;
+    (*context->inspectLineIndex)++;
+    if (*context->inspectLineIndex >= activeInspect->functions[*context->inspectFunctionIndex].dialogue.lineCount) {
+        (*context->inspectFunctionIndex)++;
+        *context->inspectLineIndex = 0;
+        if (*context->inspectFunctionIndex >= activeInspect->functionCount)
+            CompleteRuntimeInspect(context);
+    }
+    return true;
+}
+
+static bool StartDialogueAdvanceInteraction(void *userData, const RpgInteraction *interaction)
+{
+    RpgRuntimeInteractionFrame *frame = userData;
+    RpgRuntimeContext *context = frame == NULL ? NULL : frame->context;
+    (void)interaction;
+    if (context == NULL || *context->dialogueIndex < 0) return false;
+    (*context->dialogueIndex)++;
+    if (*context->dialogueIndex >= context->dialogue->lineCount) *context->dialogueIndex = -1;
+    return true;
+}
+
+static bool StartNpcDialogueInteraction(void *userData, const RpgInteraction *interaction)
+{
+    RpgRuntimeInteractionFrame *frame = userData;
+    (void)interaction;
+    if (frame == NULL || frame->context == NULL || !frame->canTalk) return false;
+    *frame->context->dialogueIndex = 0;
+    return true;
+}
+
+static bool StartKeyDoorInteraction(void *userData, const RpgInteraction *interaction)
+{
+    RpgRuntimeInteractionFrame *frame = userData;
+    RpgRuntimeContext *context = frame == NULL ? NULL : frame->context;
+    RpgKeyDoor *door;
+    (void)interaction;
+    if (context == NULL || frame->nearbyKeyDoor.row < 0 || referenceFolderTransfer.active) return false;
+    door = RpgStage_GetKeyDoorAtCell(context->stage, frame->nearbyKeyDoor.row, frame->nearbyKeyDoor.column);
+    if (door == NULL) return false;
+    if (RpgReferenceObjects_FindFollowerIndex(context->referenceDrops) >= 0 &&
+        StartKeyDoorTransfer(context, frame->nearbyKeyDoor)) {
+        context->selectedReferencePointerTarget->kind = RPG_REFERENCE_TARGET_NONE;
+        *context->isReferencePointerFeedbackSuppressed = true;
+    } else {
+        snprintf(context->itemMessage, (size_t)context->itemMessageSize, "%s",
+                 door->failureText[0] != '\0' ? door->failureText : "This door needs its key file.");
+        GameFont_AddText(context->itemMessage);
+        *context->itemMessageTimer = 2.0f;
+    }
+    return true;
+}
+
+static bool StartReferenceOpenInteraction(void *userData, const RpgInteraction *interaction)
+{
+    RpgRuntimeInteractionFrame *frame = userData;
+    RpgRuntimeContext *context = frame == NULL ? NULL : frame->context;
+    const char *referencePath;
+    (void)interaction;
+    if (context == NULL || !frame->canReadReference) return false;
+    referencePath = RpgReferenceObjects_GetTargetPath(context->stage, context->referenceDrops,
+                                                       frame->nearbyReferenceTarget);
+    if (IsReferenceFolderTarget(context->stage, context->referenceDrops, frame->nearbyReferenceTarget))
+        RpgExplorerLauncher_OpenDirectory(referencePath);
+    else OpenTextFile(referencePath, context->referenceFileName, (size_t)context->referenceFileNameSize,
+                      context->referenceText, (size_t)context->referenceTextSize,
+                      context->isReferenceTextOpen);
+    context->selectedReferencePointerTarget->kind = RPG_REFERENCE_TARGET_NONE;
+    *context->isReferencePointerFeedbackSuppressed = true;
+    return true;
+}
+
+static bool CloseReferenceTextInteraction(void *userData, const RpgInteraction *interaction)
+{
+    RpgRuntimeInteractionFrame *frame = userData;
+    (void)interaction;
+    if (frame == NULL || frame->context == NULL || !*frame->context->isReferenceTextOpen) return false;
+    *frame->context->isReferenceTextOpen = false;
+    return true;
+}
+
+/* A profile is only a registration of key + object-specific start function.
+ * Each callback keeps its concrete game behaviour in the system that owns it. */
+static const RpgInteractionProfile kMovablePushProfile = {
+    .owner = RPG_INTERACTION_OWNER_MOVABLE,
+    .bindings = { { KEY_G, 100, StartPushBlockInteraction } },
+    .bindingCount = 1
+};
+static const RpgInteractionProfile kReferenceFileCollectProfile = {
+    .owner = RPG_INTERACTION_OWNER_REFERENCE_FILE,
+    .bindings = { { KEY_G, 90, StartReferenceCollectInteraction } },
+    .bindingCount = 1
+};
+static const RpgInteractionProfile kReferenceFolderStoreProfile = {
+    .owner = RPG_INTERACTION_OWNER_REFERENCE_FOLDER,
+    .bindings = { { KEY_P, 100, StartReferenceStoreInteraction } },
+    .bindingCount = 1
+};
+static const RpgInteractionProfile kReferenceCloseProfile = {
+    .owner = RPG_INTERACTION_OWNER_REFERENCE_FILE,
+    .bindings = { { KEY_E, 100, CloseReferenceTextInteraction } },
+    .bindingCount = 1
+};
+static const RpgInteractionProfile kInspectAdvanceProfile = {
+    .owner = RPG_INTERACTION_OWNER_INSPECT,
+    .bindings = { { KEY_E, 90, StartInspectAdvanceInteraction } },
+    .bindingCount = 1
+};
+static const RpgInteractionProfile kDialogueAdvanceProfile = {
+    .owner = RPG_INTERACTION_OWNER_DIALOGUE,
+    .bindings = { { KEY_E, 80, StartDialogueAdvanceInteraction } },
+    .bindingCount = 1
+};
+static const RpgInteractionProfile kNpcDialogueProfile = {
+    .owner = RPG_INTERACTION_OWNER_NPC,
+    .bindings = { { KEY_E, 70, StartNpcDialogueInteraction } },
+    .bindingCount = 1
+};
+static const RpgInteractionProfile kKeyDoorProfile = {
+    .owner = RPG_INTERACTION_OWNER_KEY_DOOR,
+    .bindings = { { KEY_E, 60, StartKeyDoorInteraction } },
+    .bindingCount = 1
+};
+static const RpgInteractionProfile kReferenceFileOpenProfile = {
+    .owner = RPG_INTERACTION_OWNER_REFERENCE_FILE,
+    .bindings = { { KEY_E, 50, StartReferenceOpenInteraction } },
+    .bindingCount = 1
+};
 
 /* Moveの進行状態をFunction列から独立して保持し、次のFunctionへ進んだ後も移動を続ける。 */
 /* 旧単一Move実装。複数Move状態へ移行済みのため、互換参照としてのみ残す。 */
@@ -1726,6 +2214,7 @@ static void AdvanceRuntimeInspectFunctions(RpgRuntimeContext *context, float del
 
 void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
 {
+    if (context != NULL) RpgStage_SetCollisionAttachments(context->attachments);
     if (context == NULL) return;
     InitializeRuntimeWorldCoordinates(context);
     // 本編の常設UIは設定ボタンだけを右上へ置き、マス表示用の下部帯を作らない。
@@ -1804,36 +2293,6 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
                                   !(*context->isReferenceTextOpen),
             .updatesWorldSystems = false
         };
-        // 信号・データ弾を含む更新は後段で1回だけ実行する。
-        if (IsKeyPressed(KEY_SPACE) && (*context->isZipperControllable) && (*context->dialogueIndex) < 0 && (*context->stage3IntroIndex) < 0 && (*context->inspectTarget) < 0 &&
-            !(*context->isReferenceTextOpen) && !(*context->isReferenceDragActive)) {
-            if ((*context->zipperFollowsPlayer)) {
-                // 射出開始位置は常に主人公。カーソルへ向かう単位ベクトルを固定して直進させる。
-                (*context->zipper).character.position = (*context->player).position;
-                Vector2 direction = Vector2Subtract(GetRuntimePointerWorldPosition((*context->camera), &(*context->stage),
-                                                                                     GetRuntimeMapIndex(&(*context->stage), (*context->player).position,
-                                                                                                        *context->previousMap)),
-                                                    GetZipperCollisionCenter(&(*context->zipper)));
-                if (Vector2LengthSqr(direction) < 0.001f) direction = (Vector2){ 1.0f, 0.0f };
-                (*context->zipperLaunchVelocity) = Vector2Scale(Vector2Normalize(direction), (*context->zipper).launchSpeed);
-                (*context->isZipperLaunched) = true;
-                RpgCharacter_ResetAnimation(&(*context->player));
-                (*context->zipperFollowsPlayer) = false;
-                (*context->attachedDataShotIndex) = -1;
-                (*context->attachedAttachmentIndex) = -1;
-                (*context->isZipperAttachedToBlock) = false;
-                (*context->zipperAttachedBlockCell) = (RpgGridCell){ -1, -1 };
-                zipperPointerSelected = false;
-            } else if (!(*context->isZipperLaunched)) {
-                /* 帰還は接触状態だけを解除する。Inboxの所持フォルダは次のcmdまで保持する。 */
-                (*context->zipperFollowsPlayer) = true;
-                (*context->attachedDataShotIndex) = -1;
-                (*context->attachedAttachmentIndex) = -1;
-                (*context->isZipperAttachedToBlock) = false;
-                (*context->zipperAttachedBlockCell) = (RpgGridCell){ -1, -1 };
-                zipperPointerSelected = false;
-            }
-        }
         /* 共通ランタイム側が信号・データ弾まで更新するため、旧更新列は残さない。 */
 #if 0
         bool isDataButtonPressed = (*context->player).isGrounded &&
@@ -1859,25 +2318,22 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
            free storage slot). */
         int currentMapIndex = RpgStage_FindNearestActiveMap(&(*context->stage),
                                                             *context->previousMap);
-        if (runtimeMovementContext.acceptsPlayerInput) {
-            RpgAreaDirection direction;
-            if (GetAreaMoveDirectionFromArrowKey(&direction))
-                (void)MovePlayerToAdjacentArea(context, &currentMapIndex, direction);
-        }
         TransitionPlayerBetweenAreas(context, &currentMapIndex);
-        RpgObjectFolders_UpdateDataShotLifetimes(&(*context->dataShots), &(*context->attachments), &(*context->referenceDrops));
-        // 電気化で失われた弾本体のフォルダを同フレームで処理し、追加ファイルをドロップする。
         RpgObjectFolders_UpdateDataShotLifetimes(&(*context->dataShots), &(*context->attachments), &(*context->referenceDrops));
         UpdateZipperAttachedToDataShot(&(*context->zipper), &(*context->dataShots), &(*context->attachedDataShotIndex),
                                        (*context->attachedDataShotOffset),
                                        &(*context->zipperFollowsPlayer), &(*context->isZipperAttachedToBlock),
                                        &(*context->zipperAttachedBlockCell));
+        UpdateZipperAttachedToDynamicBlock(&(*context->zipper), context->magnetRuntime,
+                                            context->attachedDynamicBlockIndex,
+                                            &(*context->zipperFollowsPlayer));
         if ((*context->isZipperLaunched))
-            UpdateLaunchedZipper(&(*context->zipper), &(*context->zipperLaunchVelocity), &(*context->stage), &(*context->attachments), &(*context->dataShots),
+            UpdateLaunchedZipper(&(*context->zipper), &(*context->zipperLaunchVelocity), &(*context->stage), &(*context->attachments), &(*context->dataShots), &(*context->referenceDrops), context->magnetRuntime,
                                  GetFrameTime(), &(*context->isZipperLaunched), &(*context->attachedDataShotIndex),
                                  &(*context->attachedDataShotOffset),
                                  &(*context->isZipperAttachedToBlock), &(*context->zipperAttachedBlockCell),
-                                 &(*context->attachedAttachmentIndex));
+                                 &(*context->attachedAttachmentIndex), context->attachedDynamicBlockIndex,
+                                 context->attachedReferenceObjectIndex);
         else if ((*context->zipperFollowsPlayer) && (*context->inspectTarget) < 0 && (*context->dialogueIndex) < 0 && (*context->stage3IntroIndex) < 0 && !(*context->isReferenceTextOpen))
             UpdateZipperFollow(&(*context->zipper), &(*context->player), GetFrameTime());
         RpgRuntime_ProcessReferenceFolderZipperCommand(context);
@@ -1887,16 +2343,18 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
             if ((*context->zipperAnimationElapsed) >= zipperImportAnimationDuration) (*context->zipperAnimationElapsed) = -1.0f;
         }
         RpgRuntime_UpdateZipperFolderReturn(context, GetFrameTime());
-        bool canTalk = RpgCharacter_IsNear(&(*context->player), &(*context->npc), 72.0f);
+        bool canTalk = (*context->player).isGrounded &&
+                       RpgCharacter_IsNear(&(*context->player), &(*context->npc), 72.0f);
         RpgReferenceTarget nearbyReferenceTarget = { .kind = RPG_REFERENCE_TARGET_NONE,
                                                        .row = -1, .column = -1, .dropIndex = -1 };
         RpgReferenceTarget nearbyFolderTarget = { .kind = RPG_REFERENCE_TARGET_NONE,
                                                     .row = -1, .column = -1, .dropIndex = -1 };
         RpgNearbyKeyDoor nearbyKeyDoor = FindNearbyKeyDoor(&(*context->stage), (*context->player).position, 72.0f);
-        bool canReadReference = RpgReferenceObjects_FindNearbyTarget(&(*context->stage), &(*context->referenceDrops),
+        bool canReadReference = (*context->player).isGrounded &&
+                                RpgReferenceObjects_FindNearbyTarget(&(*context->stage), &(*context->referenceDrops),
                                                                        (*context->player).position, 72.0f,
                                                                        &nearbyReferenceTarget);
-        bool canStoreReference = RpgReferenceObjects_FindNearbyFolderTarget(&(*context->stage),
+        bool canStoreReference = RpgReferenceObjects_FindNearbyFolderTarget(&(*context->referenceDrops),
                                                                               (*context->player).position, 72.0f,
                                                                               &nearbyFolderTarget) &&
                                  RpgReferenceObjects_FindFollowerIndex(&(*context->referenceDrops)) >= 0;
@@ -2055,40 +2513,80 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
             }
         }
         (*context->previousMap) = currentMapIndex;
-        bool didTogglePushBlock = IsKeyPressed(KEY_G) && (*context->inspectTarget) < 0 &&
-                                  (*context->dialogueIndex) < 0 && (*context->stage3IntroIndex) < 0 &&
-                                  !(*context->isReferenceTextOpen) &&
-                                  RpgMagnets_TogglePlayerPush(context->magnetRuntime, &(*context->stage),
-                                                              &playerPushState, (*context->player).position, 72.0f);
-        bool isReferenceCollected = !didTogglePushBlock && canReadReference && !referenceFolderTransfer.active &&
-                                   !IsReferenceFolderTarget(&(*context->stage), nearbyReferenceTarget) &&
-                                   IsKeyPressed(KEY_G) &&
-                                   (*context->inspectTarget) < 0 && (*context->dialogueIndex) < 0 &&
-                                   (*context->stage3IntroIndex) < 0 && !(*context->isReferenceTextOpen);
-        if (isReferenceCollected && RpgReferenceObjects_CollectTarget(&(*context->stage),
-                                                                       &(*context->referenceDrops),
-                                                                       nearbyReferenceTarget)) {
-            snprintf(itemMessage, (size_t)context->itemMessageSize, "File acquired: %s",
-                     context->referenceFileName);
-            GameFont_AddText(itemMessage);
-            (*context->itemMessageTimer) = 2.0f;
-            (*context->selectedReferencePointerTarget).kind = RPG_REFERENCE_TARGET_NONE;
-            (*context->isReferencePointerFeedbackSuppressed) = true;
-            canReadReference = false;
-            nearbyReferenceTarget.kind = RPG_REFERENCE_TARGET_NONE;
+        /* Register every currently usable object action in one place.  The
+         * dispatcher owns key arbitration; each object owns only its callback. */
+        RpgRuntimeInteractionFrame interactionFrame = {
+            .context = context,
+            .canTalk = canTalk,
+            .canReadReference = canReadReference,
+            .canStoreReference = canStoreReference,
+            .nearbyReferenceTarget = nearbyReferenceTarget,
+            .nearbyFolderTarget = nearbyFolderTarget,
+            .nearbyKeyDoor = nearbyKeyDoor
+        };
+        /* Space is not an object interaction.  Once runtime modal state says
+         * input is allowed, the Zipper module owns its launch/return state. */
+        if (*context->isZipperControllable && IsKeyPressed(KEY_SPACE) &&
+            *context->dialogueIndex < 0 && *context->stage3IntroIndex < 0 &&
+            *context->inspectTarget < 0 && !*context->isReferenceTextOpen &&
+            !*context->isReferenceDragActive &&
+            RpgZipper_TryToggleLaunch(context->zipper, context->player,
+                GetRuntimePointerWorldPosition(*context->camera, context->stage,
+                    GetRuntimeMapIndex(context->stage, context->player->position,
+                                       *context->previousMap)),
+                context->zipperFollowsPlayer, context->isZipperLaunched,
+                context->zipperLaunchVelocity)) {
+            *context->attachedDataShotIndex = -1;
+            *context->attachedAttachmentIndex = -1;
+            if (context->attachedDynamicBlockIndex != NULL) *context->attachedDynamicBlockIndex = -1;
+            if (context->attachedReferenceObjectIndex != NULL) *context->attachedReferenceObjectIndex = -1;
+            *context->isZipperAttachedToBlock = false;
+            *context->zipperAttachedBlockCell = (RpgGridCell){ -1, -1 };
+            zipperPointerSelected = false;
         }
-        if (canStoreReference && !referenceFolderTransfer.active && IsKeyPressed(KEY_P) &&
-            (*context->inspectTarget) < 0 && (*context->dialogueIndex) < 0 &&
-            (*context->stage3IntroIndex) < 0 && !(*context->isReferenceTextOpen) &&
-            StartReferenceFolderTransfer(context, nearbyFolderTarget)) {
-            (*context->selectedReferencePointerTarget).kind = RPG_REFERENCE_TARGET_NONE;
-            (*context->isReferencePointerFeedbackSuppressed) = true;
+        RpgInteractionSet interactions;
+        RpgInteraction_BeginFrame(&interactions);
+        if (context->player->isGrounded && *context->inspectTarget < 0 &&
+            *context->dialogueIndex < 0 && *context->stage3IntroIndex < 0 &&
+            !*context->isReferenceTextOpen) {
+            (void)RpgInteraction_RegisterProfile(&interactions, &kMovablePushProfile,
+                                                 playerPushState.heldBlockIndex, &interactionFrame);
+            if (canReadReference && !IsReferenceFolderTarget(context->stage, context->referenceDrops, nearbyReferenceTarget))
+                (void)RpgInteraction_RegisterProfile(&interactions, &kReferenceFileCollectProfile,
+                                                     nearbyReferenceTarget.dropIndex, &interactionFrame);
+            if (canStoreReference)
+                (void)RpgInteraction_RegisterProfile(&interactions, &kReferenceFolderStoreProfile,
+                                                     nearbyFolderTarget.dropIndex, &interactionFrame);
         }
+        if (context->player->isGrounded) {
+            if (*context->isReferenceTextOpen)
+                (void)RpgInteraction_RegisterProfile(&interactions, &kReferenceCloseProfile,
+                                                     -1, &interactionFrame);
+            else if (*context->inspectTarget >= 0)
+                (void)RpgInteraction_RegisterProfile(&interactions, &kInspectAdvanceProfile,
+                                                     *context->inspectTarget, &interactionFrame);
+            else if (*context->dialogueIndex >= 0)
+                (void)RpgInteraction_RegisterProfile(&interactions, &kDialogueAdvanceProfile,
+                                                     *context->dialogueIndex, &interactionFrame);
+            else {
+                if (canTalk)
+                    (void)RpgInteraction_RegisterProfile(&interactions, &kNpcDialogueProfile,
+                                                         0, &interactionFrame);
+                if (nearbyKeyDoor.row >= 0)
+                    (void)RpgInteraction_RegisterProfile(&interactions, &kKeyDoorProfile,
+                                                         nearbyKeyDoor.row * RPG_STAGE_WORLD_COLUMNS + nearbyKeyDoor.column,
+                                                         &interactionFrame);
+                if (canReadReference && !IsReferenceFolderTarget(context->stage, context->referenceDrops, nearbyReferenceTarget))
+                    (void)RpgInteraction_RegisterProfile(&interactions, &kReferenceFileOpenProfile,
+                                                         nearbyReferenceTarget.dropIndex, &interactionFrame);
+            }
+        }
+        (void)RpgInteraction_DispatchPressed(&interactions);
         bool isReferenceCloseClicked = (*context->isReferenceTextOpen) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
                                        CheckCollisionPointRec(RpgViewport_GetMousePosition(), referenceTextCloseButton);
         if (isReferenceCloseClicked) {
             (*context->isReferenceTextOpen) = false;
-        } else if (IsKeyPressed(KEY_E)) {
+        } else if (false) { /* Retired direct-E path; active E handling is registered above. */
             if ((*context->isReferenceTextOpen)) {
                 // ファイル表示も会話と同じく、Eで閉じるまでプレイヤー操作を止める。
                 (*context->isReferenceTextOpen) = false;
@@ -2127,7 +2625,7 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
             } else if (canReadReference) {
                 const char *referencePath = RpgReferenceObjects_GetTargetPath(&(*context->stage), &(*context->referenceDrops),
                                                                                 nearbyReferenceTarget);
-                if (IsReferenceFolderTarget(&(*context->stage), nearbyReferenceTarget))
+                if (IsReferenceFolderTarget(&(*context->stage), &(*context->referenceDrops), nearbyReferenceTarget))
                     RpgExplorerLauncher_OpenDirectory(referencePath);
                 else OpenTextFile(referencePath, context->referenceFileName, (size_t)context->referenceFileNameSize,
                                   context->referenceText, (size_t)context->referenceTextSize,
@@ -2158,7 +2656,7 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
                         GetTime() - (*context->lastReferencePointerClickTime) <= 0.35) {
                         const char *referencePath = RpgReferenceObjects_GetTargetPath(&(*context->stage), &(*context->referenceDrops),
                                                                                         hoveredReferencePointerTarget);
-                        if (IsReferenceFolderTarget(&(*context->stage), hoveredReferencePointerTarget))
+                        if (IsReferenceFolderTarget(&(*context->stage), &(*context->referenceDrops), hoveredReferencePointerTarget))
                             RpgExplorerLauncher_OpenDirectory(referencePath);
                         else OpenTextFile(referencePath, context->referenceFileName,
                                           (size_t)context->referenceFileNameSize, context->referenceText,
@@ -2208,7 +2706,9 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
                 (*context->isReferencePointerPressed) = false;
         }
         bool isZipperPointerHovered = false;
-        if (((*context->zipperFollowsPlayer) || (*context->isZipperAttachedToBlock) || (*context->attachedDataShotIndex) >= 0) && (*context->inspectTarget) < 0 && (*context->dialogueIndex) < 0 &&
+        if (((*context->zipperFollowsPlayer) || (*context->isZipperAttachedToBlock) || (*context->attachedDataShotIndex) >= 0 ||
+             (context->attachedDynamicBlockIndex != NULL && *context->attachedDynamicBlockIndex >= 0)) &&
+            (*context->inspectTarget) < 0 && (*context->dialogueIndex) < 0 &&
             (*context->stage3IntroIndex) < 0 && !(*context->isReferenceTextOpen)) {
             Vector2 pointerWorldPosition = GetRuntimePointerWorldPosition((*context->camera), &(*context->stage), currentMapIndex);
             Rectangle zipperBounds = RpgZipper_GetSpriteBounds(&(*context->zipper).character, 380.0f);

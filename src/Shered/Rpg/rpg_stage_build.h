@@ -14,6 +14,8 @@ bool RpgStageBuild_CreateEditorPreview(int stageNumber, RpgStage *stage, const R
                                        Vector2 playerStartPosition);
 /* 続きから用。既存の build フォルダを消さず、変更監視だけを再接続する。 */
 bool RpgStageBuild_Resume(int stageNumber, RpgStage *stage);
+/* Reconnect a pre-generated editor preview without clearing/regenerating it. */
+bool RpgStageBuild_ResumeEditorPreview(int stageNumber, RpgStage *stage);
 /* 非同期通知を処理し、削除されたセルを赤い実行時壁へ反映する。 */
 void RpgStageBuild_Update(RpgStage *stage);
 /* Folder内のzipper.cmdが作った要求を一度だけ取り出す。別エリアの要求は消費して無視する。 */

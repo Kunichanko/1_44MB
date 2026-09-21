@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <stdio.h>
 
+#define RPG_TEXT_ROUTE_RAYLIB_CALLS
 #include "game_font.h"
 #include "rpg_viewport.h"
 
@@ -39,6 +40,7 @@ void RpgScene_Release(RpgSceneState *scene)
 
 void RpgScene_RegisterText(void)
 {
+    GameFont_BeginTextBatch();
     GameFont_AddText(u8"始める");
     GameFont_AddText(u8"設定");
     GameFont_AddText(u8"初めから");
@@ -50,6 +52,7 @@ void RpgScene_RegisterText(void)
     GameFont_AddText(u8"をビルドする");
     // 日本語表示を追加する前に、フォントの文字セットへ必要な文字を登録する。
     GameFont_AddText("始める設定初めから続きから戻るタイトルへ");
+    (void)GameFont_EndTextBatch();
 }
 
 bool RpgScene_IsGameScene(const RpgSceneState *scene)
@@ -144,9 +147,10 @@ void RpgScene_DrawGameSettingsButton(void)
     DrawRectangleRec(gameSettingsButton, Fade(DARKBLUE, 0.90f));
     DrawRectangleLinesEx(gameSettingsButton, 1.0f, RAYWHITE);
     labelSize = GameFont_MeasureText(u8"設定", 18.0f);
-    GameFont_Draw(u8"設定", gameSettingsButton.x + (gameSettingsButton.width - labelSize.x) * 0.5f,
-                  gameSettingsButton.y + (gameSettingsButton.height - labelSize.y) * 0.5f,
-                  18.0f, RAYWHITE);
+    GameFont_DrawPreset(RPG_TEXT_PRESET_UI, u8"設定",
+                        gameSettingsButton.x + (gameSettingsButton.width - labelSize.x) * 0.5f,
+                        gameSettingsButton.y + (gameSettingsButton.height - labelSize.y) * 0.5f,
+                        GameFont_GetPresetScale(RPG_TEXT_PRESET_UI, 18.0f));
 }
 
 void RpgScene_DrawGameSettingsOverlay(const RpgSceneState *scene)
@@ -177,9 +181,10 @@ static void DrawButton(Rectangle bounds, const char *label, bool emphasized)
     if (hovered) color = BLUE;
     DrawRectangleRec(bounds, color);
     DrawRectangleLinesEx(bounds, 2.0f, RAYWHITE);
-    float textWidth = GameFont_MeasureText(label, 22.0f).x;
-    GameFont_Draw(label, bounds.x + (bounds.width - textWidth) * 0.5f, bounds.y + 11.0f,
-                  22.0f, RAYWHITE);
+    float scale = GameFont_GetPresetScale(RPG_TEXT_PRESET_UI, 22.0f);
+    float textWidth = GameFont_MeasurePreset(RPG_TEXT_PRESET_UI, label, scale).x;
+    GameFont_DrawPreset(RPG_TEXT_PRESET_UI, label, bounds.x + (bounds.width - textWidth) * 0.5f,
+                        bounds.y + 11.0f, scale);
 }
 
 static Rectangle GetCenteredButton(float y, float width, float height)

@@ -63,6 +63,10 @@ void RpgCharacter_UpdatePlayerWithStageAndMovingSolidsControlled(RpgCharacter *c
 /* 可動固体の移動後に、足場追従と軸限定の押し出しをプレイヤー側だけで解決する。 */
 void RpgCharacter_ResolveMovingSolidContacts(RpgCharacter *character, const RpgStage *stage,
                                              const RpgMovingSolidSet *movingSolids);
+/* Moves a grounded character by an external surface, using the same collision
+   resolver as normal player movement. */
+void RpgCharacter_ApplySurfaceMotion(RpgCharacter *character, const RpgStage *stage,
+                                     const RpgMovingSolidSet *movingSolids, float movementX);
 bool RpgCharacter_IsNear(const RpgCharacter *first, const RpgCharacter *second, float distance);
 Rectangle RpgCharacter_GetFootBounds(const RpgCharacter *character);
 Rectangle RpgCharacter_GetCollisionBounds(const RpgCharacter *character);

@@ -22,6 +22,9 @@
 
 #include "raylib.h"
 
+#define RPG_TEXT_ROUTE_RAYLIB_CALLS
+#include "../game_font.h"
+
 extern UINT WINAPI GetDpiForWindow(HWND window);
 extern int WINAPI GetSystemMetricsForDpi(int index, UINT dpi);
 

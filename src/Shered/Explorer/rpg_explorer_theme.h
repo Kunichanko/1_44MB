@@ -4,6 +4,7 @@
 #define RPG_EXPLORER_THEME_H
 
 #include "raylib.h"
+#include "../rpg_text.h"
 
 typedef struct ExplorerMetrics {
     /* raylib のレイアウト値は常に 96 DPI 基準の論理 px として保持する。 */
@@ -161,6 +162,7 @@ bool RpgExplorerTheme_Load(RpgExplorerTheme *theme, void *nativeWindow);
 void RpgExplorerTheme_Unload(RpgExplorerTheme *theme);
 void RpgExplorerTheme_UpdateDpi(RpgExplorerTheme *theme, void *nativeWindow);
 bool RpgExplorerTheme_EnsureGlyphs(RpgExplorerTheme *theme, const char *const *texts, int textCount);
+RpgTextRenderer RpgExplorerTheme_GetTextRenderer(const RpgExplorerTheme *theme);
 void RpgExplorerTheme_DrawText(const RpgExplorerTheme *theme, const char *text, Vector2 position, float size, Color color);
 Vector2 RpgExplorerTheme_MeasureText(const RpgExplorerTheme *theme, const char *text, float size);
 void RpgExplorerTheme_DrawIcon(const RpgExplorerTheme *theme, int codepoint, Rectangle bounds, Color color);

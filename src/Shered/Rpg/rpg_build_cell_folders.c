@@ -4,7 +4,8 @@
 
 #include <string.h>
 
-enum { RPG_BUILD_CELL_FOLDER_BATCH_SIZE = 16 };
+/* See compact storage: a preview consumes at most one cell write per frame. */
+enum { RPG_BUILD_CELL_FOLDER_BATCH_SIZE = 1 };
 
 static const RpgStage *pendingStage = NULL;
 static bool generatedCells[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS] = { { false } };
@@ -23,16 +24,19 @@ static bool WriteCell(const RpgStage *stage, RpgGridCell cell, const RpgBuildCel
 }
 
 static bool CreateInitialMap(const RpgStage *stage, int startMapIndex,
-                             const RpgBuildCellStorageBackend *backend, bool scheduleRemainingMaps)
+                             const RpgBuildCellStorageBackend *backend)
 {
     if (stage == NULL || startMapIndex < 0 || startMapIndex >= RPG_STAGE_MAP_COUNT) return false;
-    pendingStage = scheduleRemainingMaps ? stage : NULL;
+    pendingStage = stage;
     startingMap = startMapIndex;
     pendingCursor = 0;
     memset(generatedCells, 0, sizeof(generatedCells));
-    for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int localColumn = 0; localColumn < RPG_STAGE_COLUMNS; localColumn++) {
-        if (!WriteCell(stage, (RpgGridCell){ row, startMapIndex * RPG_STAGE_COLUMNS + localColumn }, backend))
-            return false;
+    for (int row = 0; row < RPG_STAGE_ROWS; row++) {
+        for (int localColumn = 0; localColumn < RPG_STAGE_COLUMNS; localColumn++) {
+            if (!WriteCell(stage, (RpgGridCell){ row,
+                                                  startMapIndex * RPG_STAGE_COLUMNS + localColumn }, backend))
+                return false;
+        }
     }
     return true;
 }
@@ -40,13 +44,23 @@ static bool CreateInitialMap(const RpgStage *stage, int startMapIndex,
 bool RpgBuildCellFolders_Create(const RpgStage *stage, int startMapIndex,
                                 const RpgBuildCellStorageBackend *backend)
 {
-    return CreateInitialMap(stage, startMapIndex, backend, true);
+    (void)startMapIndex;
+    if (stage == NULL) return false;
+    pendingStage = NULL;
+    pendingCursor = 0;
+    memset(generatedCells, 0, sizeof(generatedCells));
+    for (int row = 0; row < RPG_STAGE_ROWS; row++) {
+        for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
+            if (!WriteCell(stage, (RpgGridCell){ row, column }, backend)) return false;
+        }
+    }
+    return true;
 }
 
 bool RpgBuildCellFolders_CreatePreview(const RpgStage *stage, int startMapIndex,
                                        const RpgBuildCellStorageBackend *backend)
 {
-    return CreateInitialMap(stage, startMapIndex, backend, false);
+    return CreateInitialMap(stage, startMapIndex, backend);
 }
 
 void RpgBuildCellFolders_Update(const RpgBuildCellStorageBackend *backend)
@@ -64,6 +78,36 @@ void RpgBuildCellFolders_Update(const RpgBuildCellStorageBackend *backend)
         created++;
     }
     if (pendingCursor >= RPG_STAGE_ROWS * RPG_STAGE_WORLD_COLUMNS) pendingStage = NULL;
+}
+
+bool RpgBuildCellFolders_EnsureMap(const RpgStage *stage, int mapIndex,
+                                   const RpgBuildCellStorageBackend *backend)
+{
+    if (stage == NULL || mapIndex < 0 || mapIndex >= RPG_STAGE_MAP_COUNT) return false;
+    for (int row = 0; row < RPG_STAGE_ROWS; row++) {
+        for (int localColumn = 0; localColumn < RPG_STAGE_COLUMNS; localColumn++) {
+            if (!WriteCell(stage, (RpgGridCell){ row, mapIndex * RPG_STAGE_COLUMNS + localColumn }, backend))
+                return false;
+        }
+    }
+    return true;
+}
+
+void RpgBuildCellFolders_GetGenerationProgress(const RpgStage *stage, int *generatedCount,
+                                               int *totalCount, bool *isPending)
+{
+    int generated = 0, total = 0;
+    if (stage != NULL) for (int row = 0; row < RPG_STAGE_ROWS; row++) {
+        for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
+            int mapIndex = column / RPG_STAGE_COLUMNS;
+            if (!RpgStage_IsMapActive(stage, mapIndex)) continue;
+            total++;
+            if (generatedCells[row][column]) generated++;
+        }
+    }
+    if (generatedCount != NULL) *generatedCount = generated;
+    if (totalCount != NULL) *totalCount = total;
+    if (isPending != NULL) *isPending = pendingStage != NULL && generated < total;
 }
 
 bool RpgBuildCellFolders_EnsureCell(RpgGridCell cell, int blockType,

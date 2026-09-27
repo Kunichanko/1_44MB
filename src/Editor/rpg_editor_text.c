@@ -24,6 +24,11 @@ bool RpgEditorText_IsKeyboardCaptured(void)
     return isKeyboardCaptured;
 }
 
+bool RpgEditorText_ConsumeEscape(void)
+{
+    return isKeyboardCaptured && IsKeyPressed(KEY_ESCAPE);
+}
+
 static int GetNextUtf8Index(const char *text, int index)
 {
     int byteCount = 0;
@@ -96,7 +101,7 @@ int RpgEditorText_GetWrappedLineCount(const char *text, float fontSize, float wi
 
 void RpgEditorText_DrawCaret(int x, int y, int height)
 {
-    if ((int)(GetTime() * 2.0) % 2 == 0) DrawRectangle(x - 1, y, 3, height, PURPLE);
+    if ((int)(GetTime() * 2.0) % 2 == 0) DrawRectangle(x - 1, y, 3, height, RED);
 }
 
 static int GetPreviousUtf8Index(const char *text, int index)

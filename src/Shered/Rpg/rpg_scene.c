@@ -9,6 +9,10 @@
 #define RPG_TEXT_ROUTE_RAYLIB_CALLS
 #include "game_font.h"
 #include "rpg_viewport.h"
+#include "rpg_ui_theme.h"
+
+#undef DARKBLUE
+#define DARKBLUE RPG_UI_PRIMARY_BLUE
 
 static Rectangle gameSettingsButton = { 842.0f, 506.0f, 94.0f, 26.0f };
 

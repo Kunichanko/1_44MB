@@ -359,13 +359,12 @@ bool RpgBlockInventory_IsOneWayPlatform(int blockType)
 
 bool RpgBlockInventory_IsMagnetBlock(int blockType)
 {
-    int rootType = RpgBlockInventory_GetEffectRootType(blockType);
-    return rootType == RPG_BLOCK_EFFECT_MAGNET_OFF || rootType == RPG_BLOCK_EFFECT_MAGNET_ON;
+    return blockType == RPG_BLOCK_EFFECT_MAGNET_OFF || blockType == RPG_BLOCK_EFFECT_MAGNET_ON;
 }
 
 bool RpgBlockInventory_IsMagnetActive(int blockType)
 {
-    return RpgBlockInventory_GetEffectRootType(blockType) == RPG_BLOCK_EFFECT_MAGNET_ON;
+    return blockType == RPG_BLOCK_EFFECT_MAGNET_ON;
 }
 
 bool RpgBlockInventory_IsMetalBlock(int blockType)
@@ -389,13 +388,31 @@ bool RpgBlockInventory_IsSocketSignalOneWayBlock(int blockType)
     return blockType == RPG_BLOCK_SOCKET_SIGNAL_ONE_WAY;
 }
 
+RpgBlockStructureKind RpgBlockInventory_GetStructureKind(int blockType)
+{
+    if ((blockType >= 1 && blockType <= 10) ||
+        blockType == RPG_BLOCK_HOLE_VERTICAL || blockType == RPG_BLOCK_HOLE_HORIZONTAL ||
+        RpgBlockInventory_IsOneWayPlatform(blockType) || RpgBlockInventory_IsMetalBlock(blockType) ||
+        RpgBlockInventory_IsPushBlock(blockType) || RpgBlockInventory_IsSocketSignalBlock(blockType))
+        return RPG_BLOCK_STRUCTURE_NORMAL_CELL;
+    if (RpgBlockInventory_IsAttachment(blockType)) return RPG_BLOCK_STRUCTURE_ATTACHMENT;
+    if (RpgBlockInventory_IsReferenceObject(blockType) || blockType == RPG_BLOCK_IMAGE_OBJECT)
+        return RPG_BLOCK_STRUCTURE_REFERENCE;
+    if (blockType == RPG_BLOCK_PROPERTY_ITEM || blockType == RPG_BLOCK_PROPERTY_WIRE ||
+        blockType == RPG_BLOCK_PROPERTY_RECEIVER || RpgBlockInventory_IsMapEventProperty(blockType) ||
+        RpgBlockInventory_IsConveyorProperty(blockType)) return RPG_BLOCK_STRUCTURE_PROPERTY;
+    {
+        const RpgEffectShape *shape = RpgBlockInventory_GetEffectShape(blockType);
+        if (shape != NULL)
+            return shape->cellCount == 1 ? RPG_BLOCK_STRUCTURE_SPECIAL_CELL :
+                                           RPG_BLOCK_STRUCTURE_COMPOSITE;
+    }
+    return RPG_BLOCK_STRUCTURE_NONE;
+}
+
 bool RpgBlockInventory_IsOrdinaryBlock(int blockType)
 {
-    return (blockType >= 1 && blockType <= 10) ||
-           blockType == RPG_BLOCK_HOLE_VERTICAL || blockType == RPG_BLOCK_HOLE_HORIZONTAL ||
-           RpgBlockInventory_IsOneWayPlatform(blockType) || RpgBlockInventory_IsMetalBlock(blockType) ||
-           RpgBlockInventory_IsPushBlock(blockType) ||
-           RpgBlockInventory_IsSocketSignalBlock(blockType);
+    return RpgBlockInventory_GetStructureKind(blockType) == RPG_BLOCK_STRUCTURE_NORMAL_CELL;
 }
 
 int RpgBlockInventory_GetEffectRootType(int blockType)

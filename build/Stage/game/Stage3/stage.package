@@ -204,7 +204,7 @@ FILE 15 51
 rpg_inspect.cfg0 1
 D	Dialogue1	1
 Inspect	Nothing unusual here.
-FILE 14 406
+FILE 14 405
 rpg_layout.cfg208.0 288.0 -15360.0 -32.0 180.0 1.00 1.00 1
 background=C:\Users\0420y\Documents\GitHub\144MB\1_44MB\assets\Sprite\Backgrounds\カラフルな草原のピクセル風景.png
 ground_block=C:\Users\0420y\Documents\GitHub\144MB\1_44MB\assets\Sprite\Blocks\b04.png

@@ -1,6 +1,7 @@
 // 依存する自プロジェクト内ファイル: rpg_stage_storage.h
 // 役割: Settings/Stage/Stage番号の実フォルダを扱い、各ステージ設定を読み書きする。
 #include "rpg_stage_storage.h"
+#include "rpg_stage_authority.h"
 #include "rpg_block_inventory.h"
 
 #include <stdio.h>
@@ -199,6 +200,7 @@ bool RpgStageStorage_PublishStage(int stageNumber)
     char target[RPG_STAGE_PATH_LENGTH], temporary[RPG_STAGE_PATH_LENGTH];
     RpgStageStorageDomain previous = storageDomain;
     bool result;
+    if (!RpgStageAuthority_CanWriteStatic()) return false;
     storageDomain = RPG_STAGE_STORAGE_SETTINGS;
     if (!GetStageDirectoryPath(stageNumber, source, (int)sizeof(source))) { storageDomain = previous; return false; }
     storageDomain = RPG_STAGE_STORAGE_GAME_PACKAGE;
@@ -245,6 +247,7 @@ bool RpgStageStorage_PublishCatalog(const RpgStageCatalog *catalog)
     char source[RPG_STAGE_PATH_LENGTH], destination[RPG_STAGE_PATH_LENGTH];
     RpgStageStorageDomain previous = storageDomain;
     bool result = false;
+    if (!RpgStageAuthority_CanWriteStatic()) return false;
     (void)catalog;
     storageDomain = RPG_STAGE_STORAGE_SETTINGS;
     if (!GetCatalogPath(source, (int)sizeof(source))) goto finish;
@@ -276,6 +279,7 @@ finish:
 void RpgStageStorage_ClearPackagedStaticStage(int stageNumber)
 {
     char root[RPG_STAGE_PATH_LENGTH], name[RPG_STAGE_NAME_LENGTH], path[RPG_STAGE_PATH_LENGTH];
+    if (!RpgStageAuthority_CanWriteStatic() && !RpgStageAuthority_CanWriteGameRuntime()) return;
     if (stageNumber <= 0 || snprintf(root, sizeof(root), "%sStage\\game", GetApplicationDirectory()) <= 0) return;
     RpgStageCatalog_GetName(stageNumber, name, (int)sizeof(name));
     if (snprintf(path, sizeof(path), "%s\\%s\\static", root, name) > 0) RemoveDirectoryTree(path);
@@ -927,7 +931,8 @@ static bool SaveStageDataToDirectory(const char *directory, const RpgStageData *
 bool RpgStageStorage_SaveRuntimeState(int stageNumber, const RpgStageData *data)
 {
     char buildPath[RPG_STAGE_PATH_LENGTH], statePath[RPG_STAGE_PATH_LENGTH];
-    return data != NULL && RpgStageStorage_GetRuntimePath(stageNumber, RPG_STAGE_RUNTIME_GAME,
+    return data != NULL && RpgStageAuthority_CanWriteGameRuntime() &&
+        RpgStageStorage_GetRuntimePath(stageNumber, RPG_STAGE_RUNTIME_GAME,
         buildPath, (int)sizeof(buildPath)) && CreateDirectoryPath(buildPath) &&
         snprintf(statePath, sizeof(statePath), "%s\\runtime_state", buildPath) > 0 &&
         SaveStageDataToDirectory(statePath, data);
@@ -949,6 +954,7 @@ bool RpgStageStorage_ClearRuntimeState(int stageNumber)
     wchar_t widePath[RPG_STAGE_PATH_LENGTH];
     DWORD attributes;
 #endif
+    if (!RpgStageAuthority_CanWriteStatic() && !RpgStageAuthority_CanWriteGameRuntime()) return false;
     if (!RpgStageStorage_GetRuntimePath(stageNumber, RPG_STAGE_RUNTIME_GAME,
                                         buildPath, (int)sizeof(buildPath)) ||
         snprintf(statePath, sizeof(statePath), "%s\\runtime_state", buildPath) <= 0)
@@ -1371,7 +1377,8 @@ bool RpgStageStorage_LoadStage(int stageNumber, RpgStageData *data)
 bool RpgStageStorage_SaveStage(int stageNumber, const RpgStageData *data)
 {
     char folder[RPG_STAGE_PATH_LENGTH];
-    if (data == NULL || !GetStageDirectoryPath(stageNumber, folder, (int)sizeof(folder)) ||
+    if (!RpgStageAuthority_CanWriteStatic() || RpgStageStorage_GetDomain() != RPG_STAGE_STORAGE_SETTINGS ||
+        data == NULL || !GetStageDirectoryPath(stageNumber, folder, (int)sizeof(folder)) ||
         !RpgStageStorage_EnsureStageDirectory(stageNumber)) return false;
     bool saved = SaveStageDataToDirectory(folder, data);
     return saved && (RpgStageStorage_GetDomain() != RPG_STAGE_STORAGE_SETTINGS || RpgStageStorage_PublishStage(stageNumber));

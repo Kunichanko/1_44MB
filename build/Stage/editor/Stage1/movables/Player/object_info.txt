@@ -1,5 +1,3 @@
-kind=player
 type=0
-id=1
-world_x=560.0
-world_y=320.0
+x=560.0
+y=320.0

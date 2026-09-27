@@ -236,15 +236,29 @@ void RpgGameWindow_UpdateAutoHide(void)
         visible = y >= 0.0f && y <= gameTitleHeight + 12.0f;
     if (chromeVisible != visible) {
         chromeVisible = visible;
-        UpdateCaptionBounds();
     }
+    /* raylib may finish establishing its logical screen dimensions after the
+       HWND has been subclassed.  Rebuild the shared bounds on the first
+       update (and cheaply thereafter), rather than relying on WM_SIZE to
+       make the caption glyphs appear. */
+    UpdateCaptionBounds();
 }
 
 void RpgGameWindow_DrawChrome(void)
 {
     float x, y;
     Color foreground = (Color){ 30, 30, 30, 255 };
-    if (!chromeVisible || gameWindow == NULL) return;
+    bool shouldShow;
+    if (gameWindow == NULL) return;
+    /* Rendering must not depend on receiving an initial WM_SIZE.  A normal
+       window always owns this chrome; a maximized window exposes it only near
+       the top edge.  Resolve that state again immediately before drawing. */
+    shouldShow = !IsZoomed(gameWindow);
+    if (!shouldShow && GetCursorLogicalPosition(&x, &y))
+        shouldShow = y >= 0.0f && y <= gameTitleHeight + 12.0f;
+    if (!shouldShow) return;
+    if (!chromeVisible) chromeVisible = true;
+    UpdateCaptionBounds();
     DrawRectangle(0, 0, GetScreenWidth(), (int)ceilf(gameTitleHeight), RAYWHITE);
     DrawText(gameWindowTitle, 14, (int)((gameTitleHeight - 18.0f) * 0.5f), 18, foreground);
     (void)GetCursorLogicalPosition(&x, &y);

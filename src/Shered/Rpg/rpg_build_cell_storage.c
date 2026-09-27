@@ -66,12 +66,48 @@ bool RpgBuildCellStorage_CreatePreview(const RpgStage *stage, int startMapIndex,
                                        const RpgBuildCellStorageBackend *backend)
 {
     return currentMode == RPG_BUILD_CELL_STORAGE_FOLDERS ?
-           RpgBuildCellFolders_CreatePreview(stage, startMapIndex, backend) : RpgBuildCellCompact_Create(stage, backend);
+           RpgBuildCellFolders_CreatePreview(stage, startMapIndex, backend) :
+           RpgBuildCellCompact_CreatePreview(stage, startMapIndex, backend);
 }
 
 void RpgBuildCellStorage_Update(const RpgBuildCellStorageBackend *backend)
 {
     if (currentMode == RPG_BUILD_CELL_STORAGE_FOLDERS) RpgBuildCellFolders_Update(backend);
+    else RpgBuildCellCompact_Update(backend);
+}
+
+bool RpgBuildCellStorage_EnsureMap(const RpgStage *stage, int mapIndex,
+                                   const RpgBuildCellStorageBackend *backend)
+{
+    return currentMode == RPG_BUILD_CELL_STORAGE_FOLDERS ?
+           RpgBuildCellFolders_EnsureMap(stage, mapIndex, backend) :
+           RpgBuildCellCompact_EnsureMap(stage, mapIndex, backend);
+}
+
+bool RpgBuildCellStorage_RewriteGeneratedMetadata(const RpgStage *stage,
+                                                   const RpgBuildCellStorageBackend *backend)
+{
+    return currentMode == RPG_BUILD_CELL_STORAGE_COMPACT &&
+           RpgBuildCellCompact_RewriteGeneratedMetadata(stage, backend);
+}
+
+void RpgBuildCellStorage_BeginMetadataBatch(void)
+{
+    if (currentMode == RPG_BUILD_CELL_STORAGE_COMPACT) RpgBuildCellCompact_BeginMetadataBatch();
+}
+
+bool RpgBuildCellStorage_EndMetadataBatch(const RpgBuildCellStorageBackend *backend)
+{
+    return currentMode != RPG_BUILD_CELL_STORAGE_COMPACT ||
+           RpgBuildCellCompact_EndMetadataBatch(backend);
+}
+
+void RpgBuildCellStorage_GetGenerationProgress(const RpgStage *stage, int *generatedCells,
+                                               int *totalCells, bool *isPending)
+{
+    if (currentMode == RPG_BUILD_CELL_STORAGE_FOLDERS)
+        RpgBuildCellFolders_GetGenerationProgress(stage, generatedCells, totalCells, isPending);
+    else RpgBuildCellCompact_GetGenerationProgress(stage, generatedCells, totalCells, isPending);
 }
 
 bool RpgBuildCellStorage_EnsureCell(RpgGridCell cell, int blockType,
@@ -89,7 +125,7 @@ bool RpgBuildCellStorage_UsesMetadataForBlock(int blockType)
 bool RpgBuildCellStorage_IsMetadataFile(const char *fileName)
 {
     return currentMode == RPG_BUILD_CELL_STORAGE_COMPACT && fileName != NULL &&
-           strcmp(fileName, "cells_metadata.txt") == 0;
+           strcmp(fileName, "cells.csv") == 0;
 }
 
 bool RpgBuildCellStorage_ReadAvailability(bool available[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS],

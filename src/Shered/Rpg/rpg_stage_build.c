@@ -6,6 +6,7 @@
 #include "rpg_build_cell_storage.h"
 #include "rpg_object_folder.h"
 #include "rpg_stage_storage.h"
+#include "rpg_stage_authority.h"
 
 // 依存関係: 通常マスがメタデータ方式かどうかは保存方式モジュールから取得する。
 
@@ -83,21 +84,25 @@ static bool StartWatcher(const char *buildPath)
     return QueueDirectoryRead();
 }
 
-static bool ParseCellPath(const wchar_t *relativePath, int *row, int *column)
+static bool ParseCellPath(const RpgStage *stage, const wchar_t *relativePath, int *row, int *column)
 {
     const wchar_t *name;
-    int identity;
+    int gridX, gridY, localX, localY, mapIndex;
     if (relativePath == NULL || wcsncmp(relativePath, L"cells\\", 6) != 0) return false;
     name = relativePath + 6;
-    if (swscanf(name, L"cell_block_%d_r%d_c%d", &identity, row, column) != 3 ||
-        *row < 0 || *row >= RPG_STAGE_ROWS || *column < 0 || *column >= RPG_STAGE_WORLD_COLUMNS) return false;
-    return identity == *row * RPG_STAGE_WORLD_COLUMNS + *column + 1;
+    if (stage == NULL || swscanf(name, L"area_x%d_y%d_cell_x%d_y%d", &gridX, &gridY,
+                                 &localX, &localY) != 4 ||
+        localX < 0 || localX >= RPG_STAGE_COLUMNS || localY < 0 || localY >= RPG_STAGE_ROWS ||
+        (mapIndex = RpgStage_GetMapAtGrid(stage, gridX, gridY)) < 0) return false;
+    *row = localY;
+    *column = mapIndex * RPG_STAGE_COLUMNS + localX;
+    return true;
 }
 
-static bool ParseCellFolder(const wchar_t *relativePath, int *row, int *column)
+static bool ParseCellFolder(const RpgStage *stage, const wchar_t *relativePath, int *row, int *column)
 {
     const wchar_t *name = relativePath == NULL ? NULL : relativePath + 6;
-    return ParseCellPath(relativePath, row, column) && wcschr(name, L'\\') == NULL;
+    return ParseCellPath(stage, relativePath, row, column) && wcschr(name, L'\\') == NULL;
 }
 
 static void RefreshCompactCells(RpgStage *stage)
@@ -117,30 +122,51 @@ static void RefreshCompactCells(RpgStage *stage)
     }
 }
 
+static void SetWatchedEffectMissing(RpgStage *stage, int rootRow, int rootColumn, bool missing)
+{
+    const RpgEffectShape *shape;
+    int rootType;
+    if (stage == NULL || rootRow < 0 || rootRow >= RPG_STAGE_ROWS || rootColumn < 0 ||
+        rootColumn >= RPG_STAGE_WORLD_COLUMNS) return;
+    rootType = watcher.originalBlocks[rootRow][rootColumn];
+    shape = RpgBlockInventory_GetEffectShape(rootType);
+    if (shape == NULL || shape->rootType != rootType) {
+        watcher.missingCells[rootRow][rootColumn] = missing;
+        stage->blocks[rootRow][rootColumn] = missing ? RPG_BLOCK_BUILD_MISSING : rootType;
+        return;
+    }
+    for (int index = 0; index < shape->cellCount; index++) {
+        const RpgEffectShapeCell *part = &shape->cells[index];
+        int row = rootRow + part->offsetY;
+        int column = rootColumn + part->offsetX;
+        if (row < 0 || row >= RPG_STAGE_ROWS || column < 0 || column >= RPG_STAGE_WORLD_COLUMNS) continue;
+        watcher.missingCells[row][column] = missing;
+        stage->blocks[row][column] = missing ? RPG_BLOCK_BUILD_MISSING : part->blockType;
+    }
+}
+
 static void ApplyCellChange(RpgStage *stage, DWORD action, const wchar_t *relativePath)
 {
     int row, column;
     RpgGridCell cell;
-    if (relativePath != NULL && wcscmp(relativePath, L"cells_metadata.txt") == 0 &&
-        RpgBuildCellStorage_IsMetadataFile("cells_metadata.txt")) {
+    if (relativePath != NULL && wcscmp(relativePath, L"cells.csv") == 0 &&
+        RpgBuildCellStorage_IsMetadataFile("cells.csv")) {
         RefreshCompactCells(stage);
         return;
     }
-    if (stage == NULL || !ParseCellFolder(relativePath, &row, &column)) return;
+    if (stage == NULL || !ParseCellFolder(stage, relativePath, &row, &column)) return;
     cell = (RpgGridCell){ row, column };
     /* 外部File/Folder は1マス表示でも地形を占有しないため、専用フォルダの移動で赤壁へ変換しない。 */
     if (RpgBlockInventory_IsReferenceObject(watcher.originalBlocks[row][column])) return;
     if (action == FILE_ACTION_REMOVED || action == FILE_ACTION_RENAMED_OLD_NAME) {
         /* Zipper による移動中は Inbox 側に同じマスが存在するため、赤壁へは変換しない。 */
         if (!RpgObjectFolders_IsBuildCellAvailable(cell)) {
-            watcher.missingCells[row][column] = true;
-            stage->blocks[row][column] = RPG_BLOCK_BUILD_MISSING;
+            SetWatchedEffectMissing(stage, row, column, true);
         }
     } else if (action == FILE_ACTION_ADDED || action == FILE_ACTION_RENAMED_NEW_NAME) {
         /* Compactマスも、返却された実フォルダを検知した時点で元のマスとして復帰する。 */
         if (watcher.missingCells[row][column] && RpgObjectFolders_IsBuildCellAvailable(cell)) {
-            watcher.missingCells[row][column] = false;
-            stage->blocks[row][column] = watcher.originalBlocks[row][column];
+            SetWatchedEffectMissing(stage, row, column, false);
         }
     }
 }
@@ -155,8 +181,8 @@ static void QueueReferenceFolderZipperRequest(const RpgStage *stage, DWORD actio
     char infoPath[1200];
     wchar_t wideInfoPath[1200];
     FILE *info;
-    int row = -1;
-    int column = -1;
+    float x = -1.0f;
+    float y = -1.0f;
     char line[256];
     if (stage == NULL || relativePath == NULL || action == FILE_ACTION_REMOVED ||
         WideCharToMultiByte(CP_UTF8, 0, relativePath, -1, relativeUtf8,
@@ -169,10 +195,12 @@ static void QueueReferenceFolderZipperRequest(const RpgStage *stage, DWORD actio
         !ToWide(infoPath, wideInfoPath, (int)(sizeof(wideInfoPath) / sizeof(wideInfoPath[0]))) ||
         (info = _wfopen(wideInfoPath, L"rb")) == NULL) return;
     while (fgets(line, sizeof(line), info) != NULL) {
-        (void)sscanf(line, "cell_row=%d", &row);
-        (void)sscanf(line, "cell_column=%d", &column);
+        (void)sscanf(line, "x=%f", &x);
+        (void)sscanf(line, "y=%f", &y);
     }
     fclose(info);
+    const int row = (int)(y / RPG_STAGE_TILE_SIZE);
+    const int column = (int)(x / RPG_STAGE_TILE_SIZE);
     if (row < 0 || row >= RPG_STAGE_ROWS || column < 0 || column >= RPG_STAGE_WORLD_COLUMNS ||
         !RpgBlockInventory_IsReferenceFolder(stage->blocks[row][column])) return;
     watcher.referenceFolderZipperCell = (RpgGridCell){ row, column };
@@ -214,8 +242,14 @@ static void ProcessChanges(RpgStage *stage, DWORD byteCount)
         relativePath[characterCount] = L'\0';
         /* build ルートの通知を入口にし、変化したマスだけ外部ファイル状態を再評価する。 */
         int row, column;
-        if (ParseCellPath(relativePath, &row, &column))
+        if (ParseCellPath(stage, relativePath, &row, &column)) {
             RpgObjectFolders_RefreshBuildCellLinkedFiles((RpgGridCell){ row, column });
+            /* A filesystem-side cell change cannot be attributed safely to a
+               single runtime helper, so let editor Stop perform its guarded
+               static repair rather than trusting the untouched-cache fast path. */
+            RpgObjectFolders_MarkEditorPreviewCellMutation((RpgGridCell){ row, column },
+                                                            stage->blocks[row][column]);
+        }
         QueueReferenceFolderZipperRequest(stage, entry->Action, relativePath);
         ApplyCellChange(stage, entry->Action, relativePath);
         if (entry->NextEntryOffset == 0) break;
@@ -253,12 +287,14 @@ static bool CreateStageBuild(int stageNumber, RpgStage *stage, const RpgAttachme
 bool RpgStageBuild_Create(int stageNumber, RpgStage *stage, const RpgAttachments *attachments,
                           Vector2 playerStartPosition)
 {
+    if (!RpgStageAuthority_CanWriteGameRuntime()) return false;
     return CreateStageBuild(stageNumber, stage, attachments, playerStartPosition, false);
 }
 
 bool RpgStageBuild_CreateEditorPreview(int stageNumber, RpgStage *stage, const RpgAttachments *attachments,
                                        Vector2 playerStartPosition)
 {
+    if (!RpgStageAuthority_CanWriteEditorRuntime()) return false;
     return CreateStageBuild(stageNumber, stage, attachments, playerStartPosition, true);
 }
 
@@ -288,19 +324,49 @@ static bool ResumeStageBuildForKind(int stageNumber, RpgStage *stage, bool isEdi
 
 bool RpgStageBuild_Resume(int stageNumber, RpgStage *stage)
 {
+    if (!RpgStageAuthority_CanWriteGameRuntime()) return false;
     return ResumeStageBuildForKind(stageNumber, stage, false);
 }
 
 bool RpgStageBuild_ResumeEditorPreview(int stageNumber, RpgStage *stage)
 {
+    if (!RpgStageAuthority_CanWriteEditorRuntime()) return false;
     return ResumeStageBuildForKind(stageNumber, stage, true);
+}
+
+bool RpgStageBuild_EnsureAllAreasGenerated(RpgStage *stage)
+{
+    int generated = 0, total = 0;
+    bool pending = false;
+    if (!RpgStageAuthority_CanWriteEditorRuntime() && !RpgStageAuthority_CanWriteGameRuntime()) return false;
+    if (stage == NULL) return false;
+    RpgBuildCellStorage_GetGenerationProgress(stage, &generated, &total, &pending);
+    if (total > 0 && generated == total && !pending) return true;
+    if (!RpgObjectFolders_EnsureAllMapsGenerated(stage)) return false;
+    RpgBuildCellStorage_GetGenerationProgress(stage, &generated, &total, &pending);
+    return total > 0 && generated == total && !pending;
+}
+
+bool RpgStageBuild_RefreshEditorPreviewCompactCells(const RpgStage *stage)
+{
+    if (!RpgStageAuthority_CanWriteEditorRuntime()) return false;
+    return RpgObjectFolders_RefreshEditorPreviewCompactCells(stage);
+}
+
+bool RpgStageBuild_RepairEditorPreview(const RpgStage *stage,
+                                       const RpgAttachments *attachments,
+                                       Vector2 playerStartPosition)
+{
+    if (!RpgStageAuthority_CanWriteEditorRuntime()) return false;
+    return RpgObjectFolders_RepairEditorPreview(stage, attachments, playerStartPosition);
 }
 
 void RpgStageBuild_Update(RpgStage *stage)
 {
 #ifdef _WIN32
     DWORD byteCount = 0;
-    RpgObjectFolders_UpdateBuildCellGeneration();
+    if (!RpgStageAuthority_CanWriteEditorRuntime() && !RpgStageAuthority_CanWriteGameRuntime()) return;
+    RpgObjectFolders_UpdateBuildCellGeneration(stage);
     if (!watcher.isWatching || watcher.event == NULL || WaitForSingleObject(watcher.event, 0) != WAIT_OBJECT_0) return;
     if (GetOverlappedResult(watcher.directory, &watcher.overlapped, &byteCount, FALSE) != 0 && byteCount > 0)
         ProcessChanges(stage, byteCount);

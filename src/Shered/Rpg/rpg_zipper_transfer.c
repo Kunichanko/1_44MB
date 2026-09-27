@@ -1,5 +1,6 @@
 #include "rpg_zipper_transfer.h"
 
+#include "rpg_block_inventory.h"
 #include "rpg_object_folder.h"
 
 /* A transfer has exactly two public policies: BLOCK creates/removes a missing
@@ -8,14 +9,32 @@
 static void SetBlockMissingState(RpgStage *stage, const RpgZipperHeldObject *target, bool missing)
 {
     RpgGridCell cell = target == NULL ? (RpgGridCell){ -1, -1 } : target->blockCell;
+    const RpgEffectShape *shape;
     if (stage == NULL || target == NULL || cell.row < 0 || cell.row >= RPG_STAGE_ROWS ||
         cell.column < 0 || cell.column >= RPG_STAGE_WORLD_COLUMNS) return;
-    if (missing) {
-        stage->missingBlockTypes[cell.row][cell.column] = target->blockType;
-        stage->blocks[cell.row][cell.column] = RPG_BLOCK_BUILD_MISSING;
-    } else if (stage->blocks[cell.row][cell.column] == RPG_BLOCK_BUILD_MISSING) {
-        stage->blocks[cell.row][cell.column] = target->blockType;
-        stage->missingBlockTypes[cell.row][cell.column] = 0;
+    shape = RpgBlockInventory_GetEffectShape(target->blockType);
+    if (shape == NULL || shape->rootType != target->blockType) {
+        if (missing) {
+            stage->missingBlockTypes[cell.row][cell.column] = target->blockType;
+            stage->blocks[cell.row][cell.column] = RPG_BLOCK_BUILD_MISSING;
+        } else if (stage->blocks[cell.row][cell.column] == RPG_BLOCK_BUILD_MISSING) {
+            stage->blocks[cell.row][cell.column] = target->blockType;
+            stage->missingBlockTypes[cell.row][cell.column] = 0;
+        }
+        return;
+    }
+    for (int index = 0; index < shape->cellCount; index++) {
+        const RpgEffectShapeCell *part = &shape->cells[index];
+        int row = cell.row + part->offsetY;
+        int column = cell.column + part->offsetX;
+        if (row < 0 || row >= RPG_STAGE_ROWS || column < 0 || column >= RPG_STAGE_WORLD_COLUMNS) continue;
+        if (missing) {
+            stage->missingBlockTypes[row][column] = part->blockType;
+            stage->blocks[row][column] = RPG_BLOCK_BUILD_MISSING;
+        } else if (stage->blocks[row][column] == RPG_BLOCK_BUILD_MISSING) {
+            stage->blocks[row][column] = part->blockType;
+            stage->missingBlockTypes[row][column] = 0;
+        }
     }
 }
 

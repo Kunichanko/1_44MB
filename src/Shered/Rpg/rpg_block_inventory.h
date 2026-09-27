@@ -85,6 +85,19 @@ typedef enum RpgBlockInventoryBorderColor {
     RPG_BLOCK_INVENTORY_BORDER_COLOR_COUNT
 } RpgBlockInventoryBorderColor;
 
+/* A stage cell has one structural owner.  Keep this independent from its
+   runtime behaviour: for example metal and push blocks are normal cells in
+   saved stage data, then become movable bodies while the game is running. */
+typedef enum RpgBlockStructureKind {
+    RPG_BLOCK_STRUCTURE_NONE = 0,
+    RPG_BLOCK_STRUCTURE_NORMAL_CELL,
+    RPG_BLOCK_STRUCTURE_SPECIAL_CELL,
+    RPG_BLOCK_STRUCTURE_COMPOSITE,
+    RPG_BLOCK_STRUCTURE_ATTACHMENT,
+    RPG_BLOCK_STRUCTURE_PROPERTY,
+    RPG_BLOCK_STRUCTURE_REFERENCE
+} RpgBlockStructureKind;
+
 typedef struct RpgBlockInventory {
     char name[RPG_BLOCK_INVENTORY_NAME_LENGTH];
     int blockTypes[RPG_BLOCK_INVENTORY_MAX_SLOTS];
@@ -133,6 +146,7 @@ bool RpgBlockInventory_IsMetalBlock(int blockType);
 bool RpgBlockInventory_IsPushBlock(int blockType);
 bool RpgBlockInventory_IsSocketSignalBlock(int blockType);
 bool RpgBlockInventory_IsSocketSignalOneWayBlock(int blockType);
+RpgBlockStructureKind RpgBlockInventory_GetStructureKind(int blockType);
 bool RpgBlockInventory_IsOrdinaryBlock(int blockType);
 int RpgBlockInventory_GetEffectRootType(int blockType);
 const RpgEffectShape *RpgBlockInventory_GetEffectShape(int blockType);

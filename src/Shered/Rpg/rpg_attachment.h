@@ -33,6 +33,8 @@ typedef struct RpgAttachment {
        positive angle; the left endpoint uses the matching negative angle. */
     float socketRightLightAngle;
     float socketLightOpacity;
+    /* 旗からエディタープレイを始める時だけ使う初期状態。通常の続きからには関与しない。 */
+    bool flagStartZipperConnected;
     bool flagRaised;
     /* Runtime-only shooter animation gate.  It is intentionally not serialized. */
     float shooterAnimationElapsed;

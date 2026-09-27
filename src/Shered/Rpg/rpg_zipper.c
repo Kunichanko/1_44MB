@@ -17,13 +17,35 @@ RpgZipper RpgZipper_Default(void)
     zipper.returnSpeed = 180.0f;
     zipper.followSpeed = 180.0f;
     zipper.launchPreviewEnabled = false;
+    RpgZipper_ClearConnection(&zipper);
     RpgZipper_ClearHeldObject(&zipper);
     return zipper;
+}
+
+bool RpgZipper_HasConnection(const RpgZipper *zipper)
+{
+    return zipper != NULL && zipper->connection.blockCell.row >= 0 &&
+           zipper->connection.blockCell.column >= 0;
+}
+
+void RpgZipper_SetConnection(RpgZipper *zipper, RpgGridCell blockCell)
+{
+    if (zipper == NULL) return;
+    zipper->connection.blockCell = blockCell;
+}
+
+void RpgZipper_ClearConnection(RpgZipper *zipper)
+{
+    if (zipper == NULL) return;
+    zipper->connection.blockCell = (RpgGridCell){ -1, -1 };
 }
 
 void RpgZipper_ClearHeldObject(RpgZipper *zipper)
 {
     if (zipper == NULL) return;
+    /* Held objects are runtime-only.  Clearing them also begins a fresh
+       Zipper session with no retained world-object connection. */
+    RpgZipper_ClearConnection(zipper);
     zipper->heldObject = (RpgZipperHeldObject){ .kind = RPG_ZIPPER_HELD_OBJECT_NONE,
                                                  .blockCell = { -1, -1 },
                                                  .movableKind = RPG_ZIPPER_MOVABLE_NONE, .dataShotIndex = -1,
@@ -139,6 +161,7 @@ bool RpgZipper_Load(const char *filePath, RpgZipper *zipper)
                       sscanf(header, "v2 %d %f %f %d", &enabled, &zipper->character.position.x,
                              &zipper->character.scale, &lineCount) == 4;
         fclose(file);
+        RpgZipper_ClearConnection(zipper);
         return loaded;
     }
     char line[128];
@@ -168,6 +191,9 @@ bool RpgZipper_Load(const char *filePath, RpgZipper *zipper)
         RpgZipper defaults = RpgZipper_Default();
         zipper->character.position = defaults.character.position;
     }
+    /* Connections name live world objects, so never persist them in the
+       static Zipper settings file. */
+    RpgZipper_ClearConnection(zipper);
     return loaded;
 }
 

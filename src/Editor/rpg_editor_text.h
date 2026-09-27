@@ -26,6 +26,9 @@ bool RpgEditorText_ShouldEndEditingOnOutsideClick(Rectangle fieldBounds, Vector2
 void RpgEditorText_SetKeyboardCapture(bool captured);
 void RpgEditorText_ClaimKeyboard(void);
 bool RpgEditorText_IsKeyboardCaptured(void);
+/* Returns true only for Escape pressed while a shared editor text field owns
+ * the keyboard.  The caller must end its active field(s) in that frame. */
+bool RpgEditorText_ConsumeEscape(void);
 void RpgEditorText_UpdateInput(char *text, size_t capacity, int *cursorIndex,
                                int *selectionAnchor, int *selectionEnd);
 

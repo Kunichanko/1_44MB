@@ -1,5 +1,0 @@
-kind=cell_block
-type=43
-id=3540
-world_x=5744.0
-world_y=240.0

@@ -45,11 +45,16 @@
 #include "rpg_stage.h"
 #include "rpg_stage_storage.h"
 #include "rpg_stage_build.h"
+#include "rpg_stage_authority.h"
 #include "rpg_wire.h"
 #include "rpg_zipper.h"
 #include "rpg_runtime_update.h"
 #include "rpg_runtime.h"
 #include "rpg_scene.h"
+#include "rpg_ui_theme.h"
+
+#undef DARKBLUE
+#define DARKBLUE RPG_UI_PRIMARY_BLUE
 
 /* NPC と Zipper は復元用の実装を保持したまま、現在のゲーム開始状態からだけ除外する。 */
 
@@ -251,6 +256,10 @@ static Rectangle GetZipperCollisionBounds(const RpgZipper *zipper)
                         spriteBounds.width * 0.60f, spriteBounds.height * 0.82f };
 }
 
+/* Shared runtime now owns launched/attached Zipper simulation.  Keep this
+   former local implementation for reference without compiling a second,
+   divergent input/connection path. */
+#if 0
 static Vector2 GetZipperCollisionCenter(const RpgZipper *zipper)
 {
     Rectangle bounds = GetZipperCollisionBounds(zipper);
@@ -437,6 +446,8 @@ static void UpdateZipperAttachedToDataShot(RpgZipper *zipper, const RpgDataShots
     *attachedDataShotIndex = -1;
 }
 
+#endif
+
 static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
                          const RpgStage *stage,
                          Camera2D camera, bool followsPlayer,
@@ -609,6 +620,7 @@ int main(void)
 {
     /* 本編はビルド済みパッケージだけを読む。編集用 Settings を直接参照しない。 */
     RpgStageStorage_SetDomain(RPG_STAGE_STORAGE_GAME_PACKAGE);
+    RpgStageAuthority_Enter(RPG_STAGE_AUTHORITY_GAME_RUNTIME);
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     InitWindow(RPG_SCREEN_WIDTH, RPG_SCREEN_HEIGHT, "1_44MB - RPG Version");
     ClearWindowState(FLAG_FULLSCREEN_MODE | FLAG_BORDERLESS_WINDOWED_MODE | FLAG_WINDOW_MAXIMIZED);
@@ -617,6 +629,11 @@ int main(void)
     /* 通常の non-client title bar はゲーム領域として利用し、上端へ近付いた時だけ
        同じ場所に本編用の操作バーを表示する。 */
     (void)RpgGameWindow_Install(GetWindowHandle(), 40.0f);
+    /* Windows does not notify raylib when the requested size is unchanged.
+       Prime its post-subclass size state once, before any game frame is shown,
+       so custom chrome never waits for the user's first resize. */
+    SetWindowSize(RPG_SCREEN_WIDTH + 1, RPG_SCREEN_HEIGHT);
+    SetWindowSize(RPG_SCREEN_WIDTH, RPG_SCREEN_HEIGHT);
     // 本編だけは32px x 24 x 14のマスを等倍で全面に表示する。
     RpgViewport_SetSize(RPG_SCREEN_WIDTH, RPG_SCREEN_HEIGHT);
     RpgViewport_Initialize();
@@ -742,8 +759,6 @@ int main(void)
     int attachedDynamicBlockIndex = -1;
     int attachedReferenceObjectIndex = -1;
     Vector2 attachedDataShotOffset = { 0.0f, 0.0f };
-    bool isZipperAttachedToBlock = false;
-    RpgGridCell zipperAttachedBlockCell = { -1, -1 };
     bool zipperPointerSelected = false;
     bool isZipperPointerFeedbackSuppressed = false;
     double lastZipperPointerClickTime = -1.0;
@@ -783,14 +798,12 @@ int main(void)
                         .zoom = RPG_SCREEN_WIDTH / (float)(RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE) };
     RpgRuntimeContext runtime = {
         .layout=&layout, .stageBackground=&stageBackground, .stage=&stage, .items=&items, .referenceDrops=&referenceDrops, .wires=&wires, .receivers=&receivers, .attachments=&attachments, .signalBlocks=&signalBlocks, .dataShots=&dataShots, .buttonEvent=&buttonEvent, .events=&events, .dialogue=&dialogue, .stage3Event=&stage3Event, .areaEntryEvents=&areaEntryEvents, .zipper=&zipper, .inspect=&inspect, .player=&player, .npc=&npc, .magnetRuntime=&magnetRuntime,
-        .dialogueIndex=&dialogueIndex, .stage3IntroIndex=&stage3IntroIndex, .inspectFunctionIndex=&inspectFunctionIndex, .inspectLineIndex=&inspectLineIndex, .inspectTarget=&inspectTarget, .isInspectMoveRunning=&isInspectMoveRunning, .inspectMoveElapsed=&inspectMoveElapsed, .inspectMoveStartX=&inspectMoveStartX, .inspectMoveStartY=&inspectMoveStartY, .activeInspectMove=&activeInspectMove, .inspectMoveTransitionElapsed=&inspectMoveTransitionElapsed, .activeWaitFunctionIndex=&activeWaitFunctionIndex, .inspectWaitElapsed=&inspectWaitElapsed, .stage3IntroShown=&stage3IntroShown, .areaEntryShown=areaEntryShown, .activeEntryEvent=&activeEntryEvent, .zipperFollowsPlayer=&zipperFollowsPlayer, .isZipperLaunched=&isZipperLaunched, .zipperLaunchVelocity=&zipperLaunchVelocity, .attachedDataShotIndex=&attachedDataShotIndex, .attachedAttachmentIndex=&attachedAttachmentIndex, .attachedDataShotOffset=&attachedDataShotOffset, .isZipperAttachedToBlock=&isZipperAttachedToBlock, .zipperAttachedBlockCell=&zipperAttachedBlockCell, .attachedDynamicBlockIndex=&attachedDynamicBlockIndex, .attachedReferenceObjectIndex=&attachedReferenceObjectIndex,
+        .dialogueIndex=&dialogueIndex, .stage3IntroIndex=&stage3IntroIndex, .inspectFunctionIndex=&inspectFunctionIndex, .inspectLineIndex=&inspectLineIndex, .inspectTarget=&inspectTarget, .isInspectMoveRunning=&isInspectMoveRunning, .inspectMoveElapsed=&inspectMoveElapsed, .inspectMoveStartX=&inspectMoveStartX, .inspectMoveStartY=&inspectMoveStartY, .activeInspectMove=&activeInspectMove, .inspectMoveTransitionElapsed=&inspectMoveTransitionElapsed, .activeWaitFunctionIndex=&activeWaitFunctionIndex, .inspectWaitElapsed=&inspectWaitElapsed, .stage3IntroShown=&stage3IntroShown, .areaEntryShown=areaEntryShown, .activeEntryEvent=&activeEntryEvent, .zipperFollowsPlayer=&zipperFollowsPlayer, .isZipperLaunched=&isZipperLaunched, .zipperLaunchVelocity=&zipperLaunchVelocity, .attachedDataShotIndex=&attachedDataShotIndex, .attachedAttachmentIndex=&attachedAttachmentIndex, .attachedDataShotOffset=&attachedDataShotOffset, .attachedDynamicBlockIndex=&attachedDynamicBlockIndex, .attachedReferenceObjectIndex=&attachedReferenceObjectIndex,
         .zipperPointerSelected=&zipperPointerSelected, .isZipperPointerFeedbackSuppressed=&isZipperPointerFeedbackSuppressed, .lastZipperPointerClickTime=&lastZipperPointerClickTime, .selectedReferencePointerTarget=&selectedReferencePointerTarget, .isReferencePointerFeedbackSuppressed=&isReferencePointerFeedbackSuppressed, .isReferencePointerPressed=&isReferencePointerPressed, .pressedReferenceTarget=&pressedReferenceTarget, .referencePressPosition=&referencePressPosition, .isReferenceDragActive=&isReferenceDragActive, .draggedReferenceTarget=&draggedReferenceTarget, .referenceDragPosition=&referenceDragPosition, .lastReferencePointerClickTime=&lastReferencePointerClickTime, .zipperAnimationElapsed=&zipperAnimationElapsed, .npcInspectCompleted=&npcInspectCompleted, .zipperInspectCompleted=&zipperInspectCompleted, .isZipperControllable=&isZipperControllable, .wasDataButtonPressed=&wasDataButtonPressed, .previousMap=&previousMap, .worldCoordinatesInitialized=&runtimeWorldCoordinatesInitialized, .cameraFollowsPlayer=&cameraFollowsPlayer, .itemMessage=itemMessage, .itemMessageSize=(int)sizeof(itemMessage), .itemMessageTimer=&itemMessageTimer, .referenceText=referenceText, .referenceTextSize=(int)sizeof(referenceText), .referenceFileName=referenceFileName, .referenceFileNameSize=(int)sizeof(referenceFileName), .isReferenceTextOpen=&isReferenceTextOpen, .camera=&camera, .zipperTexture=zipperTexture, .fileTexture=fileTexture, .scene=&scene
     };
     (void)OpenTextFile;
     (void)UpdateRpgCamera;
     (void)UpdateZipperFollow;
-    (void)UpdateLaunchedZipper;
-    (void)UpdateZipperAttachedToDataShot;
     (void)DrawRpgWorld;
     while (!WindowShouldClose()) {
         RpgViewport_Update();
@@ -870,8 +883,8 @@ int main(void)
                 isZipperConnected = false; activeSaveFlagId = 0;
                 isZipperLaunched = false; zipperLaunchVelocity = (Vector2){ 0.0f, 0.0f };
                 attachedDataShotIndex = -1; attachedAttachmentIndex = -1; attachedDynamicBlockIndex = -1; attachedReferenceObjectIndex = -1;
-                attachedDataShotOffset = (Vector2){ 0.0f, 0.0f }; isZipperAttachedToBlock = false;
-                zipperAttachedBlockCell = (RpgGridCell){ -1, -1 }; zipperPointerSelected = false;
+                attachedDataShotOffset = (Vector2){ 0.0f, 0.0f }; RpgZipper_ClearConnection(&zipper);
+                zipperPointerSelected = false;
                 isReferenceTextOpen = false; itemMessage[0] = '\0'; itemMessageTimer = 0.0f;
                 // 続きからは保存旗の土台上へ復帰し、接続済みZipperは追従状態まで同時に戻す。
                 /* Flag respawns are already in unified world coordinates. */
@@ -1041,8 +1054,7 @@ int main(void)
                 zipperFollowsPlayer = false;
                 attachedDataShotIndex = -1;
                 attachedAttachmentIndex = -1;
-                isZipperAttachedToBlock = false;
-                zipperAttachedBlockCell = (RpgGridCell){ -1, -1 };
+                RpgZipper_ClearConnection(&zipper);
                 zipperPointerSelected = false;
             } else if (!isZipperLaunched) {
                 // 帰還操作を受け付けた時点を画面に示し、Explorerの更新待ちと処理開始を区別できるようにする。
@@ -1053,8 +1065,7 @@ int main(void)
                 zipperFollowsPlayer = true;
                 attachedDataShotIndex = -1;
                 attachedAttachmentIndex = -1;
-                isZipperAttachedToBlock = false;
-                zipperAttachedBlockCell = (RpgGridCell){ -1, -1 };
+                RpgZipper_ClearConnection(&zipper);
                 // 帰還後はZipper内に見せていた対象フォルダのコピーだけを片付ける。
                 zipperPointerSelected = false;
             }
@@ -1080,18 +1091,6 @@ int main(void)
         RpgObjectFolders_UpdateDataShotLifetimes(&dataShots, &attachments, &referenceDrops);
         // 電気化で失われた弾本体のフォルダを同フレームで処理し、追加ファイルをドロップする。
         RpgObjectFolders_UpdateDataShotLifetimes(&dataShots, &attachments, &referenceDrops);
-        UpdateZipperAttachedToDataShot(&zipper, &dataShots, &attachedDataShotIndex,
-                                       attachedDataShotOffset,
-                                       &zipperFollowsPlayer, &isZipperAttachedToBlock,
-                                       &zipperAttachedBlockCell);
-        if (isZipperLaunched)
-            UpdateLaunchedZipper(&zipper, &zipperLaunchVelocity, &stage, &attachments, &dataShots,
-                                 GetFrameTime(), &isZipperLaunched, &attachedDataShotIndex,
-                                 &attachedDataShotOffset,
-                                 &isZipperAttachedToBlock, &zipperAttachedBlockCell,
-                                 &attachedAttachmentIndex);
-        else if (zipperFollowsPlayer && inspectTarget < 0 && dialogueIndex < 0 && stage3IntroIndex < 0 && !isReferenceTextOpen)
-            UpdateZipperFollow(&zipper, &player, GetFrameTime());
         /* 旧実装は同じ入力を二重処理しないよう無効化し、下の共通ランタイムへ一本化する。 */
 #if 0
         if (RpgObjectFolder_BeginZipperCommandRequest()) {
@@ -1099,7 +1098,7 @@ int main(void)
             if (attachedDataShotIndex >= 0 && attachedDataShotIndex < RPG_DATA_SHOT_MAX_COUNT &&
                 dataShots.entries[attachedDataShotIndex].active) {
                 moved = RpgObjectFolder_MoveDataShotToZipper(&dataShots.entries[attachedDataShotIndex]);
-            } else if (isZipperAttachedToBlock && zipperAttachedBlockCell.row >= 0 &&
+            } else if (zipper.isAttachedToBlock && zipperAttachedBlockCell.row >= 0 &&
                 zipperAttachedBlockCell.column >= 0) {
                 if (attachedAttachmentIndex >= 0 && attachedAttachmentIndex < attachments.count)
                     moved = RpgObjectFolder_MoveAttachmentToZipper(&attachments.entries[attachedAttachmentIndex]);
@@ -1327,7 +1326,7 @@ int main(void)
                 isReferencePointerPressed = false;
         }
         bool isZipperPointerHovered = false;
-        if ((zipperFollowsPlayer || isZipperAttachedToBlock || attachedDataShotIndex >= 0) && inspectTarget < 0 && dialogueIndex < 0 &&
+        if ((zipperFollowsPlayer || RpgZipper_HasConnection(&zipper) || attachedDataShotIndex >= 0) && inspectTarget < 0 && dialogueIndex < 0 &&
             stage3IntroIndex < 0 && !isReferenceTextOpen) {
             Vector2 pointerWorldPosition = GetScreenToWorld2D(RpgViewport_GetMousePosition(), camera);
             Rectangle zipperBounds = RpgZipper_GetSpriteBounds(&zipper.character, 380.0f);

@@ -1112,21 +1112,29 @@ FILE 37 3
 blocks\Areas\Area_9\rpg_receivers.cfg0
 FILE 41 6
 blocks\Areas\Area_9\rpg_signal_blocks.cfgv2 0
-FILE 53 41
-blocks\object_defs\cell_r07_c210_t001\object_info.txtkind=editor_cell
+FILE 60 25
+blocks\object_defs\area_x01_y02_cell_x07_y04\object_info.txttype=38
+x=6000.0
+y=144.0
+FILE 60 23
+blocks\object_defs\area_x01_y02_cell_x13_y02\object_info.txttype=1
+x=6192.0
+y=80.0
+FILE 60 41
+blocks\object_defs\area_x07_y01_cell_x10_y07\object_info.txtkind=editor_cell
 type=1
 row=7
 column=210
-FILE 53 42
-blocks\object_defs\cell_r07_c215_t042\object_info.txtkind=editor_cell
-type=42
-row=7
-column=215
-FILE 53 41
-blocks\object_defs\cell_r08_c211_t001\object_info.txtkind=editor_cell
+FILE 60 41
+blocks\object_defs\area_x07_y01_cell_x11_y08\object_info.txtkind=editor_cell
 type=1
 row=8
 column=211
+FILE 60 42
+blocks\object_defs\area_x07_y01_cell_x15_y07\object_info.txtkind=editor_cell
+type=42
+row=7
+column=215
 FILE 23 169
 blocks\rpg_dialogue.txtNPC	RPGプロトタイプへようこそ！
 NPC	この世界には三つのマップがあります。
@@ -1309,10 +1317,7 @@ FILE 40 3
 movables\Areas\Area_9\rpg_map_events.cfg0
 FILE 47 25
 movables\Areas\Area_9\rpg_reference_objects.cfgrpg_reference_objects_v2
-FILE 60 81
-movables\reference_files\reference_r03_c177\備忘録１.txtzipの操作方法
-ーースペースで射出
-ーーassyuku.cmd起動で圧縮FILE 46 40
+FILE 46 40
 object_defs\cell_r01_c013_t001\object_info.txtkind=editor_cell
 type=1
 row=1
@@ -1594,7 +1599,7 @@ FILE 15 51
 rpg_inspect.cfg0 1
 D	Dialogue1	1
 Inspect	Nothing unusual here.
-FILE 14 418
+FILE 14 417
 rpg_layout.cfg560.0 320.0 -15360.0 -32.0 180.0 1.00 1.00 1
 background=C:\Users\0420y\Documents\GitHub\144MB\1_44MB\assets\Sprite\Backgrounds\ネオン回路が照らす廃墟ジャンクヤード.png
 ground_block=C:\Users\0420y\Documents\GitHub\144MB\1_44MB\assets\Sprite\Blocks\b03.png

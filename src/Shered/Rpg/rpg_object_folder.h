@@ -93,7 +93,28 @@ bool RpgObjectFolders_ResumeEditorPreviewBuild(int stageNumber, RpgStage *stage,
 /* build/drops に残る File オブジェクトを、続きからの実行時オブジェクトへ復元する。 */
 void RpgObjectFolders_LoadReferenceDrops(RpgReferenceObjects *objects);
 bool RpgObjectFolders_IsStageBuildActive(void);
-void RpgObjectFolders_UpdateBuildCellGeneration(void);
+void RpgObjectFolders_UpdateBuildCellGeneration(const RpgStage *stage);
+/* An editor stop needs its current area plus its four direct neighbours
+   immediately.  All other areas stay in the preview generation queue. */
+bool RpgObjectFolders_EnsurePreviewNeighborhood(RpgStage *stage, int startMapIndex);
+bool RpgObjectFolders_EnsureMapGenerated(RpgStage *stage, int mapIndex);
+bool RpgObjectFolders_EnsureAllMapsGenerated(RpgStage *stage);
+/* Fast editor-preview update for an edit proven to affect only compact
+   ordinary cells.  Special-folder changes keep the normal rebuild route. */
+bool RpgObjectFolders_RefreshEditorPreviewCompactCells(const RpgStage *stage);
+/* Restore a detached editor preview after Play without deleting and rebuilding
+   unchanged static cells.  Dynamic Zipper/data-shot artifacts are discarded;
+   only missing static folders and metadata are repaired. */
+bool RpgObjectFolders_RepairEditorPreview(const RpgStage *stage,
+                                          const RpgAttachments *attachments,
+                                          Vector2 playerStartPosition);
+/* Play marks this only when a static block/reference folder is actually
+   moved or changed.  Stop can then skip the expensive static-cache audit for
+   an untouched preview while still removing transient runtime artifacts. */
+void RpgObjectFolders_BeginEditorPreviewRuntimeTracking(void);
+bool RpgObjectFolders_HasEditorPreviewStaticMutations(void);
+void RpgObjectFolders_MarkEditorPreviewStaticMutation(void);
+void RpgObjectFolders_MarkEditorPreviewCellMutation(RpgGridCell cell, int blockType);
 bool RpgObjectFolders_ReadCompactCellAvailability(bool available[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS]);
 bool RpgObjectFolders_IsBuildCellAvailable(RpgGridCell cell);
 void RpgObjectFolders_RefreshBuildCellLinkedFiles(RpgGridCell cell);

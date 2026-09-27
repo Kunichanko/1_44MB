@@ -38,9 +38,18 @@ typedef struct RpgZipperHeldObject {
 
 enum { RPG_ZIPPER_HELD_QUEUE_CAPACITY = 31 };
 
+/* A connection is an identity, not a cached collision state.  The target may
+   temporarily be absent while its folder is held by Zipper. */
+typedef struct RpgZipperConnection {
+    RpgGridCell blockCell;
+} RpgZipperConnection;
+
 typedef struct RpgZipper {
     RpgCharacter character;
     RpgInspect inspect;
+    /* Connection ownership belongs entirely to Zipper.  There is no separate
+       attached/lost flag: resolving this reference determines that state. */
+    RpgZipperConnection connection;
     float launchSpeed;
     float returnSpeed;
     float followSpeed;
@@ -69,6 +78,9 @@ void RpgZipper_ClearHeldObject(RpgZipper *zipper);
 bool RpgZipper_CanEnqueueHeldObject(const RpgZipper *zipper);
 bool RpgZipper_EnqueueHeldObject(RpgZipper *zipper, RpgZipperHeldObject object);
 void RpgZipper_RemoveNextHeldObject(RpgZipper *zipper);
+bool RpgZipper_HasConnection(const RpgZipper *zipper);
+void RpgZipper_SetConnection(RpgZipper *zipper, RpgGridCell blockCell);
+void RpgZipper_ClearConnection(RpgZipper *zipper);
 /* Zipper-owned launch/return state transition.  The caller supplies a
  * world-space aim point only after its own modal/input conditions allow the
  * action. */

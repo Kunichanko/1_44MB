@@ -5,20 +5,35 @@
 
 #include "rpg_attachment.h"
 #include "rpg_character.h"
+#include "rpg_dialogue.h"
 #include "rpg_item.h"
+#include "rpg_inspect.h"
+#include "rpg_layout.h"
 #include "rpg_map_event.h"
 #include "rpg_receiver.h"
 #include "rpg_signal_block.h"
 #include "rpg_stage.h"
+#include "rpg_stage3_event.h"
 #include "rpg_wire.h"
 #include "rpg_zipper.h"
 
-typedef struct RpgEditorPlaySnapshot {
+/*
+ * This is deliberately a runtime copy, not an undo snapshot.  The editor
+ * owns the source data; Play receives this copy and is never allowed to copy
+ * it back.  Filesystem changes made by Play are therefore dynamic runtime
+ * state, not unsaved edits to the editor document.
+ */
+typedef struct RpgEditorPlayRuntime {
     bool active;
     int mapIndex;
+    RpgLayout layout;
     RpgCharacter player;
     RpgCharacter npc;
+    RpgInspect runtimeNpcInspect;
     RpgStage stage;
+    RpgDialogue dialogue;
+    RpgStage3Event stage3Event;
+    RpgAreaEntryEvents areaEntryEvents;
     RpgItems items;
     RpgMapEvents mapEvents;
     RpgWires wires;
@@ -26,18 +41,17 @@ typedef struct RpgEditorPlaySnapshot {
     RpgAttachments attachments;
     RpgSignalBlocks signalBlocks;
     RpgZipper zipper;
-} RpgEditorPlaySnapshot;
+} RpgEditorPlayRuntime;
 
-void RpgEditorPlay_Begin(RpgEditorPlaySnapshot *snapshot, int mapIndex,
+void RpgEditorPlay_Begin(RpgEditorPlayRuntime *runtime, int mapIndex, const RpgLayout *layout,
                          const RpgCharacter *player, const RpgCharacter *npc,
-                         const RpgStage *stage, const RpgItems *items,
+                         const RpgInspect *npcInspect,
+                         const RpgStage *stage, const RpgDialogue *dialogue,
+                         const RpgStage3Event *stage3Event, const RpgAreaEntryEvents *areaEntryEvents,
+                         const RpgItems *items,
                          const RpgMapEvents *mapEvents, const RpgWires *wires,
                          const RpgReceivers *receivers, const RpgAttachments *attachments,
                          const RpgSignalBlocks *signalBlocks, const RpgZipper *zipper);
-bool RpgEditorPlay_Stop(RpgEditorPlaySnapshot *snapshot, int *mapIndex,
-                        RpgCharacter *player, RpgCharacter *npc, RpgStage *stage,
-                        RpgItems *items, RpgMapEvents *mapEvents, RpgWires *wires,
-                        RpgReceivers *receivers, RpgAttachments *attachments,
-                        RpgSignalBlocks *signalBlocks, RpgZipper *zipper);
+void RpgEditorPlay_End(RpgEditorPlayRuntime *runtime);
 
 #endif

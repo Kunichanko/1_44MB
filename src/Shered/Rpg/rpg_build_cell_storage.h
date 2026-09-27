@@ -33,6 +33,17 @@ bool RpgBuildCellStorage_Create(const RpgStage *stage, int startMapIndex,
 bool RpgBuildCellStorage_CreatePreview(const RpgStage *stage, int startMapIndex,
                                        const RpgBuildCellStorageBackend *backend);
 void RpgBuildCellStorage_Update(const RpgBuildCellStorageBackend *backend);
+/* Generate all cells belonging to one connected-world area immediately.
+   Used only when the player is about to enter an area that has not yet been
+   completed by the incremental preview builder. */
+bool RpgBuildCellStorage_EnsureMap(const RpgStage *stage, int mapIndex,
+                                   const RpgBuildCellStorageBackend *backend);
+bool RpgBuildCellStorage_RewriteGeneratedMetadata(const RpgStage *stage,
+                                                   const RpgBuildCellStorageBackend *backend);
+void RpgBuildCellStorage_BeginMetadataBatch(void);
+bool RpgBuildCellStorage_EndMetadataBatch(const RpgBuildCellStorageBackend *backend);
+void RpgBuildCellStorage_GetGenerationProgress(const RpgStage *stage, int *generatedCells,
+                                               int *totalCells, bool *isPending);
 bool RpgBuildCellStorage_EnsureCell(RpgGridCell cell, int blockType,
                                     const RpgBuildCellStorageBackend *backend);
 bool RpgBuildCellStorage_UsesMetadataForBlock(int blockType);

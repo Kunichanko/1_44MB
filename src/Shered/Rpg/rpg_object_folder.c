@@ -53,8 +53,28 @@ static char activeZipperPath[1200] = { 0 };
 static bool activeBuildPersists = false;
 /* 全マス生成中は数千件の Shell 通知をまとめ、ビルド処理が Explorer 更新で詰まらないようにする。 */
 static bool isBulkBuildOperation = false;
+/* A preview may add one cell per editor frame.  Explorer only needs a
+   coalesced directory refresh, not sixty notifications per second. */
+static unsigned int generationShellNotifyFrameCount = 0;
 /* 描画中はファイルシステムへ触れず、build の変更通知を受けたマスだけ更新する。 */
 static bool buildCellLinkedFiles[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS] = { { false } };
+/* An untouched editor Play does not alter its static preview folders.  Keep a
+ * narrow runtime flag so Stop need not re-audit every special cell merely to
+ * prove that fact.  Game builds retain their own progress semantics. */
+static bool editorPreviewStaticMutated = true;
+static bool editorPreviewMetadataMutated = true;
+static bool editorPreviewFullRepairRequired = true;
+static bool editorPreviewDirtyMaps[RPG_STAGE_MAP_COUNT] = { false };
+/* Folder identities use authored area coordinates.  Keep a tiny immutable
+   snapshot for the active build instead of leaking storage-slot columns into
+   build/ or Zipper paths. */
+static bool buildMapActive[RPG_STAGE_MAP_COUNT] = { false };
+static int buildMapGridX[RPG_STAGE_MAP_COUNT] = { 0 };
+static int buildMapGridY[RPG_STAGE_MAP_COUNT] = { 0 };
+/* Multi-cell effects have one persistent object: their root cell.  Keep the
+ * owner lookup beside the active build so every filesystem operation resolves
+ * a component cell to that same root folder. */
+static RpgGridCell buildCellOwners[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS];
 // データ弾ごとに配下を含む変更通知を持ち、毎フレームの再帰走査を避ける。
 static HANDLE dataShotFolderWatchers[RPG_DATA_SHOT_MAX_COUNT] = { NULL };
 static char dataShotFolderWatchPaths[RPG_DATA_SHOT_MAX_COUNT][1200] = { { 0 } };
@@ -62,6 +82,44 @@ static char dataShotFolderWatchPaths[RPG_DATA_SHOT_MAX_COUNT][1200] = { { 0 } };
 static HANDLE zipperStorageWatcher = NULL;
 static char zipperStorageWatchPath[1200] = { 0 };
 static unsigned long long zipperStorageBytes = 0;
+
+void RpgObjectFolders_BeginEditorPreviewRuntimeTracking(void)
+{
+    if (!activeBuildPersists) {
+        editorPreviewStaticMutated = false;
+        editorPreviewMetadataMutated = false;
+        editorPreviewFullRepairRequired = false;
+        memset(editorPreviewDirtyMaps, 0, sizeof(editorPreviewDirtyMaps));
+    }
+}
+
+bool RpgObjectFolders_HasEditorPreviewStaticMutations(void)
+{
+    return !activeBuildPersists && editorPreviewStaticMutated;
+}
+
+void RpgObjectFolders_MarkEditorPreviewStaticMutation(void)
+{
+    if (!activeBuildPersists) {
+        editorPreviewStaticMutated = true;
+        editorPreviewMetadataMutated = true;
+        editorPreviewFullRepairRequired = true;
+    }
+}
+
+void RpgObjectFolders_MarkEditorPreviewCellMutation(RpgGridCell cell, int blockType)
+{
+    int mapIndex;
+    if (activeBuildPersists || cell.row < 0 || cell.row >= RPG_STAGE_ROWS ||
+        cell.column < 0 || cell.column >= RPG_STAGE_WORLD_COLUMNS) return;
+    editorPreviewStaticMutated = true;
+    if (RpgBuildCellStorage_UsesMetadataForBlock(blockType)) editorPreviewMetadataMutated = true;
+    mapIndex = cell.column / RPG_STAGE_COLUMNS;
+    /* Multi-cell representatives can cross an area edge.  Repair the direct
+       neighbours too, but leave unrelated areas untouched. */
+    for (int index = mapIndex - 1; index <= mapIndex + 1; index++)
+        if (index >= 0 && index < RPG_STAGE_MAP_COUNT) editorPreviewDirtyMaps[index] = true;
+}
 
 static bool ToWide(const char *path, wchar_t *wide, int count)
 { return path != NULL && MultiByteToWideChar(CP_UTF8, 0, path, -1, wide, count) > 0; }
@@ -93,7 +151,7 @@ static void NotifyShellPathHierarchyChanged(const char *path);
 static void NotifyShellParentChanged(const char *path)
 {
     const char *separator;
-    char parent[1200];
+    char parent[1200], name[256];
     size_t length;
     if (path == NULL || (separator = strrchr(path, '\\')) == NULL) return;
     length = (size_t)(separator - path);
@@ -155,6 +213,48 @@ static bool FolderExistsUtf8(const char *path)
     if (!ToWide(path, wide, 1200)) return false;
     attributes = GetFileAttributesW(wide);
     return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+static void ResetBuildCellOwners(void)
+{
+    for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0;
+         column < RPG_STAGE_WORLD_COLUMNS; column++)
+        buildCellOwners[row][column] = (RpgGridCell){ row, column };
+}
+
+static void SetBuildCellOwners(const RpgStage *stage)
+{
+    ResetBuildCellOwners();
+    memset(buildMapActive, 0, sizeof(buildMapActive));
+    memset(buildMapGridX, 0, sizeof(buildMapGridX));
+    memset(buildMapGridY, 0, sizeof(buildMapGridY));
+    if (stage == NULL) return;
+    for (int mapIndex = 0; mapIndex < RPG_STAGE_MAP_COUNT; mapIndex++) {
+        buildMapActive[mapIndex] = stage->mapActive[mapIndex];
+        buildMapGridX[mapIndex] = stage->mapGridX[mapIndex];
+        buildMapGridY[mapIndex] = stage->mapGridY[mapIndex];
+    }
+    for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0;
+         column < RPG_STAGE_WORLD_COLUMNS; column++) {
+        const RpgEffectShape *shape = RpgBlockInventory_GetEffectShape(stage->blocks[row][column]);
+        if (shape == NULL || shape->rootType != stage->blocks[row][column]) continue;
+        for (int index = 0; index < shape->cellCount; index++) {
+            const RpgEffectShapeCell *part = &shape->cells[index];
+            int partRow = row + part->offsetY;
+            int partColumn = column + part->offsetX;
+            if (partRow >= 0 && partRow < RPG_STAGE_ROWS && partColumn >= 0 &&
+                partColumn < RPG_STAGE_WORLD_COLUMNS &&
+                stage->blocks[partRow][partColumn] == part->blockType)
+                buildCellOwners[partRow][partColumn] = (RpgGridCell){ row, column };
+        }
+    }
+}
+
+static RpgGridCell GetBuildCellOwner(RpgGridCell cell)
+{
+    if (activeBuildPath[0] == '\0' || cell.row < 0 || cell.row >= RPG_STAGE_ROWS ||
+        cell.column < 0 || cell.column >= RPG_STAGE_WORLD_COLUMNS) return cell;
+    return buildCellOwners[cell.row][cell.column];
 }
 
 /* Q で開く実 Zipper フォルダそのものを容量対象にし、Explorer のプロパティと一致させる。 */
@@ -247,7 +347,7 @@ static bool RPG_OBJECT_FOLDER_UNUSED GetCompactCellMetadataPath(char *path, size
 {
     char blocks[1200];
     return activeBuildPath[0] != '\0' && GetCellsPath(blocks, sizeof(blocks)) &&
-           snprintf(path, size, "%s\\cells_metadata.txt", blocks) > 0;
+           snprintf(path, size, "%s\\cells.csv", blocks) > 0;
 }
 static bool GetDropsPath(char *path, size_t size)
 {
@@ -370,16 +470,25 @@ static bool ImageObjectName(const RpgImageObject *object, char *name, size_t siz
            snprintf(name, size, "image_object_%03d_%06u", (int)object->appearance, object->id) > 0;
 }
 
+static bool BuildAreaCellName(RpgGridCell cell, char *name, size_t size)
+{
+    int areaId;
+    int localColumn;
+    if (name == NULL || cell.row < 0 || cell.row >= RPG_STAGE_ROWS ||
+        cell.column < 0 || cell.column >= RPG_STAGE_WORLD_COLUMNS) return false;
+    areaId = cell.column / RPG_STAGE_COLUMNS;
+    localColumn = cell.column % RPG_STAGE_COLUMNS;
+    if (areaId < 0 || areaId >= RPG_STAGE_MAP_COUNT || !buildMapActive[areaId]) return false;
+    return snprintf(name, size, "area_x%02d_y%02d_cell_x%02d_y%02d",
+                    buildMapGridX[areaId], buildMapGridY[areaId], localColumn, cell.row) > 0;
+}
+
 static bool BlockName(const RpgObjectFolder *folder, int blockType, char *name, size_t size)
 {
-    int identity;
-    if (folder == NULL || folder->cell.row < 0 || folder->cell.row >= RPG_STAGE_ROWS ||
-        folder->cell.column < 0 || folder->cell.column >= RPG_STAGE_WORLD_COLUMNS) return false;
-    identity = folder->cell.row * RPG_STAGE_WORLD_COLUMNS + folder->cell.column + 1;
+    if (folder == NULL) return false;
     (void)blockType;
     /* 種類を名前へ埋め込まず、マスごとに同じフォルダ名を保つ。種類は object_info.txt に記録する。 */
-    return snprintf(name, size, "cell_block_%06d_r%02d_c%03d", identity,
-                    folder->cell.row, folder->cell.column) > 0;
+    return BuildAreaCellName(folder->cell, name, size);
 }
 
 static bool ObjectPath(const char *name, bool inInbox, char *path, size_t size)
@@ -469,6 +578,21 @@ static bool HasDataShotFolderChanged(int index, const char *folder)
 static bool BlockPath(const RpgObjectFolder *folder, int blockType, bool inInbox, char *path, size_t size)
 {
     char name[256], parent[1200];
+    RpgObjectFolder owner;
+    if (folder == NULL) return false;
+    owner.cell = GetBuildCellOwner(folder->cell);
+    if (!BlockName(&owner, blockType, name, sizeof(name)) ||
+        !(inInbox ? GetInboxPath(parent, sizeof(parent)) : GetCellsPath(parent, sizeof(parent)))) return false;
+    return snprintf(path, size, "%s\\%s", parent, name) > 0;
+}
+
+/* Build creation must first materialize every grid cell in the same direct
+ * form.  Multi-cell ownership is applied afterwards by moving only component
+ * folders below their representative. */
+static bool BlockPathDirect(const RpgObjectFolder *folder, int blockType, bool inInbox,
+                            char *path, size_t size)
+{
+    char name[256], parent[1200];
     if (!BlockName(folder, blockType, name, sizeof(name)) ||
         !(inInbox ? GetInboxPath(parent, sizeof(parent)) : GetCellsPath(parent, sizeof(parent)))) return false;
     return snprintf(path, size, "%s\\%s", parent, name) > 0;
@@ -477,12 +601,13 @@ static bool BlockPath(const RpgObjectFolder *folder, int blockType, bool inInbox
 static bool DynamicBlockPath(RpgGridCell identityCell, int blockType, bool inInbox,
                              char *path, size_t size)
 {
-    char parent[1200];
+    char parent[1200], name[256];
     if (identityCell.row < 0 || identityCell.row >= RPG_STAGE_ROWS ||
         identityCell.column < 0 || identityCell.column >= RPG_STAGE_WORLD_COLUMNS ||
+        !BuildAreaCellName(identityCell, name, sizeof(name)) ||
         !(inInbox ? GetInboxPath(parent, sizeof(parent)) : GetObjectsPath(parent, sizeof(parent)))) return false;
-    return snprintf(path, size, "%s\\dynamic_block_t%03d_r%02d_c%03d", parent, blockType,
-                    identityCell.row, identityCell.column) > 0;
+    (void)blockType;
+    return snprintf(path, size, "%s\\%s", parent, name) > 0;
 }
 
 bool RpgObjectFolder_GetBlockDirectory(const RpgObjectFolder *folder, int blockType,
@@ -698,6 +823,9 @@ static bool HasExternalFiles(const char *directory)
         char name[1024], child[1200];
         if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0 ||
             wcscmp(data.cFileName, L"object_info.txt") == 0 ||
+            wcscmp(data.cFileName, L"reference_info.txt") == 0 ||
+            wcscmp(data.cFileName, L"data_shot_info.txt") == 0 ||
+            wcscmp(data.cFileName, L"image_info.txt") == 0 ||
             wcscmp(data.cFileName, L"zipper.request") == 0) continue;
         if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
             WideCharToMultiByte(CP_UTF8, 0, data.cFileName, -1, name, sizeof(name), NULL, NULL) > 0 &&
@@ -709,7 +837,10 @@ static bool HasExternalFiles(const char *directory)
     return false;
 }
 
-static bool WriteInfo(const char *folder, const char *kind, int type, int identity, Vector2 position)
+/* Every build object has this deliberately small, common base record.  Its
+   folder location identifies the object class; grid position, IDs and area
+   are derived instead of being serialized redundantly here. */
+static bool WriteObjectInfo(const char *folder, int type, Vector2 position)
 {
     char infoPath[1200];
     wchar_t wideInfoPath[1200];
@@ -718,7 +849,7 @@ static bool WriteInfo(const char *folder, const char *kind, int type, int identi
         !ToWide(infoPath, wideInfoPath, 1200)) return false;
     file = _wfopen(wideInfoPath, L"wb");
     if (file == NULL) return false;
-    fprintf(file, "kind=%s\ntype=%d\nid=%d\nworld_x=%.1f\nworld_y=%.1f\n", kind, type, identity, position.x, position.y);
+    fprintf(file, "type=%d\nx=%.1f\ny=%.1f\n", type, position.x, position.y);
     if (fclose(file) != 0) return false;
     NotifyShellChange(RPG_SHCNE_UPDATEITEM, infoPath, NULL);
     NotifyShellParentChanged(infoPath);
@@ -734,14 +865,14 @@ static bool WriteReferenceFolderInfo(const char *folder, RpgGridCell cell)
     FILE *file;
     Vector2 position = { (cell.column + 0.5f) * RPG_STAGE_TILE_SIZE,
                          (cell.row + 0.5f) * RPG_STAGE_TILE_SIZE };
-    if (folder == NULL || folder[0] == '\0' || !WriteInfo(folder, "reference_folder",
-        RPG_BLOCK_REFERENCE_FOLDER, cell.row * RPG_STAGE_WORLD_COLUMNS + cell.column + 1, position) ||
-        snprintf(infoPath, sizeof(infoPath), "%s\\object_info.txt", folder) <= 0 ||
+    if (folder == NULL || folder[0] == '\0' || !WriteObjectInfo(folder,
+        RPG_BLOCK_REFERENCE_FOLDER, position) ||
+        snprintf(infoPath, sizeof(infoPath), "%s\\reference_info.txt", folder) <= 0 ||
         !ToWide(infoPath, wideInfoPath, (int)(sizeof(wideInfoPath) / sizeof(wideInfoPath[0])))) return false;
-    file = _wfopen(wideInfoPath, L"ab");
+    file = _wfopen(wideInfoPath, L"wb");
     if (file == NULL) return false;
-    fprintf(file, "stage=%d\ncell_row=%d\ncell_column=%d\nzipper_command=zipper.cmd\n",
-            activeBuildStageNumber, cell.row, cell.column);
+    /* Stage and cell are derived from this folder's active build and x/y. */
+    fprintf(file, "zipper_command=zipper.cmd\n");
     if (fclose(file) != 0) return false;
     NotifyShellChange(RPG_SHCNE_UPDATEITEM, infoPath, NULL);
     NotifyShellParentChanged(infoPath);
@@ -762,9 +893,57 @@ static bool WriteBuildCellFolder(void *context, RpgGridCell cell, int blockType)
     (void)context;
     /* File/Folder は地形セルではない。専用の外部オブジェクト構成だけに保存し、cells には作らない。 */
     if (RpgBlockInventory_IsReferenceObject(blockType)) return true;
-    return BlockPath(&folder, blockType, false, cellPath, sizeof(cellPath)) &&
-           WriteInfo(cellPath, "cell_block", blockType,
-                     cell.row * RPG_STAGE_WORLD_COLUMNS + cell.column + 1, position);
+    return BlockPathDirect(&folder, blockType, false, cellPath, sizeof(cellPath)) &&
+           WriteObjectInfo(cellPath, blockType, position);
+}
+
+static bool CollectEffectComponentFolders(const RpgStage *stage)
+{
+    if (stage == NULL) return false;
+    for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0;
+         column < RPG_STAGE_WORLD_COLUMNS; column++) {
+        const int rootType = stage->blocks[row][column];
+        const RpgEffectShape *shape = RpgBlockInventory_GetEffectShape(rootType);
+        RpgObjectFolder root = { .cell = { row, column } };
+        char rootPath[1200], componentsPath[1200];
+        if (shape == NULL || shape->rootType != rootType || shape->cellCount <= 1) continue;
+        if (!BlockPathDirect(&root, rootType, false, rootPath, sizeof(rootPath))) return false;
+        /* Preview construction creates one area first.  A representative in a
+           later area is not ready to absorb components yet; leave it for a
+           subsequent incremental pass instead of failing the whole preview. */
+        if (!FolderExistsUtf8(rootPath)) continue;
+        if (snprintf(componentsPath, sizeof(componentsPath), "%s\\components", rootPath) <= 0 ||
+            !CreateFolderUtf8(componentsPath)) return false;
+        bool ready = true;
+        for (int index = 0; index < shape->cellCount; index++) {
+            const RpgEffectShapeCell *part = &shape->cells[index];
+            RpgGridCell partCell = { row + part->offsetY, column + part->offsetX };
+            RpgObjectFolder component = { .cell = partCell };
+            char source[1200], name[256], destination[1200];
+            /* The representative is the parent itself, not one of its children. */
+            if (part->offsetX == 0 && part->offsetY == 0) continue;
+            if (partCell.row < 0 || partCell.row >= RPG_STAGE_ROWS || partCell.column < 0 ||
+                partCell.column >= RPG_STAGE_WORLD_COLUMNS ||
+                !BlockPathDirect(&component, part->blockType, false, source, sizeof(source)) ||
+                !BlockName(&component, part->blockType, name, sizeof(name)) ||
+                snprintf(destination, sizeof(destination), "%s\\%s", componentsPath, name) <= 0) return false;
+            if (!FolderExistsUtf8(destination) && !FolderExistsUtf8(source)) { ready = false; break; }
+        }
+        if (!ready) continue;
+        for (int index = 0; index < shape->cellCount; index++) {
+            const RpgEffectShapeCell *part = &shape->cells[index];
+            RpgGridCell partCell = { row + part->offsetY, column + part->offsetX };
+            RpgObjectFolder component = { .cell = partCell };
+            char source[1200], name[256], destination[1200];
+            if (part->offsetX == 0 && part->offsetY == 0) continue;
+            if (!BlockPathDirect(&component, part->blockType, false, source, sizeof(source)) ||
+                !BlockName(&component, part->blockType, name, sizeof(name)) ||
+                snprintf(destination, sizeof(destination), "%s\\%s", componentsPath, name) <= 0) return false;
+            if (!FolderExistsUtf8(destination) &&
+                (!FolderExistsUtf8(source) || !MoveDirectory(source, destination))) return false;
+        }
+    }
+    return true;
 }
 
 static bool GetBuildCellFilePath(void *context, const char *fileName, char *path, size_t pathSize)
@@ -848,12 +1027,12 @@ static bool ClearStageRuntimeArtifacts(const char *buildPath)
         RemoveTree(path);
         if (FolderExistsUtf8(path)) return false;
     }
-    if (snprintf(path, sizeof(path), "%s\\blocks\\cells_metadata.txt", buildPath) <= 0 || !ToWide(path, widePath, 1200)) return false;
+    if (snprintf(path, sizeof(path), "%s\\blocks\\cells.csv", buildPath) <= 0 || !ToWide(path, widePath, 1200)) return false;
     /* blocks may already have been removed above.  Both a missing file and a
        missing parent mean the old compact metadata is cleanly absent. */
     if (DeleteFileW(widePath) == 0 && GetLastError() != ERROR_FILE_NOT_FOUND &&
         GetLastError() != ERROR_PATH_NOT_FOUND) return false;
-    if (snprintf(path, sizeof(path), "%s\\cells_metadata.txt", buildPath) <= 0 || !ToWide(path, widePath, 1200)) return false;
+    if (snprintf(path, sizeof(path), "%s\\cells.csv", buildPath) <= 0 || !ToWide(path, widePath, 1200)) return false;
     if (DeleteFileW(widePath) == 0 && GetLastError() != ERROR_FILE_NOT_FOUND) return false;
     return true;
 #else
@@ -863,7 +1042,7 @@ static bool ClearStageRuntimeArtifacts(const char *buildPath)
 }
 
 /* static の参照コピーを実行用へ直接複製する。Fileの不備はそのマスだけを除外し、Playは継続する。 */
-static void PrepareRuntimeReferenceFiles(RpgStage *stage)
+static void PrepareRuntimeReferenceFiles(RpgStage *stage, int onlyMapIndex)
 {
 #ifdef _WIN32
     char referenceRoot[1200], sourcePath[1200], fallbackPath[1200], folderPath[1200], targetPath[1200];
@@ -876,7 +1055,8 @@ static void PrepareRuntimeReferenceFiles(RpgStage *stage)
         const char *source;
         const char *name;
         DWORD attributes;
-        if (stage->blocks[row][column] != RPG_BLOCK_REFERENCE_FILE) continue;
+        if (stage->blocks[row][column] != RPG_BLOCK_REFERENCE_FILE ||
+            (onlyMapIndex >= 0 && column / RPG_STAGE_COLUMNS != onlyMapIndex)) continue;
         source = RpgStage_GetReferencePathAtCell(stage, row, column);
         if (snprintf(sourcePath, sizeof(sourcePath), "%s", source) <= 0 || !ToWide(sourcePath, wideSource, 1200)) goto unavailable;
         attributes = GetFileAttributesW(wideSource);
@@ -913,7 +1093,8 @@ unavailable:
         RpgReferenceObject *object = &stage->referenceObjects.entries[index];
         const char *name;
         DWORD attributes;
-        if (object->objectKind != RPG_REFERENCE_OBJECT_FILE || object->path[0] == '\0') continue;
+        if (object->objectKind != RPG_REFERENCE_OBJECT_FILE || object->path[0] == '\0' ||
+            (onlyMapIndex >= 0 && RpgStage_GetMapAtWorldPosition(stage, object->position) != onlyMapIndex)) continue;
         if (snprintf(sourcePath, sizeof(sourcePath), "%s", object->path) <= 0 ||
             !ToWide(sourcePath, wideSource, 1200)) continue;
         attributes = GetFileAttributesW(wideSource);
@@ -946,7 +1127,46 @@ unavailable:
             snprintf(object->path, sizeof(object->path), "%s", targetPath);
     }
 #else
-    (void)stage;
+    (void)stage; (void)onlyMapIndex;
+#endif
+}
+
+/* Reference folders are area-owned just like terrain cells.  In a preview,
+   create their runtime directories only for the area being made available. */
+static bool PrepareRuntimeReferenceFolders(RpgStage *stage, int onlyMapIndex)
+{
+#ifdef _WIN32
+    if (stage == NULL) return false;
+    for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0;
+         column < RPG_STAGE_WORLD_COLUMNS; column++) {
+        const char *oldPath;
+        const char *name;
+        char folderPath[1200], referenceFolders[1200];
+        if (!RpgBlockInventory_IsReferenceFolder(stage->blocks[row][column]) ||
+            (onlyMapIndex >= 0 && column / RPG_STAGE_COLUMNS != onlyMapIndex)) continue;
+        oldPath = RpgStage_GetReferencePathAtCell(stage, row, column);
+        name = strrchr(oldPath, '\\');
+        if (name == NULL) name = strrchr(oldPath, '/');
+        name = name == NULL ? oldPath : name + 1;
+        if (!GetReferenceFoldersPath(referenceFolders, sizeof(referenceFolders)) || name[0] == '\0' ||
+            snprintf(folderPath, sizeof(folderPath), "%s\\%s", referenceFolders, name) <= 0 ||
+            !CreateFolderUtf8(referenceFolders) || !CreateFolderUtf8(folderPath) ||
+            !RpgStage_SetReferencePathAtCell(stage, row, column, folderPath)) return false;
+    }
+    for (int index = 0; index < stage->referenceObjects.count; index++) {
+        RpgReferenceObject *object = &stage->referenceObjects.entries[index];
+        char referenceFolders[1200], folderPath[1200];
+        if (object->objectKind != RPG_REFERENCE_OBJECT_FOLDER ||
+            (onlyMapIndex >= 0 && RpgStage_GetMapAtWorldPosition(stage, object->position) != onlyMapIndex)) continue;
+        if (!GetReferenceFoldersPath(referenceFolders, sizeof(referenceFolders)) ||
+            snprintf(folderPath, sizeof(folderPath), "%s\\reference_%04d", referenceFolders, object->id) <= 0 ||
+            !CreateFolderUtf8(referenceFolders) || !CreateFolderUtf8(folderPath)) return false;
+        snprintf(object->path, sizeof(object->path), "%s", folderPath);
+    }
+    return true;
+#else
+    (void)stage; (void)onlyMapIndex;
+    return false;
 #endif
 }
 
@@ -1051,6 +1271,28 @@ static bool EnsureAttachment(const RpgAttachment *attachment)
 #endif
 }
 
+/* Data-shot routing is not derivable from the common record, so it belongs in
+   a separate type-specific file rather than expanding object_info.txt. */
+static bool WriteDataShotSpecificInfo(const char *folder, const RpgDataShot *shot)
+{
+#ifdef _WIN32
+    char infoPath[1200];
+    wchar_t wideInfoPath[1200];
+    FILE *file;
+    if (folder == NULL || shot == NULL ||
+        snprintf(infoPath, sizeof(infoPath), "%s\\data_shot_info.txt", folder) <= 0 ||
+        !ToWide(infoPath, wideInfoPath, (int)(sizeof(wideInfoPath) / sizeof(wideInfoPath[0])))) return false;
+    file = _wfopen(wideInfoPath, L"wb");
+    if (file == NULL) return false;
+    fprintf(file, "attachment_index=%d\npath_cell_index=%d\n",
+            shot->attachmentIndex, shot->pathCellIndex);
+    return fclose(file) == 0;
+#else
+    (void)folder; (void)shot;
+    return false;
+#endif
+}
+
 static bool EnsureDataShot(const RpgDataShot *shot, const RpgAttachments *attachments)
 {
     char source[1200], inbox[1200], objects[1200], parent[1200], attachmentSource[1200], attachmentInbox[1200];
@@ -1066,7 +1308,8 @@ static bool EnsureDataShot(const RpgDataShot *shot, const RpgAttachments *attach
     // 発射時点の装置フォルダ全体を parent に入れ、弾自身の object_info.txt は root に残す。
     const char *parentSource = FolderExistsUtf8(attachmentSource) ? attachmentSource : attachmentInbox;
     bool created = CreateFolderUtf8(objects) &&
-                   WriteInfo(source, "data_shot", 0, shot->folderSerial, shot->position) &&
+                   WriteObjectInfo(source, 0, shot->position) &&
+                   WriteDataShotSpecificInfo(source, shot) &&
                    CopyTree(parentSource, parent);
     if (created) NotifyShellPathHierarchyChanged(source);
     return created;
@@ -1084,14 +1327,12 @@ static bool EnsureImageObject(const RpgImageObject *object)
     if (FolderExistsUtf8(source) || FolderExistsUtf8(inbox)) return true;
     position = (Vector2){ RpgImageObjects_GetWorldCenterX(object, RPG_STAGE_TILE_SIZE),
                           RpgImageObjects_GetWorldCenterY(object, RPG_STAGE_TILE_SIZE) };
-    if (!CreateFolderUtf8(objects) || !WriteInfo(source, "image_object", object->appearance,
-                                                  (int)object->id, position) ||
+    if (!CreateFolderUtf8(objects) || !WriteObjectInfo(source, object->appearance, position) ||
         snprintf(infoPath, sizeof(infoPath), "%s\\image_info.txt", source) <= 0 ||
         !ToWide(infoPath, wideInfoPath, 1200)) return false;
     file = _wfopen(wideInfoPath, L"wb");
     if (file == NULL) return false;
-    fprintf(file, "row=%d\ncolumn=%d\nworld_x=%.3f\nworld_y=%.3f\nlayer=%d\nscale=%.3f\npath=%s\n",
-            object->row, object->column, position.x, position.y, (int)object->layer, object->scale,
+    fprintf(file, "layer=%d\nscale=%.3f\npath=%s\n", (int)object->layer, object->scale,
             object->path[0] != '\0' ? object->path : "-");
     if (fclose(file) != 0) return false;
     NotifyShellPathHierarchyChanged(source);
@@ -1104,7 +1345,7 @@ static bool EnsurePlayerFolder(Vector2 position)
     char objects[1200], playerFolder[1200];
     if (activeBuildPath[0] == '\0' || !GetObjectsPath(objects, sizeof(objects)) ||
         snprintf(playerFolder, sizeof(playerFolder), "%s\\Player", objects) <= 0) return false;
-    return CreateFolderUtf8(objects) && WriteInfo(playerFolder, "player", 0, 1, position);
+    return CreateFolderUtf8(objects) && WriteObjectInfo(playerFolder, 0, position);
 }
 
 static void RemovePlayerFolder(void)
@@ -1168,11 +1409,9 @@ static void UpdateDataShotProperties(int shotIndex, RpgDataShot *shot, const Rpg
 /* データ弾はマスを占有しないため、フォルダに最後のグリッド位置と親装置上の軌道位置だけを残す。 */
 static bool WriteDataShotRuntimeMetadata(RpgDataShot *shot)
 {
-    char source[1200], inbox[1200], staging[1200], infoPath[1200];
-    wchar_t wideInfoPath[1200];
+    char source[1200], inbox[1200], staging[1200];
     RpgGridCell cell;
     const char *folder = NULL;
-    FILE *file;
     if (shot == NULL || !shot->active || shot->isPreview ||
         !DataShotPath(shot, false, source, sizeof(source)) ||
         !DataShotPath(shot, true, inbox, sizeof(inbox))) return false;
@@ -1183,18 +1422,9 @@ static bool WriteDataShotRuntimeMetadata(RpgDataShot *shot)
     if (FolderExistsUtf8(source)) folder = source;
     else if (FolderExistsUtf8(inbox)) folder = inbox;
     else if (GetReturnStagingPath(source, staging, sizeof(staging)) && FolderExistsUtf8(staging)) folder = staging;
-    if (folder == NULL || snprintf(infoPath, sizeof(infoPath), "%s\\object_info.txt", folder) <= 0 ||
-        !ToWide(infoPath, wideInfoPath, 1200)) return false;
-    file = _wfopen(wideInfoPath, L"wb");
-    if (file == NULL) return false;
-    /* object_info.txt は既存の共通メタ情報。データ弾の復元情報もここへまとめる。 */
-    fprintf(file, "kind=data_shot\ntype=0\nid=%d\nworld_x=%.1f\nworld_y=%.1f\n"
-            "cell_row=%d\ncell_column=%d\nattachment_index=%d\npath_cell_index=%d\n",
-            shot->folderSerial, shot->position.x, shot->position.y,
-            cell.row, cell.column, shot->attachmentIndex, shot->pathCellIndex);
-    if (fclose(file) != 0) return false;
+    if (folder == NULL || !WriteObjectInfo(folder, 0, shot->position) ||
+        !WriteDataShotSpecificInfo(folder, shot)) return false;
     shot->metadataCell = cell;
-    NotifyShellChange(RPG_SHCNE_UPDATEITEM, infoPath, NULL);
     return true;
 }
 
@@ -1244,14 +1474,40 @@ static bool MaterializeBlockInInbox(const RpgObjectFolder *folder, int blockType
         if (!ExtractCompactCellMetadata(folder, &storedBlockType)) return false;
         position = (Vector2){ (folder->cell.column + 0.5f) * RPG_STAGE_TILE_SIZE,
                               (folder->cell.row + 0.5f) * RPG_STAGE_TILE_SIZE };
-        return WriteInfo(inbox, "cell_block", storedBlockType,
-                         folder->cell.row * RPG_STAGE_WORLD_COLUMNS + folder->cell.column + 1, position);
+        return WriteObjectInfo(inbox, storedBlockType, position);
     }
     // 通常ブロックは普段は仮想的にだけ存在し、アニメーション時にメタ情報付きで実体化する。
     position = (Vector2){ (folder->cell.column + 0.5f) * RPG_STAGE_TILE_SIZE,
                           (folder->cell.row + 0.5f) * RPG_STAGE_TILE_SIZE };
-    return WriteInfo(inbox, "block", blockType,
-                     folder->cell.row * RPG_STAGE_WORLD_COLUMNS + folder->cell.column + 1, position);
+    return WriteObjectInfo(inbox, blockType, position);
+}
+
+static void SetStageEffectFolderMissing(RpgStage *stage, RpgGridCell rootCell, int rootType, bool missing)
+{
+    const RpgEffectShape *shape;
+    if (stage == NULL || rootCell.row < 0 || rootCell.row >= RPG_STAGE_ROWS ||
+        rootCell.column < 0 || rootCell.column >= RPG_STAGE_WORLD_COLUMNS) return;
+    shape = RpgBlockInventory_GetEffectShape(rootType);
+    if (shape == NULL || shape->rootType != rootType) {
+        if (missing) {
+            stage->missingBlockTypes[rootCell.row][rootCell.column] = rootType;
+            stage->blocks[rootCell.row][rootCell.column] = RPG_BLOCK_BUILD_MISSING;
+        }
+        return;
+    }
+    for (int index = 0; index < shape->cellCount; index++) {
+        const RpgEffectShapeCell *part = &shape->cells[index];
+        int row = rootCell.row + part->offsetY;
+        int column = rootCell.column + part->offsetX;
+        if (row < 0 || row >= RPG_STAGE_ROWS || column < 0 || column >= RPG_STAGE_WORLD_COLUMNS) continue;
+        if (missing) {
+            stage->missingBlockTypes[row][column] = part->blockType;
+            stage->blocks[row][column] = RPG_BLOCK_BUILD_MISSING;
+        } else if (stage->blocks[row][column] == RPG_BLOCK_BUILD_MISSING) {
+            stage->blocks[row][column] = part->blockType;
+            stage->missingBlockTypes[row][column] = 0;
+        }
+    }
 }
 
 static void ReleaseDestroyedDataShotFolder(const char *source, const char *inbox, Vector2 position,
@@ -1336,26 +1592,13 @@ static void RemoveReferenceCellObjectFolder(const char *sourcePath)
 #ifdef _WIN32
     const char *reference;
     int row, column;
-    char cells[1200], search[1200];
-    wchar_t wideSearch[1200];
-    WIN32_FIND_DATAW data;
-    HANDLE handle;
+    char path[1200];
+    RpgObjectFolder folder;
     if (sourcePath == NULL || (reference = strstr(sourcePath, "\\reference_files\\reference_r")) == NULL ||
         sscanf(reference, "\\reference_files\\reference_r%d_c%d", &row, &column) != 2 ||
-        row < 0 || row >= RPG_STAGE_ROWS || column < 0 || column >= RPG_STAGE_WORLD_COLUMNS ||
-        !GetCellsPath(cells, sizeof(cells)) ||
-        snprintf(search, sizeof(search), "%s\\cell_block_*_r%02d_c%03d", cells, row, column) <= 0 ||
-        !ToWide(search, wideSearch, (int)(sizeof(wideSearch) / sizeof(wideSearch[0])))) return;
-    handle = FindFirstFileW(wideSearch, &data);
-    if (handle == INVALID_HANDLE_VALUE) return;
-    do {
-        char name[512], path[1200];
-        if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
-            WideCharToMultiByte(CP_UTF8, 0, data.cFileName, -1, name, sizeof(name), NULL, NULL) <= 0 ||
-            snprintf(path, sizeof(path), "%s\\%s", cells, name) <= 0) continue;
-        RemoveTree(path);
-    } while (FindNextFileW(handle, &data) != 0);
-    FindClose(handle);
+        row < 0 || row >= RPG_STAGE_ROWS || column < 0 || column >= RPG_STAGE_WORLD_COLUMNS) return;
+    folder.cell = (RpgGridCell){ row, column };
+    if (BlockPath(&folder, 0, false, path, sizeof(path))) RemoveTree(path);
 #else
     (void)sourcePath;
 #endif
@@ -1624,10 +1867,12 @@ bool RpgObjectFolder_MoveReferenceFileToZipper(const RpgReferenceObject *object)
 {
 #ifdef _WIN32
     char source[1200], zipperPath[1200], zipperDirectory[1200];
-    return ReferenceFileDirectory(object, false, source, sizeof(source)) &&
-           ReferenceFileDirectory(object, true, zipperPath, sizeof(zipperPath)) &&
-           GetInboxPath(zipperDirectory, sizeof(zipperDirectory)) && CreateFolderUtf8(zipperDirectory) &&
-           (FolderExistsUtf8(zipperPath) || MoveDirectory(source, zipperPath));
+    bool moved = ReferenceFileDirectory(object, false, source, sizeof(source)) &&
+                 ReferenceFileDirectory(object, true, zipperPath, sizeof(zipperPath)) &&
+                 GetInboxPath(zipperDirectory, sizeof(zipperDirectory)) && CreateFolderUtf8(zipperDirectory) &&
+                 (FolderExistsUtf8(zipperPath) || MoveDirectory(source, zipperPath));
+    if (moved) RpgObjectFolders_MarkEditorPreviewStaticMutation();
+    return moved;
 #else
     (void)object;
     return false;
@@ -1651,7 +1896,11 @@ bool RpgObjectFolder_MoveDataShotToZipper(RpgDataShot *shot)
 bool RpgObjectFolder_MoveBlockToZipper(const RpgObjectFolder *folder, int blockType)
 {
 #ifdef _WIN32
-    return (blockType != 0 || activeBuildPath[0] != '\0') && MaterializeBlockInInbox(folder, blockType);
+    bool moved = (blockType != 0 || activeBuildPath[0] != '\0') &&
+                 MaterializeBlockInInbox(folder, blockType);
+    if (moved && folder != NULL)
+        RpgObjectFolders_MarkEditorPreviewCellMutation(folder->cell, blockType);
+    return moved;
 #else
     (void)folder; (void)blockType; return false;
 #endif
@@ -1724,24 +1973,37 @@ bool RpgObjectFolder_ReturnDataShotFromZipper(const RpgDataShot *shot)
 bool RpgObjectFolder_RestoreDataShotFromMetadata(RpgDataShot *shot)
 {
 #ifdef _WIN32
-    char source[1200], infoPath[1200], kind[64];
+    char source[1200], infoPath[1200], specificInfoPath[1200];
     wchar_t wideInfoPath[1200];
-    int type, identity, row, column, attachmentIndex, pathCellIndex;
-    float worldX, worldY;
+    int type = -1, attachmentIndex = -1, pathCellIndex = -1;
+    float worldX = 0.0f, worldY = 0.0f;
     FILE *file;
     if (shot == NULL || !DataShotPath(shot, false, source, sizeof(source)) ||
         snprintf(infoPath, sizeof(infoPath), "%s\\object_info.txt", source) <= 0 ||
         !ToWide(infoPath, wideInfoPath, 1200)) return false;
     file = _wfopen(wideInfoPath, L"rb");
     if (file == NULL) return false;
-    bool read = fscanf(file, "kind=%63[^\n]\ntype=%d\nid=%d\nworld_x=%f\nworld_y=%f\n"
-                       "cell_row=%d\ncell_column=%d\nattachment_index=%d\npath_cell_index=%d",
-                       kind, &type, &identity, &worldX, &worldY,
-                       &row, &column, &attachmentIndex, &pathCellIndex) == 9;
+    char line[256];
+    bool haveX = false, haveY = false;
+    while (fgets(line, sizeof(line), file) != NULL) {
+        if (sscanf(line, "type=%d", &type) == 1) continue;
+        if (sscanf(line, "x=%f", &worldX) == 1) { haveX = true; continue; }
+        if (sscanf(line, "y=%f", &worldY) == 1) { haveY = true; continue; }
+    }
     fclose(file);
-    if (!read || strcmp(kind, "data_shot") != 0 || type != 0 || identity != shot->folderSerial ||
-        row < 0 || row >= RPG_STAGE_ROWS || column < 0 || column >= RPG_STAGE_WORLD_COLUMNS) return false;
-    shot->position = (Vector2){ (column + 0.5f) * RPG_STAGE_TILE_SIZE, (row + 0.5f) * RPG_STAGE_TILE_SIZE };
+    if (!haveX || !haveY || type != 0 ||
+        snprintf(specificInfoPath, sizeof(specificInfoPath), "%s\\data_shot_info.txt", source) <= 0 ||
+        !ToWide(specificInfoPath, wideInfoPath, 1200) ||
+        (file = _wfopen(wideInfoPath, L"rb")) == NULL) return false;
+    while (fgets(line, sizeof(line), file) != NULL) {
+        (void)sscanf(line, "attachment_index=%d", &attachmentIndex);
+        (void)sscanf(line, "path_cell_index=%d", &pathCellIndex);
+    }
+    fclose(file);
+    const int row = (int)(worldY / RPG_STAGE_TILE_SIZE);
+    const int column = (int)(worldX / RPG_STAGE_TILE_SIZE);
+    if (row < 0 || row >= RPG_STAGE_ROWS || column < 0 || column >= RPG_STAGE_WORLD_COLUMNS) return false;
+    shot->position = (Vector2){ worldX, worldY };
     shot->metadataCell = (RpgGridCell){ row, column };
     shot->attachmentIndex = attachmentIndex;
     shot->pathCellIndex = pathCellIndex;
@@ -1758,7 +2020,11 @@ bool RpgObjectFolder_ReturnBlockFromZipper(const RpgObjectFolder *folder, int bl
     if (activeBuildPath[0] == '\0' || !BlockPath(folder, blockType, false, source, sizeof(source)) ||
         !BlockPath(folder, blockType, true, inbox, sizeof(inbox))) return false;
     /* Compact方式でも、取得済みマスはcells内の実フォルダのまま返して読み取る。 */
-    return GetCellsPath(cells, sizeof(cells)) && CreateFolderUtf8(cells) && CompleteFolderReturn(inbox, source);
+    bool returned = GetCellsPath(cells, sizeof(cells)) && CreateFolderUtf8(cells) &&
+                    CompleteFolderReturn(inbox, source);
+    if (returned && folder != NULL)
+        RpgObjectFolders_MarkEditorPreviewCellMutation(folder->cell, blockType);
+    return returned;
 #else
     (void)folder; (void)blockType; return false;
 #endif
@@ -1768,10 +2034,12 @@ bool RpgObjectFolder_ReturnReferenceFileFromZipper(const RpgReferenceObject *obj
 {
 #ifdef _WIN32
     char source[1200], zipperPath[1200];
-    return activeBuildPath[0] != '\0' &&
-           ReferenceFileDirectory(object, false, source, sizeof(source)) &&
-           ReferenceFileDirectory(object, true, zipperPath, sizeof(zipperPath)) &&
-           CompleteFolderReturn(zipperPath, source);
+    bool returned = activeBuildPath[0] != '\0' &&
+                    ReferenceFileDirectory(object, false, source, sizeof(source)) &&
+                    ReferenceFileDirectory(object, true, zipperPath, sizeof(zipperPath)) &&
+                    CompleteFolderReturn(zipperPath, source);
+    if (returned) RpgObjectFolders_MarkEditorPreviewStaticMutation();
+    return returned;
 #else
     (void)object;
     return false;
@@ -1785,8 +2053,7 @@ bool RpgObjectFolder_EnsureDynamicBlock(RpgGridCell identityCell, int blockType,
     if (!DynamicBlockPath(identityCell, blockType, false, source, sizeof(source)) ||
         !DynamicBlockPath(identityCell, blockType, true, inbox, sizeof(inbox))) return false;
     if (FolderExistsUtf8(source) || FolderExistsUtf8(inbox)) return true;
-    return WriteInfo(source, "dynamic_block", blockType,
-                     identityCell.row * RPG_STAGE_WORLD_COLUMNS + identityCell.column + 1, position);
+    return WriteObjectInfo(source, blockType, position);
 #else
     (void)identityCell; (void)blockType; (void)position; return false;
 #endif
@@ -1800,8 +2067,7 @@ bool RpgObjectFolder_MoveDynamicBlockToZipper(RpgGridCell identityCell, int bloc
         !DynamicBlockPath(identityCell, blockType, false, source, sizeof(source)) ||
         !DynamicBlockPath(identityCell, blockType, true, inbox, sizeof(inbox)) ||
         !GetInboxPath(parent, sizeof(parent)) || !CreateFolderUtf8(parent) ||
-        !WriteInfo(source, "dynamic_block", blockType,
-                   identityCell.row * RPG_STAGE_WORLD_COLUMNS + identityCell.column + 1, position)) return false;
+        !WriteObjectInfo(source, blockType, position)) return false;
     return FolderExistsUtf8(inbox) || MoveDirectory(source, inbox);
 #else
     (void)identityCell; (void)blockType; (void)position; return false;
@@ -1816,8 +2082,7 @@ bool RpgObjectFolder_BeginReturnDynamicBlockFromZipper(RpgGridCell identityCell,
     if (activeBuildPath[0] == '\0' ||
         !DynamicBlockPath(identityCell, blockType, false, source, sizeof(source)) ||
         !DynamicBlockPath(identityCell, blockType, true, inbox, sizeof(inbox)) ||
-        !WriteInfo(inbox, "dynamic_block", blockType,
-                   identityCell.row * RPG_STAGE_WORLD_COLUMNS + identityCell.column + 1, position)) return false;
+        !WriteObjectInfo(inbox, blockType, position)) return false;
     return BeginFolderReturn(inbox, source);
 #else
     (void)identityCell; (void)blockType; (void)position; return false;
@@ -1833,8 +2098,7 @@ bool RpgObjectFolder_ReturnDynamicBlockFromZipper(RpgGridCell identityCell, int 
         !DynamicBlockPath(identityCell, blockType, false, source, sizeof(source)) ||
         !DynamicBlockPath(identityCell, blockType, true, inbox, sizeof(inbox)) ||
         !GetReturnStagingPath(source, staging, sizeof(staging)) ||
-        !WriteInfo(staging, "dynamic_block", blockType,
-                   identityCell.row * RPG_STAGE_WORLD_COLUMNS + identityCell.column + 1, position)) return false;
+        !WriteObjectInfo(staging, blockType, position)) return false;
     return CompleteFolderReturn(inbox, source);
 #else
     (void)identityCell; (void)blockType; (void)position; return false;
@@ -1989,6 +2253,8 @@ bool RpgObjectFolders_BeginStageBuild(int stageNumber, RpgStage *stage,
     snprintf(activeBuildPath, sizeof(activeBuildPath), "%s", buildPath);
     activeBuildStageNumber = stageNumber;
     activeBuildPersists = !isSimpleBuild;
+    generationShellNotifyFrameCount = 0;
+    SetBuildCellOwners(stage);
     CloseZipperStorageWatcher();
     zipperStorageBytes = 0;
     activeZipperPath[0] = '\0';
@@ -2014,48 +2280,35 @@ bool RpgObjectFolders_BeginStageBuild(int stageNumber, RpgStage *stage,
     if (playerStartMap < 0) playerStartMap = 0;
     if (playerStartMap >= RPG_STAGE_MAP_COUNT) playerStartMap = RPG_STAGE_MAP_COUNT - 1;
     RpgBuildCellStorageBackend storageBackend = GetBuildCellStorageBackend();
+#if 0 /* Full synchronous editor-preview route: retain for an immediate rollback. */
+    if (!RpgBuildCellStorage_Create(stage, playerStartMap, &storageBackend)) {
+#else
     if (!(isSimpleBuild ? RpgBuildCellStorage_CreatePreview(stage, playerStartMap, &storageBackend) :
                           RpgBuildCellStorage_Create(stage, playerStartMap, &storageBackend))) {
+#endif
         RpgObjectFolders_EndStageBuild();
         isBulkBuildOperation = false;
         return false;
     }
-    PrepareRuntimeReferenceFiles(stage);
-    /* Folder は設計側では名前だけを持ち、実行時の実体はこの動的ディレクトリへ作る。 */
-    for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
-        const char *oldPath;
-        const char *name;
-        char folderPath[1200];
-        if (!RpgBlockInventory_IsReferenceFolder(stage->blocks[row][column])) continue;
-        oldPath = RpgStage_GetReferencePathAtCell(stage, row, column);
-        name = strrchr(oldPath, '\\');
-        if (name == NULL) name = strrchr(oldPath, '/');
-        name = name == NULL ? oldPath : name + 1;
-        {
-            char referenceFolders[1200];
-            if (!GetReferenceFoldersPath(referenceFolders, sizeof(referenceFolders)) ||
-                name[0] == '\0' || snprintf(folderPath, sizeof(folderPath), "%s\\%s", referenceFolders, name) <= 0 ||
-                !CreateFolderUtf8(referenceFolders) || !CreateFolderUtf8(folderPath) ||
-                !RpgStage_SetReferencePathAtCell(stage, row, column, folderPath)) {
-                RpgObjectFolders_EndStageBuild(); isBulkBuildOperation = false; return false;
-            }
-        }
-    }
-    /* Folder objects belong to movables as well.  Create their runtime
-       directory independently of any map cell. */
-    for (int index = 0; index < stage->referenceObjects.count; index++) {
-        RpgReferenceObject *object = &stage->referenceObjects.entries[index];
-        char referenceFolders[1200], folderPath[1200];
-        if (object->objectKind != RPG_REFERENCE_OBJECT_FOLDER) continue;
-        /* Runtime directories use only the persistent id.  Editor-visible
-           folder labels may contain arbitrary Windows names, but must never
-           become a path component of the preview cache. */
-        if (!GetReferenceFoldersPath(referenceFolders, sizeof(referenceFolders)) ||
-            snprintf(folderPath, sizeof(folderPath), "%s\\reference_%04d", referenceFolders, object->id) <= 0 ||
-            !CreateFolderUtf8(referenceFolders) || !CreateFolderUtf8(folderPath)) {
+    if (isSimpleBuild) {
+        /* Stop returns the editor quickly with the playable local cross ready.
+           The queued maps are completed by editor frames afterwards. */
+        if (!RpgObjectFolders_EnsurePreviewNeighborhood(stage, playerStartMap)) {
             RpgObjectFolders_EndStageBuild(); isBulkBuildOperation = false; return false;
         }
-        snprintf(object->path, sizeof(object->path), "%s", folderPath);
+    } else {
+        /* Every cell is generated in its normal direct form first.  Only after
+           generation do representative folders absorb their non-root components. */
+        if (!CollectEffectComponentFolders(stage)) {
+            RpgObjectFolders_EndStageBuild();
+            isBulkBuildOperation = false;
+            return false;
+        }
+        PrepareRuntimeReferenceFiles(stage, -1);
+        /* Folder は設計側では名前だけを持ち、実行時の実体はこの動的ディレクトリへ作る。 */
+        if (!PrepareRuntimeReferenceFolders(stage, -1)) {
+            RpgObjectFolders_EndStageBuild(); isBulkBuildOperation = false; return false;
+        }
     }
     RpgObjectFolders_PrepareAttachmentFolders(attachments);
     RpgObjectFolders_PrepareReferenceFolderMetadata(stage);
@@ -2091,18 +2344,19 @@ static bool ResumeStageBuildForKind(int stageNumber, RpgStage *stage, RpgStageRu
     snprintf(activeBuildPath, sizeof(activeBuildPath), "%s", buildPath);
     activeBuildStageNumber = stageNumber;
     activeBuildPersists = runtimeKind == RPG_STAGE_RUNTIME_GAME;
+    SetBuildCellOwners(stage);
     CloseZipperStorageWatcher();
     zipperStorageBytes = 0;
     activeZipperPath[0] = '\0';
     RpgExplorerLauncher_SetZipperDirectory(NULL);
     /* データ弾など、マスに定着しない実行時オブジェクトは再開時に持ち越さない。 */
     (void)RpgStageStorage_RepairReferenceFileCopies(stageNumber, stage);
-    PrepareRuntimeReferenceFiles(stage);
+    PrepareRuntimeReferenceFiles(stage, -1);
     RemoveTransientDataShotFolders();
     if (GetObjectsPath(movablesPath, sizeof(movablesPath)) &&
         snprintf(zipperPath, sizeof(zipperPath), "%s\\Zipper", movablesPath) > 0 &&
         FolderExistsUtf8(zipperPath)) (void)SetActiveZipperPath(zipperPath);
-    /* フォルダを取り込んだセルは cells_metadata.txt から欠損として復元する。 */
+    /* フォルダを取り込んだセルは cells.csv から欠損として復元する。 */
     storageBackend = GetBuildCellStorageBackend();
     (void)RpgBuildCellStorage_ApplyProgressState(stage, &storageBackend);
     /* 特殊ブロックはセルごとのオブジェクトフォルダが正本。格納済みでフォルダが無ければ復活させない。 */
@@ -2111,10 +2365,15 @@ static bool ResumeStageBuildForKind(int stageNumber, RpgStage *stage, RpgStageRu
         RpgObjectFolder folder = { .cell = { row, column } };
         char objectPath[1200];
         int blockType = stage->blocks[row][column];
+        const RpgEffectShape *shape = RpgBlockInventory_GetEffectShape(blockType);
         if (RpgBlockInventory_IsReferenceObject(blockType) ||
             RpgBuildCellStorage_UsesMetadataForBlock(blockType) || blockType == RPG_BLOCK_BUILD_MISSING ||
             !BlockPath(&folder, blockType, false, objectPath, sizeof(objectPath))) continue;
-        if (!FolderExistsUtf8(objectPath)) stage->blocks[row][column] = RPG_BLOCK_BUILD_MISSING;
+        /* The root directory owns every component folder.  Do not load or
+           validate component cells independently. */
+        if (shape != NULL && shape->rootType != blockType) continue;
+        if (!FolderExistsUtf8(objectPath))
+            SetStageEffectFolderMissing(stage, (RpgGridCell){ row, column }, blockType, true);
     }
     return true;
 #else
@@ -2159,8 +2418,8 @@ void RpgObjectFolders_LoadReferenceDrops(RpgReferenceObjects *objects)
             snprintf(infoPath, sizeof(infoPath), "%s\\object_info.txt", folderPath) <= 0 ||
             !ToWide(infoPath, wideInfoPath, 1200) || (info = _wfopen(wideInfoPath, L"rb")) == NULL) continue;
         while (fgets(line, sizeof(line), info) != NULL) {
-            (void)sscanf(line, "world_x=%f", &x);
-            (void)sscanf(line, "world_y=%f", &y);
+            (void)sscanf(line, "x=%f", &x);
+            (void)sscanf(line, "y=%f", &y);
         }
         fclose(info);
         if (snprintf(childSearch, sizeof(childSearch), "%s\\*", folderPath) <= 0 ||
@@ -2192,15 +2451,220 @@ void RpgObjectFolders_LoadReferenceDrops(RpgReferenceObjects *objects)
 #endif
 }
 
-void RpgObjectFolders_UpdateBuildCellGeneration(void)
+void RpgObjectFolders_UpdateBuildCellGeneration(const RpgStage *stage)
 {
 #ifdef _WIN32
-    if (activeBuildPath[0] == '\0') return;
+    int generated = 0, total = 0;
+    bool pending = false;
+    if (activeBuildPath[0] == '\0' || stage == NULL) return;
+    RpgBuildCellStorage_GetGenerationProgress(stage, &generated, &total, &pending);
+    if (!pending) return;
     RpgBuildCellStorageBackend storageBackend = GetBuildCellStorageBackend();
     isBulkBuildOperation = true;
     RpgBuildCellStorage_Update(&storageBackend);
     isBulkBuildOperation = false;
+    RpgBuildCellStorage_GetGenerationProgress(stage, &generated, &total, &pending);
+    generationShellNotifyFrameCount++;
+    if (!pending || generationShellNotifyFrameCount >= 15U) {
+        NotifyShellChange(RPG_SHCNE_UPDATEDIR, activeBuildPath, NULL);
+        generationShellNotifyFrameCount = 0;
+    }
+#endif
+}
+
+bool RpgObjectFolders_EnsureMapGenerated(RpgStage *stage, int mapIndex)
+{
+#ifdef _WIN32
+    RpgBuildCellStorageBackend storageBackend;
+    bool generated;
+    if (activeBuildPath[0] == '\0' || stage == NULL) return false;
+    storageBackend = GetBuildCellStorageBackend();
+    isBulkBuildOperation = true;
+    generated = RpgBuildCellStorage_EnsureMap(stage, mapIndex, &storageBackend);
+    if (generated) {
+        generated = CollectEffectComponentFolders(stage);
+        if (generated) {
+            PrepareRuntimeReferenceFiles(stage, mapIndex);
+            generated = PrepareRuntimeReferenceFolders(stage, mapIndex);
+        }
+    }
+    isBulkBuildOperation = false;
+    if (generated) NotifyShellChange(RPG_SHCNE_UPDATEDIR, activeBuildPath, NULL);
+    return generated;
+#else
+    (void)stage; (void)mapIndex;
+    return false;
+#endif
+}
+
+bool RpgObjectFolders_EnsurePreviewNeighborhood(RpgStage *stage, int startMapIndex)
+{
+#ifdef _WIN32
+    const RpgAreaDirection directions[] = { RPG_AREA_LEFT, RPG_AREA_RIGHT, RPG_AREA_UP, RPG_AREA_DOWN };
+    if (stage == NULL || !RpgStage_IsMapActive(stage, startMapIndex) ||
+        !RpgObjectFolders_EnsureMapGenerated(stage, startMapIndex)) return false;
+    for (int direction = 0; direction < (int)(sizeof(directions) / sizeof(directions[0])); direction++) {
+        int adjacentMap = RpgStage_GetAdjacentMap(stage, startMapIndex, directions[direction]);
+        if (adjacentMap >= 0 && !RpgObjectFolders_EnsureMapGenerated(stage, adjacentMap)) return false;
+    }
+    return true;
+#else
+    (void)stage; (void)startMapIndex;
+    return false;
+#endif
+}
+
+bool RpgObjectFolders_EnsureAllMapsGenerated(RpgStage *stage)
+{
+#ifdef _WIN32
+    RpgBuildCellStorageBackend storageBackend;
+    if (stage == NULL) return false;
+    storageBackend = GetBuildCellStorageBackend();
+    RpgBuildCellStorage_BeginMetadataBatch();
+    for (int mapIndex = 0; mapIndex < RPG_STAGE_MAP_COUNT; mapIndex++) {
+        if (!RpgStage_IsMapActive(stage, mapIndex)) continue;
+        if (!RpgObjectFolders_EnsureMapGenerated(stage, mapIndex)) {
+            (void)RpgBuildCellStorage_EndMetadataBatch(&storageBackend);
+            return false;
+        }
+    }
+    if (!RpgBuildCellStorage_EndMetadataBatch(&storageBackend)) return false;
+    return true;
+#else
+    (void)stage;
+    return false;
+#endif
+}
+
+bool RpgObjectFolders_RefreshEditorPreviewCompactCells(const RpgStage *stage)
+{
+#ifdef _WIN32
+    RpgBuildCellStorageBackend storageBackend;
+    int generated = 0, total = 0;
+    bool pending = false;
+    if (stage == NULL || activeBuildPath[0] == '\0' || activeBuildPersists) return false;
+    RpgBuildCellStorage_GetGenerationProgress(stage, &generated, &total, &pending);
+    if (pending || total == 0 || generated != total) return false;
+    storageBackend = GetBuildCellStorageBackend();
+    isBulkBuildOperation = true;
+    bool updated = RpgBuildCellStorage_RewriteGeneratedMetadata(stage, &storageBackend);
+    isBulkBuildOperation = false;
+    if (updated) NotifyShellChange(RPG_SHCNE_UPDATEDIR, activeBuildPath, NULL);
+    return updated;
+#else
+    (void)stage;
+    return false;
+#endif
+}
+
+bool RpgObjectFolders_RepairEditorPreview(const RpgStage *stage,
+                                          const RpgAttachments *attachments,
+                                          Vector2 playerStartPosition)
+{
+#ifdef _WIN32
+    RpgBuildCellStorageBackend storageBackend;
+    char zipperDirectory[1200];
+    bool repaired = true;
+    bool staticMutated;
+    bool fullRepair;
+    /* Repair must publish the editor's static source, but it may need runtime
+       paths while copying reference files.  Never write those generated paths
+       back into the editor's RpgStage. */
+    static RpgStage repairRuntimeStage;
+    if (stage == NULL || attachments == NULL || activeBuildPath[0] == '\0' || activeBuildPersists)
+        return false;
+    /* The editor snapshot has already restored the static stage.  Drop only
+       transient Play artifacts; never clear cells/, objects/, or references/
+       as a whole.  Captured folders are recreated below at their static cell. */
+    if (GetInboxPath(zipperDirectory, sizeof(zipperDirectory))) ClearFolderContents(zipperDirectory);
+    RemoveTransientDataShotFolders();
+
+    staticMutated = RpgObjectFolders_HasEditorPreviewStaticMutations();
+    fullRepair = editorPreviewFullRepairRequired;
+    if (!staticMutated) {
+        /* No static folder was moved during this Play.  The snapshot restored
+           the same stage already represented by the preview cache, so retain
+           all special folders without revalidating them one by one. */
+    } else {
+
+    if (fullRepair || editorPreviewMetadataMutated) {
+    /* Ordinary terrain remains one metadata file.  This is a single write,
+       even if Play changed many compact cells through eat/spit. */
+    storageBackend = GetBuildCellStorageBackend();
+    isBulkBuildOperation = true;
+    if (!RpgBuildCellStorage_RewriteGeneratedMetadata(stage, &storageBackend)) {
+        /* Resume may have reattached after the low-priority preview queue was
+           consumed.  In that state its in-memory metadata cache is no longer
+           writable, but we can still republish the one compact metadata file
+           without clearing the preview directory. */
+        repaired = RpgBuildCellStorage_Create(stage, 0, &storageBackend);
+    }
+    }
+
+    /* Physical static cells are exceptional.  Check their expected folder and
+       recreate only a folder that Play removed or moved into Zipper.  Effect
+       components are rebuilt from their representative afterwards, retaining
+       the one-root ownership rule. */
+    for (int row = 0; repaired && row < RPG_STAGE_ROWS; row++) for (int column = 0;
+         repaired && column < RPG_STAGE_WORLD_COLUMNS; column++) {
+        int blockType = stage->blocks[row][column];
+        RpgObjectFolder folder = { .cell = { row, column } };
+        const RpgEffectShape *shape = RpgBlockInventory_GetEffectShape(blockType);
+        char path[1200];
+        if (!fullRepair && !editorPreviewDirtyMaps[column / RPG_STAGE_COLUMNS]) continue;
+        if (RpgBuildCellStorage_UsesMetadataForBlock(blockType) ||
+            RpgBlockInventory_IsReferenceObject(blockType) ||
+            blockType == RPG_BLOCK_BUILD_MISSING) continue;
+        if (shape != NULL && shape->rootType == blockType && shape->cellCount > 1 &&
+            BlockPathDirect(&folder, blockType, false, path, sizeof(path))) {
+            char components[1200];
+            if (snprintf(components, sizeof(components), "%s\\components", path) <= 0) {
+                repaired = false;
+                break;
+            }
+            /* Components may have been captured as part of their root.  Rebuild
+               this small subtree instead of scanning/rebuilding unrelated cells. */
+            RemoveTree(components);
+        }
+        if (!BlockPathDirect(&folder, blockType, false, path, sizeof(path)) ||
+            (!FolderExistsUtf8(path) && !WriteBuildCellFolder(NULL, folder.cell, blockType))) {
+            repaired = false;
+            break;
+        }
+    }
+    if (repaired) repaired = CollectEffectComponentFolders(stage);
+    if (repaired) {
+        /* Reference files/folders, attachments, PNG objects and Player have
+           independent object roots.  Their helpers only ensure the entries
+           currently present in the restored editor snapshot. */
+        repairRuntimeStage = *stage;
+        PrepareRuntimeReferenceFiles(&repairRuntimeStage, -1);
+        repaired = PrepareRuntimeReferenceFolders(&repairRuntimeStage, -1);
+        if (repaired) {
+            RpgObjectFolders_PrepareAttachmentFolders(attachments);
+            RpgObjectFolders_PrepareReferenceFolderMetadata(&repairRuntimeStage);
+            RpgObjectFolders_PrepareImageObjectFolders(&repairRuntimeStage.imageObjects);
+            repaired = EnsurePlayerFolder(playerStartPosition);
+        }
+    }
+    }
+    isBulkBuildOperation = false;
+    if (!repaired) {
+        return false;
+    }
+    RpgObjectFolder_PrepareZipperAnimationCommand();
+    editorPreviewStaticMutated = false;
+    editorPreviewMetadataMutated = false;
+    editorPreviewFullRepairRequired = false;
+    memset(editorPreviewDirtyMaps, 0, sizeof(editorPreviewDirtyMaps));
     NotifyShellChange(RPG_SHCNE_UPDATEDIR, activeBuildPath, NULL);
+    NotifyShellParentChanged(activeBuildPath);
+    return true;
+#else
+    (void)stage;
+    (void)attachments;
+    (void)playerStartPosition;
+    return false;
 #endif
 }
 
@@ -2251,6 +2715,7 @@ void RpgObjectFolders_EndStageBuild(void)
     if (!activeBuildPersists) RemovePlayerFolder();
     else RemoveTransientDataShotFolders();
     activeBuildPath[0] = '\0';
+    ResetBuildCellOwners();
     CloseZipperStorageWatcher();
     zipperStorageBytes = 0;
     activeZipperPath[0] = '\0';
@@ -2270,6 +2735,7 @@ void RpgObjectFolders_AbandonStageBuild(void)
        BeginStageBuild already clears this exact runtime directory before it
        generates the new preview, so just detach from it now. */
     activeBuildPath[0] = '\0';
+    ResetBuildCellOwners();
     CloseZipperStorageWatcher();
     zipperStorageBytes = 0;
     activeZipperPath[0] = '\0';

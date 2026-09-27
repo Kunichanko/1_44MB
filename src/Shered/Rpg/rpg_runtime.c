@@ -27,6 +27,10 @@
 #include "rpg_zipper_transfer.h"
 #include "rpg_runtime_update.h"
 #include "rpg_scene.h"
+#include "rpg_ui_theme.h"
+
+#undef DARKBLUE
+#define DARKBLUE RPG_UI_PRIMARY_BLUE
 static const float zipperImportAnimationDuration = 0.60f;
 static Texture2D folderReturnIcon = { 0 };
 static bool hasLoadedFolderReturnIcon = false;
@@ -634,6 +638,7 @@ void RpgRuntime_StartFollowingZipper(RpgZipper *zipper, const RpgCharacter *play
                                             player->position.y };
     zipper->character.verticalSpeed = 0.0f;
     zipper->character.isGrounded = true;
+    RpgZipper_ClearConnection(zipper);
     if (zipperFollowsPlayer != NULL) *zipperFollowsPlayer = true;
     if (isZipperControllable != NULL) *isZipperControllable = true;
     if (zipperInspectCompleted != NULL) *zipperInspectCompleted = true;
@@ -647,6 +652,33 @@ static Texture2D GetFolderReturnIcon(void)
         hasLoadedFolderReturnIcon = true;
     }
     return folderReturnIcon;
+}
+
+/* Kept near the return path so the post-spit attachment uses the same
+ * collision-centre placement as a launched Zipper. */
+static void MoveZipperCollisionCenterTo(RpgZipper *zipper, Vector2 targetCenter);
+
+static bool IsZipperConnectionResolved(const RpgZipper *zipper, const RpgStage *stage)
+{
+    RpgGridCell cell;
+    if (!RpgZipper_HasConnection(zipper) || stage == NULL) return false;
+    cell = zipper->connection.blockCell;
+    return cell.row >= 0 && cell.row < RPG_STAGE_ROWS && cell.column >= 0 &&
+           cell.column < RPG_STAGE_WORLD_COLUMNS && stage->blocks[cell.row][cell.column] != 0 &&
+           stage->blocks[cell.row][cell.column] != RPG_BLOCK_BUILD_MISSING;
+}
+
+static void UpdateZipperConnection(RpgRuntimeContext *context)
+{
+    if (context == NULL || context->zipper == NULL || context->stage == NULL ||
+        context->zipperFollowsPlayer == NULL || context->isZipperLaunched == NULL ||
+        !IsZipperConnectionResolved(context->zipper, context->stage)) return;
+    *context->zipperFollowsPlayer = false;
+    *context->isZipperLaunched = false;
+    MoveZipperCollisionCenterTo(context->zipper,
+                                RpgStage_GetWorldPositionForCell(context->stage,
+                                                                 context->zipper->connection.blockCell.row,
+                                                                 context->zipper->connection.blockCell.column));
 }
 
 #if 0 /* superseded by rpg_zipper_transfer: keep the prior local path as reference only */
@@ -838,7 +870,7 @@ static bool CaptureCurrentZipperObject(RpgRuntimeContext *context)
                                                     (RpgReferenceTarget){ .kind = RPG_REFERENCE_TARGET_DROP,
                                                                           .row = -1, .column = -1,
                                                                           .dropIndex = referenceIndex });
-    } else if ((*context->isZipperAttachedToBlock) && (*context->zipperAttachedBlockCell).row >= 0 &&
+    } else if (context->zipper->isAttachedToBlock && (*context->zipperAttachedBlockCell).row >= 0 &&
                (*context->zipperAttachedBlockCell).column >= 0) {
         if ((*context->attachedAttachmentIndex) >= 0 && (*context->attachedAttachmentIndex) < (*context->attachments).count) {
             RpgAttachment *attachment = &(*context->attachments).entries[(*context->attachedAttachmentIndex)];
@@ -868,7 +900,7 @@ static bool CaptureCurrentZipperObject(RpgRuntimeContext *context)
     (*context->attachedAttachmentIndex) = -1;
     if (context->attachedDynamicBlockIndex != NULL) *context->attachedDynamicBlockIndex = -1;
     if (context->attachedReferenceObjectIndex != NULL) *context->attachedReferenceObjectIndex = -1;
-    (*context->isZipperAttachedToBlock) = false;
+    context->zipper->isAttachedToBlock = false;
     (*context->zipperAttachedBlockCell) = (RpgGridCell){ -1, -1 };
     return true;
 }
@@ -919,6 +951,27 @@ static bool CompleteZipperHeldObjectReturn(RpgRuntimeContext *context)
     RpgZipperHeldObject *target = &context->zipper->returningObject;
     bool returned = RpgZipperTransfer_CompleteSpit(&transfer, target);
     if (returned) {
+        /* A block return only makes its connection resolvable again.  The
+           connection resolver below performs the actual reattachment. */
+        if (target->kind == RPG_ZIPPER_HELD_OBJECT_MOVABLE &&
+                   target->movableKind == RPG_ZIPPER_MOVABLE_DYNAMIC_BLOCK &&
+                   context->magnetRuntime != NULL && context->zipperFollowsPlayer != NULL &&
+                   context->isZipperLaunched != NULL &&
+                   context->attachedDynamicBlockIndex != NULL &&
+                   target->dynamicBlockIndex >= 0 &&
+                   target->dynamicBlockIndex < context->magnetRuntime->metalCount) {
+            const RpgMagnetMetal *block = &context->magnetRuntime->metals[target->dynamicBlockIndex];
+            *context->zipperFollowsPlayer = false;
+            *context->isZipperLaunched = false;
+            RpgZipper_ClearConnection(context->zipper);
+            *context->attachedDynamicBlockIndex = target->dynamicBlockIndex;
+            if (context->attachedDataShotIndex != NULL) *context->attachedDataShotIndex = -1;
+            if (context->attachedAttachmentIndex != NULL) *context->attachedAttachmentIndex = -1;
+            if (context->attachedReferenceObjectIndex != NULL) *context->attachedReferenceObjectIndex = -1;
+            MoveZipperCollisionCenterTo(context->zipper,
+                                        (Vector2){ block->position.x + RPG_STAGE_TILE_SIZE * 0.5f,
+                                                   block->position.y + RPG_STAGE_TILE_SIZE * 0.5f });
+        }
         *target = (RpgZipperHeldObject){ .kind = RPG_ZIPPER_HELD_OBJECT_NONE,
                                          .blockCell = { -1, -1 }, .movableKind = RPG_ZIPPER_MOVABLE_NONE,
                                          .dataShotIndex = -1, .dynamicBlockIndex = -1,
@@ -963,13 +1016,11 @@ static bool SelectCurrentZipperTarget(RpgRuntimeContext *context, RpgZipperHeldO
         target->movableKind = RPG_ZIPPER_MOVABLE_REFERENCE_FILE;
         target->referenceObjectIndex = *context->attachedReferenceObjectIndex;
         target->referenceObject = context->referenceDrops->entries[target->referenceObjectIndex];
-    } else if (context->isZipperAttachedToBlock != NULL && *context->isZipperAttachedToBlock &&
-               context->zipperAttachedBlockCell != NULL && context->stage != NULL &&
-               context->zipperAttachedBlockCell->row >= 0 && context->zipperAttachedBlockCell->column >= 0) {
+    } else if (IsZipperConnectionResolved(context->zipper, context->stage)) {
         /* Attachments are metadata of their owner block.  Zipper may touch an
          * attachment, but eats/spits the owner block and its metadata together. */
         target->kind = RPG_ZIPPER_HELD_OBJECT_BLOCK;
-        target->blockCell = *context->zipperAttachedBlockCell;
+        target->blockCell = context->zipper->connection.blockCell;
         target->blockType = context->stage->blocks[target->blockCell.row][target->blockCell.column];
     }
     return target->kind != RPG_ZIPPER_HELD_OBJECT_NONE;
@@ -989,8 +1040,10 @@ static bool CaptureCurrentZipperObject(RpgRuntimeContext *context)
     *context->attachedAttachmentIndex = -1;
     if (context->attachedDynamicBlockIndex != NULL) *context->attachedDynamicBlockIndex = -1;
     if (context->attachedReferenceObjectIndex != NULL) *context->attachedReferenceObjectIndex = -1;
-    *context->isZipperAttachedToBlock = false;
-    *context->zipperAttachedBlockCell = (RpgGridCell){ -1, -1 };
+    /* For a block, its connection identity stays on Zipper while eat makes
+       the reference temporarily unresolved.  Other targets do not persist a
+       block connection. */
+    if (target.kind != RPG_ZIPPER_HELD_OBJECT_BLOCK) RpgZipper_ClearConnection(context->zipper);
     return true;
 }
 
@@ -998,14 +1051,18 @@ static bool CaptureCurrentZipperObject(RpgRuntimeContext *context)
 static void CaptureZipperCommandTarget(RpgRuntimeContext *context)
 {
     if (CaptureCurrentZipperObject(context)) return;
+    /* Repeating eat while the connected block is held must not silently
+       disconnect Zipper.  It stays at the missing/error cell until spit
+       restores that exact target, or the user detaches it with Space. */
+    if (context != NULL && context->zipper != NULL && RpgZipper_HasConnection(context->zipper) &&
+        !IsZipperConnectionResolved(context->zipper, context->stage)) return;
     /* 取得対象がなくても、cmd完了後のZipperは必ず帰還状態に統一する。 */
     (*context->zipperFollowsPlayer) = true;
     (*context->isZipperLaunched) = false;
     (*context->attachedDataShotIndex) = -1;
     (*context->attachedAttachmentIndex) = -1;
     if (context->attachedReferenceObjectIndex != NULL) *context->attachedReferenceObjectIndex = -1;
-    (*context->isZipperAttachedToBlock) = false;
-    (*context->zipperAttachedBlockCell) = (RpgGridCell){ -1, -1 };
+    RpgZipper_ClearConnection(context->zipper);
 }
 
 static void RunZipperCommandFunction(RpgRuntimeContext *context)
@@ -1063,8 +1120,7 @@ void RpgRuntime_ProcessReferenceFolderZipperCommand(RpgRuntimeContext *context)
     if (context == NULL || context->stage == NULL || context->player == NULL || context->zipper == NULL ||
         context->zipperFollowsPlayer == NULL || context->isZipperLaunched == NULL ||
         context->isZipperControllable == NULL || context->attachedDataShotIndex == NULL ||
-        context->attachedAttachmentIndex == NULL || context->isZipperAttachedToBlock == NULL ||
-        context->zipperAttachedBlockCell == NULL) return;
+        context->attachedAttachmentIndex == NULL) return;
     if (!RpgStageBuild_ConsumeReferenceFolderZipperRequest(context->stage, context->player->position, &folderCell) ||
         !RpgObjectFolder_ActivateReferenceFolderAsZipper(context->stage, folderCell)) return;
     context->zipper->character.position = RpgStage_GetWorldPositionForCell(context->stage, folderCell.row, folderCell.column);
@@ -1076,8 +1132,7 @@ void RpgRuntime_ProcessReferenceFolderZipperCommand(RpgRuntimeContext *context)
     *context->isZipperControllable = true;
     *context->attachedDataShotIndex = -1;
     *context->attachedAttachmentIndex = -1;
-    *context->isZipperAttachedToBlock = false;
-    *context->zipperAttachedBlockCell = (RpgGridCell){ -1, -1 };
+    RpgZipper_ClearConnection(context->zipper);
     /* マップ上の Folder 表示だけを Zipper 表示へ切り替える。実体は同じ Folder を Zipper 構造へ更新して保持する。 */
     context->stage->blocks[folderCell.row][folderCell.column] = 0;
     context->stage->referencePaths[folderCell.row][folderCell.column][0] = '\0';
@@ -1330,7 +1385,6 @@ static void UpdateLaunchedZipper(RpgZipper *zipper, Vector2 *velocity, const Rpg
                                  const RpgMagnetRuntime *magnetRuntime,
                                  float deltaTime, bool *isLaunched, int *attachedDataShotIndex,
                                  Vector2 *attachedDataShotOffset,
-                                 bool *isAttachedToBlock, RpgGridCell *attachedBlockCell,
                                  int *attachedAttachmentIndex, int *attachedDynamicBlockIndex,
                                  int *attachedReferenceObjectIndex)
 {
@@ -1352,7 +1406,7 @@ static void UpdateLaunchedZipper(RpgZipper *zipper, Vector2 *velocity, const Rpg
             *attachedDataShotOffset = Vector2Subtract(candidate.character.position,
                                                        shots->entries[dataShotIndex].position);
             *isLaunched = false;
-            *isAttachedToBlock = false;
+            RpgZipper_ClearConnection(&candidate);
             *attachedAttachmentIndex = -1;
             *zipper = candidate;
             return;
@@ -1365,7 +1419,7 @@ static void UpdateLaunchedZipper(RpgZipper *zipper, Vector2 *velocity, const Rpg
                 block->position.y + RPG_STAGE_TILE_SIZE * 0.5f
             });
             *isLaunched = false;
-            *isAttachedToBlock = false;
+            RpgZipper_ClearConnection(&candidate);
             *attachedAttachmentIndex = -1;
             *attachedDataShotIndex = -1;
             *attachedDynamicBlockIndex = dynamicBlockIndex;
@@ -1376,7 +1430,7 @@ static void UpdateLaunchedZipper(RpgZipper *zipper, Vector2 *velocity, const Rpg
         if (referenceObjectIndex >= 0) {
             MoveZipperCollisionCenterTo(&candidate, referenceObjects->entries[referenceObjectIndex].position);
             *isLaunched = false;
-            *isAttachedToBlock = false;
+            RpgZipper_ClearConnection(&candidate);
             *attachedAttachmentIndex = -1;
             *attachedDataShotIndex = -1;
             *attachedDynamicBlockIndex = -1;
@@ -1394,13 +1448,14 @@ static void UpdateLaunchedZipper(RpgZipper *zipper, Vector2 *velocity, const Rpg
         if (hitReferenceFile || hitAttachment) {
             MoveZipperCollisionCenterTo(&candidate, collisionCenter);
             *isLaunched = false;
-            *isAttachedToBlock = true;
             *attachedDynamicBlockIndex = -1;
             if (hitAttachment) {
-                *attachedBlockCell = attachmentCell;
+                RpgZipper_SetConnection(&candidate, attachmentCell);
                 *attachedAttachmentIndex = hitAttachmentIndex;
             } else {
-                GetStageCellAtCenter(stage, collisionCenter, attachedBlockCell);
+                RpgGridCell blockCell = { -1, -1 };
+                GetStageCellAtCenter(stage, collisionCenter, &blockCell);
+                RpgZipper_SetConnection(&candidate, blockCell);
                 *attachedAttachmentIndex = -1;
             }
             *zipper = candidate;
@@ -1411,20 +1466,22 @@ static void UpdateLaunchedZipper(RpgZipper *zipper, Vector2 *velocity, const Rpg
         bool hitWorldEdge = RpgStage_GetMapAtWorldPosition(stage, forwardCenter) < 0;
         if (hitWorldEdge || RpgStage_FindSolidCollisionCenter(stage, forwardCollisionBounds, &collisionCenter)) {
             if (!hitWorldEdge) {
-                GetStageCellAtCenter(stage, collisionCenter, attachedBlockCell);
+                RpgGridCell blockCell = { -1, -1 };
+                GetStageCellAtCenter(stage, collisionCenter, &blockCell);
                 /* 複数マスブロックでは、ドラッグと共通の代表マスへZipperを吸着させる。 */
                 int rootRow;
                 int rootColumn;
-                if (RpgStage_FindEffectRootCell(stage, attachedBlockCell->row, attachedBlockCell->column,
+                if (RpgStage_FindEffectRootCell(stage, blockCell.row, blockCell.column,
                                                 &rootRow, &rootColumn, NULL)) {
-                    *attachedBlockCell = (RpgGridCell){ rootRow, rootColumn };
+                    blockCell = (RpgGridCell){ rootRow, rootColumn };
                     collisionCenter = RpgStage_GetWorldPositionForCell(stage, rootRow, rootColumn);
                 }
                 MoveZipperCollisionCenterTo(&candidate, collisionCenter);
+                RpgZipper_SetConnection(&candidate, blockCell);
             }
             *velocity = (Vector2){ 0.0f, 0.0f };
             *isLaunched = false;
-            *isAttachedToBlock = true;
+            if (hitWorldEdge) RpgZipper_ClearConnection(&candidate);
             *attachedDynamicBlockIndex = -1;
             *attachedAttachmentIndex = -1;
             *zipper = candidate;
@@ -1437,15 +1494,14 @@ static void UpdateLaunchedZipper(RpgZipper *zipper, Vector2 *velocity, const Rpg
 static void UpdateZipperAttachedToDataShot(RpgZipper *zipper, const RpgDataShots *shots,
                                            int *attachedDataShotIndex,
                                            Vector2 attachedDataShotOffset,
-                                           bool *zipperFollowsPlayer, bool *isAttachedToBlock,
-                                           RpgGridCell *attachedBlockCell)
+                                           bool *zipperFollowsPlayer)
 {
     if (*attachedDataShotIndex < 0) return;
     const RpgDataShot *shot = &shots->entries[*attachedDataShotIndex];
     // 電気化した時点で弾本体は壁衝突として消費済みなので、Zipper は追従へ戻す。
     if (shot->isElectric) {
         *zipperFollowsPlayer = true;
-        *isAttachedToBlock = false;
+        RpgZipper_ClearConnection(zipper);
         *attachedDataShotIndex = -1;
         return;
     }
@@ -1456,12 +1512,13 @@ static void UpdateZipperAttachedToDataShot(RpgZipper *zipper, const RpgDataShots
     // 弾が壁へ当たって消えた場合は、その衝突位置へ残す。空中消滅なら主人公へ戻す。
     if (shot->hitWall) {
         MoveZipperCollisionCenterTo(zipper, shot->impactPosition);
-        attachedBlockCell->row = (int)floorf(shot->impactPosition.y / RPG_STAGE_TILE_SIZE);
-        attachedBlockCell->column = (int)floorf(shot->impactPosition.x / RPG_STAGE_TILE_SIZE);
-        *isAttachedToBlock = true;
+        RpgZipper_SetConnection(zipper, (RpgGridCell){
+            (int)floorf(shot->impactPosition.y / RPG_STAGE_TILE_SIZE),
+            (int)floorf(shot->impactPosition.x / RPG_STAGE_TILE_SIZE)
+        });
     } else {
         *zipperFollowsPlayer = true;
-        *isAttachedToBlock = false;
+        RpgZipper_ClearConnection(zipper);
     }
     *attachedDataShotIndex = -1;
 }
@@ -1675,7 +1732,7 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
         unsigned long long usedBytes = RpgObjectFolder_GetZipperStorageBytes();
         unsigned long long maxBytes = (unsigned long long)(zipperMaxCapacityKB == 0 ? 1U : zipperMaxCapacityKB) * 1000ULL;
         float ratio = Clamp((float)((double)usedBytes / (double)maxBytes), 0.0f, 1.0f);
-        Rectangle panel = { 12.0f, 12.0f, 174.0f, 48.0f };
+        Rectangle panel = { 12.0f, 12.0f, 174.0f, 68.0f };
         Rectangle track = { 22.0f, 40.0f, 154.0f, 7.0f };
         Color storageColor = usedBytes > maxBytes ? MAROON : DARKGREEN;
         DrawRectangleRounded(panel, 0.16f, 8, Fade(BLACK, 0.78f));
@@ -1687,6 +1744,7 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
         if (ratio > 0.0f)
             DrawRectangleRounded((Rectangle){ track.x, track.y, track.width * ratio, track.height },
                                  0.8f, 6, storageColor);
+        GameFont_Draw("[Q] Zipperを開く", 22.0f, 54.0f, 13.0f, RAYWHITE);
     }
     if (itemMessageTimer > 0.0f) GameFont_Draw(itemMessage, 300, 90, 24, MAROON);
     if (isReferenceTextOpen) DrawReferenceTextPanel(referenceFileName, referenceText);
@@ -1710,18 +1768,13 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
                       178, 432, 17, GRAY);
     }
     if (showStopButton) {
-        Rectangle playerAreaBounds = { 12.0f, 12.0f, 182.0f, 28.0f };
-        DrawRectangleRec(playerAreaBounds, Fade(BLACK, 0.72f));
-        DrawRectangleLinesEx(playerAreaBounds, 1.0f, SKYBLUE);
-        DrawText(TextFormat("Player Area[%d][%d]", stage->mapGridX[currentMapIndex],
-                            stage->mapGridY[currentMapIndex]),
-                 (int)playerAreaBounds.x + 7, (int)playerAreaBounds.y + 7, 14, RAYWHITE);
-
+        /* エディタープレイではエリア名を表示しない。接続済み時の容量UIと
+           重ならず、停止だけを常設操作として残す。 */
         Rectangle stopButtonBounds = RpgRuntime_GetStopButtonBounds();
         DrawRectangleRec(stopButtonBounds, MAROON);
         DrawRectangleLinesEx(stopButtonBounds, 1.0f, RAYWHITE);
-        GameFont_DrawPreset(RPG_TEXT_PRESET_UI, "Stop [F2]",
-                            stopButtonBounds.x + 7.0f, stopButtonBounds.y + 6.0f,
+        GameFont_DrawPreset(RPG_TEXT_PRESET_UI, "停止",
+                            stopButtonBounds.x + 30.0f, stopButtonBounds.y + 6.0f,
                             GameFont_GetPresetScale(RPG_TEXT_PRESET_UI, 15.0f));
     }
     if (RpgScene_IsGameSettings(scene)) RpgScene_DrawGameSettingsOverlay(scene);
@@ -2322,16 +2375,15 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
         RpgObjectFolders_UpdateDataShotLifetimes(&(*context->dataShots), &(*context->attachments), &(*context->referenceDrops));
         UpdateZipperAttachedToDataShot(&(*context->zipper), &(*context->dataShots), &(*context->attachedDataShotIndex),
                                        (*context->attachedDataShotOffset),
-                                       &(*context->zipperFollowsPlayer), &(*context->isZipperAttachedToBlock),
-                                       &(*context->zipperAttachedBlockCell));
+                                       &(*context->zipperFollowsPlayer));
         UpdateZipperAttachedToDynamicBlock(&(*context->zipper), context->magnetRuntime,
                                             context->attachedDynamicBlockIndex,
                                             &(*context->zipperFollowsPlayer));
+        UpdateZipperConnection(context);
         if ((*context->isZipperLaunched))
             UpdateLaunchedZipper(&(*context->zipper), &(*context->zipperLaunchVelocity), &(*context->stage), &(*context->attachments), &(*context->dataShots), &(*context->referenceDrops), context->magnetRuntime,
                                  GetFrameTime(), &(*context->isZipperLaunched), &(*context->attachedDataShotIndex),
                                  &(*context->attachedDataShotOffset),
-                                 &(*context->isZipperAttachedToBlock), &(*context->zipperAttachedBlockCell),
                                  &(*context->attachedAttachmentIndex), context->attachedDynamicBlockIndex,
                                  context->attachedReferenceObjectIndex);
         else if ((*context->zipperFollowsPlayer) && (*context->inspectTarget) < 0 && (*context->dialogueIndex) < 0 && (*context->stage3IntroIndex) < 0 && !(*context->isReferenceTextOpen))
@@ -2540,9 +2592,17 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
             *context->attachedAttachmentIndex = -1;
             if (context->attachedDynamicBlockIndex != NULL) *context->attachedDynamicBlockIndex = -1;
             if (context->attachedReferenceObjectIndex != NULL) *context->attachedReferenceObjectIndex = -1;
-            *context->isZipperAttachedToBlock = false;
-            *context->zipperAttachedBlockCell = (RpgGridCell){ -1, -1 };
+            RpgZipper_ClearConnection(context->zipper);
             zipperPointerSelected = false;
+        }
+        /* Q is shared by the game and editor-play runtime.  A disconnected
+           Zipper has no runtime folder, so it deliberately does nothing. */
+        if (*context->isZipperControllable && IsKeyPressed(KEY_Q)) {
+            bool opened = RpgObjectFolder_OpenZipperDirectory();
+            snprintf(itemMessage, (size_t)context->itemMessageSize, "%s",
+                     opened ? "Zipperを開きました" : "Zipperを開けません");
+            GameFont_AddText(itemMessage);
+            *context->itemMessageTimer = 2.0f;
         }
         RpgInteractionSet interactions;
         RpgInteraction_BeginFrame(&interactions);
@@ -2706,7 +2766,7 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
                 (*context->isReferencePointerPressed) = false;
         }
         bool isZipperPointerHovered = false;
-        if (((*context->zipperFollowsPlayer) || (*context->isZipperAttachedToBlock) || (*context->attachedDataShotIndex) >= 0 ||
+        if (((*context->zipperFollowsPlayer) || RpgZipper_HasConnection(context->zipper) || (*context->attachedDataShotIndex) >= 0 ||
              (context->attachedDynamicBlockIndex != NULL && *context->attachedDynamicBlockIndex >= 0)) &&
             (*context->inspectTarget) < 0 && (*context->dialogueIndex) < 0 &&
             (*context->stage3IntroIndex) < 0 && !(*context->isReferenceTextOpen)) {

@@ -11,6 +11,10 @@ bool RpgBuildCellFolders_Create(const RpgStage *stage, int startMapIndex,
 bool RpgBuildCellFolders_CreatePreview(const RpgStage *stage, int startMapIndex,
                                        const RpgBuildCellStorageBackend *backend);
 void RpgBuildCellFolders_Update(const RpgBuildCellStorageBackend *backend);
+bool RpgBuildCellFolders_EnsureMap(const RpgStage *stage, int mapIndex,
+                                   const RpgBuildCellStorageBackend *backend);
+void RpgBuildCellFolders_GetGenerationProgress(const RpgStage *stage, int *generatedCells,
+                                               int *totalCells, bool *isPending);
 bool RpgBuildCellFolders_EnsureCell(RpgGridCell cell, int blockType,
                                     const RpgBuildCellStorageBackend *backend);
 

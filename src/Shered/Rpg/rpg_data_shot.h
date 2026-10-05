@@ -47,7 +47,6 @@ typedef struct RpgDataShot {
 } RpgDataShot;
 typedef struct RpgDataShots {
     RpgDataShot entries[RPG_DATA_SHOT_MAX_COUNT];
-    float emitElapsed[RPG_ATTACHMENT_MAX_COUNT];
     int nextFolderSerial;
     unsigned int lastButtonEventSequence;
     unsigned int lastPreviewEventSequence;
@@ -55,7 +54,7 @@ typedef struct RpgDataShots {
 
 RpgDataShots RpgDataShots_Default(void);
 // ファイル数・容量から実弾またはプレビュー弾の大きさと速度を同じ式で求める。
-void RpgDataShot_SetFileProperties(RpgDataShot *shot, const RpgAttachment *attachment,
+void RpgDataShot_SetFileProperties(RpgDataShot *shot, const RpgShooterConfig *shooter,
                                    int fileCount, unsigned long long totalBytes);
 void RpgDataShots_Trigger(RpgDataShots *shots, RpgAttachments *attachments, int attachmentIndex);
 void RpgDataShots_TriggerAll(RpgDataShots *shots, RpgAttachments *attachments);

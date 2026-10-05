@@ -1,8 +1,6 @@
-// 依存する自プロジェクト内ファイル: rpg_data_shot.h, rpg_magnet.h
+// 依存する自プロジェクト内ファイル: rpg_data_shot.h
 #include "rpg_data_shot.h"
 #include "rpg_gimic_sprites.h"
-
-#include "rpg_magnet.h"
 
 #include "raymath.h"
 
@@ -51,15 +49,15 @@ static Vector2 RpgDataShots_WorldPositionToStorage(const RpgStage *stage, Vector
 
 RpgDataShots RpgDataShots_Default(void) { return (RpgDataShots){ .nextFolderSerial = 1 }; }
 
-void RpgDataShot_SetFileProperties(RpgDataShot *shot, const RpgAttachment *attachment,
+void RpgDataShot_SetFileProperties(RpgDataShot *shot, const RpgShooterConfig *shooter,
                                    int fileCount, unsigned long long totalBytes)
 {
-    if (shot == NULL || attachment == NULL) return;
+    if (shot == NULL || shooter == NULL) return;
     shot->fileCount = fileCount;
     shot->totalBytes = totalBytes;
     // 保存データが古くても、実弾の増分は必ず8px（1マスの1/4）刻みにそろえる。
     const float sizeStep = RPG_STAGE_TILE_SIZE * 0.25f;
-    int stepCount = (int)(attachment->sizePerFile / sizeStep + 0.5f);
+    int stepCount = (int)(shooter->sizePerFile / sizeStep + 0.5f);
     if (stepCount < 1) stepCount = 1;
     if (stepCount > 8) stepCount = 8;
     shot->size = (fileCount - 1) * sizeStep * (float)stepCount;
@@ -67,7 +65,7 @@ void RpgDataShot_SetFileProperties(RpgDataShot *shot, const RpgAttachment *attac
     // 100B時の基準速度を容量の100B単位数で割る。容量が大きいほど必ず遅くなる。
     float capacityUnits = (float)totalBytes / RPG_DATA_SPEED_BASE_BYTES;
     if (capacityUnits < 1.0f) capacityUnits = 1.0f;
-    shot->speed = attachment->dataSpeed / capacityUnits;
+    shot->speed = shooter->dataSpeed / capacityUnits;
     if (shot->speed < 1.0f) shot->speed = 1.0f;
     if (shot->speed > 480.0f) shot->speed = 480.0f;
 }
@@ -164,13 +162,15 @@ static void RpgDataShots_Spawn(RpgDataShots *shots, const RpgAttachments *attach
     for (int index = 0; index < RPG_DATA_SHOT_MAX_COUNT; index++) {
         if (shots->entries[index].active) continue;
         const RpgAttachment *attachment = &attachments->entries[attachmentIndex];
+        const RpgShooterConfig *shooter = RpgAttachments_FindShooterConst(attachments, attachment->folderId);
+        if (shooter == NULL || shooter->path.cellCount < 1) return;
         shots->entries[index] = (RpgDataShot){ .active = true, .isPreview = isPreview,
             .folderSerial = shots->nextFolderSerial++, .attachmentIndex = attachmentIndex,
-            .position = RpgDataShots_GetCellCenter(attachment->dataPath.cells[0]),
+            .position = RpgDataShots_GetCellCenter(shooter->path.cells[0]),
             .metadataCell = { -1, -1 }, .electricLastAppliedCellIndex = -1 };
-        RpgDataShot_SetFileProperties(&shots->entries[index], attachment,
-            isPreview ? attachment->previewFileCount : 0,
-            isPreview ? attachment->previewTotalBytes : 0);
+        RpgDataShot_SetFileProperties(&shots->entries[index], shooter,
+            isPreview ? shooter->previewFileCount : 0,
+            isPreview ? shooter->previewTotalBytes : 0);
         if (shots->nextFolderSerial <= 0) shots->nextFolderSerial = 1;
         return;
     }
@@ -179,7 +179,7 @@ static void RpgDataShots_Spawn(RpgDataShots *shots, const RpgAttachments *attach
 void RpgDataShots_Trigger(RpgDataShots *shots, RpgAttachments *attachments, int attachmentIndex)
 {
     if (attachmentIndex >= 0 && attachmentIndex < attachments->count &&
-        !attachments->entries[attachmentIndex].isZipperHeld &&
+        !RpgAttachments_IsRuntimeUnavailable(&attachments->entries[attachmentIndex]) &&
         attachments->entries[attachmentIndex].type == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER &&
         RpgAttachments_StartShooterAnimation(attachments, attachmentIndex))
         RpgDataShots_Spawn(shots, attachments, attachmentIndex, false);
@@ -223,7 +223,7 @@ void RpgDataShots_TriggerPreview(RpgDataShots *shots, RpgAttachments *attachment
     if (shots == NULL || attachments == NULL) return;
     // 共通プレビュー通知では全装置、個別通知では指定装置だけを見た目専用で反応させる。
     for (int index = 0; index < attachments->count; index++)
-        if (!attachments->entries[index].isZipperHeld && (target == -1 || target == index) &&
+        if (!RpgAttachments_IsRuntimeUnavailable(&attachments->entries[index]) && (target == -1 || target == index) &&
             attachments->entries[index].type == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER &&
             RpgAttachments_StartShooterAnimation(attachments, index))
             RpgDataShots_Spawn(shots, attachments, index, true);
@@ -235,6 +235,7 @@ void RpgDataShots_Update(RpgDataShots *shots, RpgAttachments *attachments,
                          const RpgMovingSolidSet *movingSolids,
                          float deltaTime, bool previewsOnly)
 {
+    RpgAttachments_SynchronizeModuleConfigs(attachments);
     RpgAttachments_UpdateShooterAnimations(attachments, deltaTime);
     for (int index = 0; index < RPG_DATA_SHOT_MAX_COUNT; index++) {
         RpgDataShot *shot = &shots->entries[index];
@@ -249,13 +250,14 @@ void RpgDataShots_Update(RpgDataShots *shots, RpgAttachments *attachments,
                 int column = (int)(shot->position.x / RPG_STAGE_TILE_SIZE);
                 // 導線上の電気化データ弾がドアのマスへ入った瞬間、ドア全体を開状態にする。
                 RpgStage_SetDoorOpenAtCell(stage, row, column, true);
-                RpgMagnets_ToggleAtCell(stage, row, column);
                 shot->electricLastAppliedCellIndex = shot->electricCellIndex;
             }
             continue;
         }
         const RpgAttachment *attachment = &attachments->entries[shot->attachmentIndex];
-        const RpgGridPath *path = &attachment->dataPath;
+        const RpgShooterConfig *shooter = RpgAttachments_FindShooterConst(attachments, attachment->folderId);
+        if (shooter == NULL || shooter->path.cellCount < 1) { shot->active = false; continue; }
+        const RpgGridPath *path = &shooter->path;
         Vector2 target;
         if (shot->pathCellIndex + 1 < path->cellCount)
             target = RpgDataShots_GetCellCenter(path->cells[shot->pathCellIndex + 1]);
@@ -278,14 +280,19 @@ void RpgDataShots_Update(RpgDataShots *shots, RpgAttachments *attachments,
         int receiverIndex = RpgDataShots_FindReceiverAlongSegment(receivers, previousPosition, shot->position,
                                                                    shot->size, &impactPosition);
         if (receiverIndex >= 0) {
+            RpgReceiver receiver;
             // 受容体へ届いた弾はそこで消費し、導線だけへ電気の進行状態を渡す。
             shot->position = impactPosition;
             shot->impactPosition = impactPosition;
             // 受容体への到達は弾本体にとって壁衝突。電気表現だけを残してフォルダ寿命を終える。
             shot->hitWall = true;
             shot->folderSerial = 0;
+            if (!RpgReceivers_Get(receivers, receiverIndex, &receiver)) {
+                shot->active = false;
+                continue;
+            }
             shot->electricWireIndex = RpgDataShots_FindWireFromReceiver(wires,
-                receivers->entries[receiverIndex].cell, receivers->entries[receiverIndex].side);
+                receiver.cell, receiver.side);
             if (shot->electricWireIndex < 0) shot->active = false;
             else {
                 shot->isElectric = true;

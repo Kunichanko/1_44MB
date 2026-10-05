@@ -1,6 +1,8 @@
 // 依存する自プロジェクト内ファイル: rpg_attachment.h
 #include "rpg_attachment.h"
 
+#include "rpg_object_folder.h"
+
 #include "rpg_light_source.h"
 
 #include "rpg_stage_background.h"
@@ -10,6 +12,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 enum { RPG_SHOOTER_ANIMATION_MILLISECONDS = 360 };
@@ -31,6 +34,140 @@ static bool RpgAttachments_IsCellInStage(RpgGridCell cell)
            cell.column < RPG_STAGE_WORLD_COLUMNS;
 }
 
+static bool RpgAttachments_IsStoredType(int type)
+{
+    return type == RPG_ATTACHMENT_TYPE_RECEIVER || RpgBlockInventory_IsAttachment(type);
+}
+
+bool RpgAttachments_IsReceiver(const RpgAttachment *attachment)
+{
+    return attachment != NULL && attachment->type == RPG_ATTACHMENT_TYPE_RECEIVER;
+}
+
+static bool RpgAttachments_ReserveModule(void **items, int *capacity, int required,
+                                         size_t itemSize)
+{
+    int next;
+    void *resized;
+    if (items == NULL || capacity == NULL || required < 0) return false;
+    if (required <= *capacity) return true;
+    next = *capacity > 0 ? *capacity : RPG_ATTACHMENT_INITIAL_CAPACITY;
+    while (next < required) next *= 2;
+    resized = realloc(*items, (size_t)next * itemSize);
+    if (resized == NULL) return false;
+    memset((unsigned char *)resized + (size_t)*capacity * itemSize, 0,
+           (size_t)(next - *capacity) * itemSize);
+    *items = resized;
+    *capacity = next;
+    return true;
+}
+
+RpgShooterConfig *RpgAttachments_FindShooter(RpgAttachments *attachments, int attachmentId)
+{
+    if (attachments == NULL) return NULL;
+    for (int i = 0; i < attachments->shooterCount; i++)
+        if (attachments->shooters[i].attachmentId == attachmentId) return &attachments->shooters[i];
+    return NULL;
+}
+const RpgShooterConfig *RpgAttachments_FindShooterConst(const RpgAttachments *attachments, int attachmentId)
+{ return RpgAttachments_FindShooter((RpgAttachments *)attachments, attachmentId); }
+RpgFlagConfig *RpgAttachments_FindFlag(RpgAttachments *attachments, int attachmentId)
+{
+    if (attachments == NULL) return NULL;
+    for (int i = 0; i < attachments->flagCount; i++)
+        if (attachments->flags[i].attachmentId == attachmentId) return &attachments->flags[i];
+    return NULL;
+}
+const RpgFlagConfig *RpgAttachments_FindFlagConst(const RpgAttachments *attachments, int attachmentId)
+{ return RpgAttachments_FindFlag((RpgAttachments *)attachments, attachmentId); }
+RpgSocketConfig *RpgAttachments_FindSocket(RpgAttachments *attachments, int attachmentId)
+{
+    if (attachments == NULL) return NULL;
+    for (int i = 0; i < attachments->socketCount; i++)
+        if (attachments->sockets[i].attachmentId == attachmentId) return &attachments->sockets[i];
+    return NULL;
+}
+const RpgSocketConfig *RpgAttachments_FindSocketConst(const RpgAttachments *attachments, int attachmentId)
+{ return RpgAttachments_FindSocket((RpgAttachments *)attachments, attachmentId); }
+
+static RpgShooterConfig RpgAttachments_DefaultShooter(int attachmentId, const RpgAttachment *attachment)
+{
+    RpgShooterConfig config = { .attachmentId = attachmentId, .dataSize = 8.0f,
+        .dataSpeed = 120.0f, .dataInterval = 1.0f, .sizePerFile = RPG_STAGE_TILE_SIZE * 0.25f,
+        .speedPerKilobyte = 1.0f / 64.0f, .previewFileCount = 2 };
+    RpgGridCell body = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
+    RpgGridCell front = RpgGridPath_GetSideNeighbor(body, attachment->side);
+    config.path.cells[0] = body; config.path.cellCount = 1;
+    if (RpgAttachments_IsCellInStage(front)) config.path.cells[config.path.cellCount++] = front;
+    return config;
+}
+
+static bool RpgAttachments_EnsureModules(RpgAttachments *attachments, const RpgAttachment *attachment)
+{
+    if (attachment->type == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER &&
+        RpgAttachments_FindShooter(attachments, attachment->folderId) == NULL) {
+        if (!RpgAttachments_ReserveModule((void **)&attachments->shooters, &attachments->shooterCapacity,
+                                          attachments->shooterCount + 1, sizeof(*attachments->shooters))) return false;
+        attachments->shooters[attachments->shooterCount++] =
+            RpgAttachments_DefaultShooter(attachment->folderId, attachment);
+    }
+    if (attachment->type == RPG_BLOCK_ATTACHMENT_SAVE_FLAG &&
+        RpgAttachments_FindFlag(attachments, attachment->folderId) == NULL) {
+        if (!RpgAttachments_ReserveModule((void **)&attachments->flags, &attachments->flagCapacity,
+                                          attachments->flagCount + 1, sizeof(*attachments->flags))) return false;
+        attachments->flags[attachments->flagCount++] =
+            (RpgFlagConfig){ .attachmentId = attachment->folderId, .startZipperConnected = true };
+    }
+    if (attachment->type == RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET &&
+        RpgAttachments_FindSocket(attachments, attachment->folderId) == NULL) {
+        if (!RpgAttachments_ReserveModule((void **)&attachments->sockets, &attachments->socketCapacity,
+                                          attachments->socketCount + 1, sizeof(*attachments->sockets))) return false;
+        attachments->sockets[attachments->socketCount++] =
+            (RpgSocketConfig){ .attachmentId = attachment->folderId, .rightLightAngle = 18.0f, .lightOpacity = 0.45f };
+    }
+    return true;
+}
+
+void RpgAttachments_RefreshEditorFacades(RpgAttachments *attachments)
+{
+    if (attachments == NULL) return;
+    for (int i = 0; i < attachments->count; i++) {
+        RpgAttachment *a = &attachments->entries[i];
+        RpgShooterConfig *shooter = RpgAttachments_FindShooter(attachments, a->folderId);
+        RpgFlagConfig *flag = RpgAttachments_FindFlag(attachments, a->folderId);
+        RpgSocketConfig *socket = RpgAttachments_FindSocket(attachments, a->folderId);
+        if (shooter != NULL) {
+            a->dataSize = shooter->dataSize; a->dataSpeed = shooter->dataSpeed;
+            a->dataInterval = shooter->dataInterval; a->dataPreviewEnabled = shooter->dataPreviewEnabled;
+            a->sizePerFile = shooter->sizePerFile; a->speedPerKilobyte = shooter->speedPerKilobyte;
+            a->previewFileCount = shooter->previewFileCount; a->previewTotalBytes = shooter->previewTotalBytes;
+            a->dataPath = shooter->path; a->shooterAnimationElapsed = shooter->animationElapsed;
+        }
+        if (flag != NULL) { a->flagStartZipperConnected = flag->startZipperConnected; a->flagRaised = flag->raised; }
+        if (socket != NULL) { a->socketRightLightAngle = socket->rightLightAngle; a->socketLightOpacity = socket->lightOpacity; }
+    }
+}
+
+void RpgAttachments_SynchronizeModuleConfigs(RpgAttachments *attachments)
+{
+    if (attachments == NULL) return;
+    for (int i = 0; i < attachments->count; i++) {
+        RpgAttachment *a = &attachments->entries[i];
+        RpgShooterConfig *shooter = RpgAttachments_FindShooter(attachments, a->folderId);
+        RpgFlagConfig *flag = RpgAttachments_FindFlag(attachments, a->folderId);
+        RpgSocketConfig *socket = RpgAttachments_FindSocket(attachments, a->folderId);
+        if (shooter != NULL) {
+            shooter->dataSize = a->dataSize; shooter->dataSpeed = a->dataSpeed;
+            shooter->dataInterval = a->dataInterval; shooter->dataPreviewEnabled = a->dataPreviewEnabled;
+            shooter->sizePerFile = a->sizePerFile; shooter->speedPerKilobyte = a->speedPerKilobyte;
+            shooter->previewFileCount = a->previewFileCount; shooter->previewTotalBytes = a->previewTotalBytes;
+            shooter->path = a->dataPath; shooter->animationElapsed = a->shooterAnimationElapsed;
+        }
+        if (flag != NULL) { flag->startZipperConnected = a->flagStartZipperConnected; flag->raised = a->flagRaised; }
+        if (socket != NULL) { socket->rightLightAngle = a->socketRightLightAngle; socket->lightOpacity = a->socketLightOpacity; }
+    }
+}
+
 /* A shooter lives in its outer cell.  Its default path begins there and ends
    one cell ahead, unless the stage boundary leaves no forward cell. */
 static RpgGridCell RpgAttachments_GetShooterFrontCell(const RpgAttachment *attachment)
@@ -40,15 +177,16 @@ static RpgGridCell RpgAttachments_GetShooterFrontCell(const RpgAttachment *attac
     return RpgAttachments_IsCellInStage(frontCell) ? frontCell : outerCell;
 }
 
-static void RpgAttachments_SetDefaultShooterPath(RpgAttachment *attachment)
+static void RpgAttachments_SetDefaultShooterPath(const RpgAttachment *attachment, RpgShooterConfig *config)
 {
     RpgGridCell bodyCell = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
     RpgGridCell frontCell = RpgAttachments_GetShooterFrontCell(attachment);
-    attachment->dataPath.cells[0] = bodyCell;
-    attachment->dataPath.cellCount = 1;
+    if (attachment == NULL || config == NULL) return;
+    config->path.cells[0] = bodyCell;
+    config->path.cellCount = 1;
     if (frontCell.row != bodyCell.row || frontCell.column != bodyCell.column) {
-        attachment->dataPath.cells[1] = frontCell;
-        attachment->dataPath.cellCount = 2;
+        config->path.cells[1] = frontCell;
+        config->path.cellCount = 2;
     }
 }
 
@@ -66,10 +204,18 @@ static bool RpgAttachments_HasOuterEmptyCell(const RpgStage *stage, RpgGridCell 
     return RpgAttachments_IsCellInStage(outerCell) && stage->blocks[outerCell.row][outerCell.column] == 0;
 }
 
+/* A socket is embedded in its owner block.  Its neighbouring cell is only a
+ * possible location for a movable block, never an attachment-owned cell or
+ * a placement reservation. */
+static bool RpgAttachments_RequiresEmptyOuterCell(int type)
+{
+    return type != RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET;
+}
+
 bool RpgAttachments_GetOccupiedCell(const RpgAttachment *attachment, RpgGridCell *cell)
 {
     RpgGridCell occupiedCell;
-    if (attachment == NULL || cell == NULL || !RpgBlockInventory_IsCellAttachment(attachment->type)) return false;
+    if (attachment == NULL || cell == NULL || !RpgBlockInventory_IsAttachmentBlock(attachment->type)) return false;
     occupiedCell = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
     if (!RpgAttachments_IsCellInStage(occupiedCell)) return false;
     *cell = occupiedCell;
@@ -82,6 +228,7 @@ bool RpgAttachments_IsCellOccupied(const RpgAttachments *attachments, RpgGridCel
     for (int index = 0; index < attachments->count; index++) {
         const RpgAttachment *attachment = &attachments->entries[index];
         RpgGridCell occupiedCell;
+        if (RpgAttachments_IsRuntimeUnavailable(attachment)) continue;
         if (!RpgAttachments_GetOccupiedCell(attachment, &occupiedCell)) continue;
         if (occupiedCell.row == cell.row && occupiedCell.column == cell.column) return true;
     }
@@ -89,6 +236,165 @@ bool RpgAttachments_IsCellOccupied(const RpgAttachments *attachments, RpgGridCel
 }
 
 RpgAttachments RpgAttachments_Default(void) { return (RpgAttachments){ 0 }; }
+
+void RpgAttachments_Destroy(RpgAttachments *attachments)
+{
+    if (attachments == NULL) return;
+    free(attachments->entries);
+    free(attachments->routes);
+    free(attachments->shooters);
+    free(attachments->flags);
+    free(attachments->sockets);
+    *attachments = RpgAttachments_Default();
+}
+
+bool RpgAttachments_Reserve(RpgAttachments *attachments, int requiredCapacity)
+{
+    RpgAttachment *resized;
+    int newCapacity;
+    if (attachments == NULL || requiredCapacity < 0 || requiredCapacity > RPG_ATTACHMENT_LIMIT) return false;
+    if (requiredCapacity <= attachments->capacity) return true;
+    newCapacity = attachments->capacity > 0 ? attachments->capacity : RPG_ATTACHMENT_INITIAL_CAPACITY;
+    while (newCapacity < requiredCapacity) {
+        if (newCapacity >= RPG_ATTACHMENT_LIMIT / 2) { newCapacity = RPG_ATTACHMENT_LIMIT; break; }
+        newCapacity *= 2;
+    }
+    resized = (RpgAttachment *)realloc(attachments->entries, (size_t)newCapacity * sizeof(*resized));
+    if (resized == NULL) return false;
+    memset(resized + attachments->capacity, 0,
+           (size_t)(newCapacity - attachments->capacity) * sizeof(*resized));
+    attachments->entries = resized;
+    attachments->capacity = newCapacity;
+    return true;
+}
+
+bool RpgAttachments_Append(RpgAttachments *attachments, const RpgAttachment *attachment)
+{
+    if (attachments == NULL || attachment == NULL ||
+        !RpgAttachments_Reserve(attachments, attachments->count + 1)) return false;
+    attachments->entries[attachments->count++] = *attachment;
+    if (!RpgAttachments_EnsureModules(attachments, attachment)) {
+        attachments->count--;
+        return false;
+    }
+    RpgAttachments_RefreshEditorFacades(attachments);
+    return true;
+}
+
+bool RpgAttachments_Clone(RpgAttachments *destination, const RpgAttachments *source)
+{
+    RpgAttachments clone = RpgAttachments_Default();
+    if (destination == NULL || source == NULL || source->count < 0 ||
+        source->count > RPG_ATTACHMENT_LIMIT || source->routeCount < 0 ||
+        source->routeCount > RPG_WIRE_MAX_COUNT ||
+        (source->count > 0 && source->entries == NULL) ||
+        (source->routeCount > 0 && source->routes == NULL)) return false;
+    if (source->count > 0 && !RpgAttachments_Reserve(&clone, source->count)) return false;
+    if (source->count > 0)
+        memcpy(clone.entries, source->entries, (size_t)source->count * sizeof(*clone.entries));
+    clone.count = source->count;
+    if (source->routeCount > 0) {
+        clone.routes = (RpgAttachmentRoute *)calloc((size_t)source->routeCount, sizeof(*clone.routes));
+        if (clone.routes == NULL) { RpgAttachments_Destroy(&clone); return false; }
+        memcpy(clone.routes, source->routes, (size_t)source->routeCount * sizeof(*clone.routes));
+        clone.routeCount = clone.routeCapacity = source->routeCount;
+    }
+    if (source->shooterCount > 0) {
+        clone.shooters = (RpgShooterConfig *)calloc((size_t)source->shooterCount, sizeof(*clone.shooters));
+        if (clone.shooters == NULL) { RpgAttachments_Destroy(&clone); return false; }
+        memcpy(clone.shooters, source->shooters, (size_t)source->shooterCount * sizeof(*clone.shooters));
+        clone.shooterCount = clone.shooterCapacity = source->shooterCount;
+    }
+    if (source->flagCount > 0) {
+        clone.flags = (RpgFlagConfig *)calloc((size_t)source->flagCount, sizeof(*clone.flags));
+        if (clone.flags == NULL) { RpgAttachments_Destroy(&clone); return false; }
+        memcpy(clone.flags, source->flags, (size_t)source->flagCount * sizeof(*clone.flags));
+        clone.flagCount = clone.flagCapacity = source->flagCount;
+    }
+    if (source->socketCount > 0) {
+        clone.sockets = (RpgSocketConfig *)calloc((size_t)source->socketCount, sizeof(*clone.sockets));
+        if (clone.sockets == NULL) { RpgAttachments_Destroy(&clone); return false; }
+        memcpy(clone.sockets, source->sockets, (size_t)source->socketCount * sizeof(*clone.sockets));
+        clone.socketCount = clone.socketCapacity = source->socketCount;
+    }
+    RpgAttachments_Destroy(destination);
+    *destination = clone;
+    RpgAttachments_RefreshEditorFacades(destination);
+    return true;
+}
+
+static int RpgAttachments_FindReceiverIdAtCell(const RpgAttachments *attachments, RpgGridCell cell,
+                                                RpgGridSide side)
+{
+    if (attachments == NULL) return 0;
+    for (int index = 0; index < attachments->count; index++) {
+        const RpgAttachment *attachment = &attachments->entries[index];
+        if (RpgAttachments_IsReceiver(attachment) && attachment->cell.row == cell.row &&
+            attachment->cell.column == cell.column && attachment->side == side)
+            return attachment->folderId;
+    }
+    return 0;
+}
+
+static const RpgAttachment *RpgAttachments_FindReceiverById(const RpgAttachments *attachments, int id)
+{
+    if (attachments == NULL || id <= 0) return NULL;
+    for (int index = 0; index < attachments->count; index++)
+        if (RpgAttachments_IsReceiver(&attachments->entries[index]) &&
+            attachments->entries[index].folderId == id) return &attachments->entries[index];
+    return NULL;
+}
+
+void RpgAttachments_ImportWires(RpgAttachments *attachments, const RpgWires *wires)
+{
+    if (attachments == NULL) return;
+    free(attachments->routes);
+    attachments->routes = NULL;
+    attachments->routeCount = attachments->routeCapacity = 0;
+    if (wires == NULL || wires->count <= 0) return;
+    attachments->routes = (RpgAttachmentRoute *)calloc((size_t)wires->count, sizeof(*attachments->routes));
+    if (attachments->routes == NULL) return;
+    attachments->routeCapacity = wires->count;
+    for (int index = 0; index < wires->count; index++) {
+        const RpgWire *wire = &wires->entries[index];
+        RpgAttachmentRoute *route = &attachments->routes[attachments->routeCount++];
+        route->id = index + 1;
+        route->kind = wire->kind;
+        route->ownerCell = wire->ownerCell;
+        route->cells = wire->path;
+        route->conveyorSpeed = wire->conveyorSpeed;
+        route->conveyorDirection = wire->conveyorDirection;
+        route->conveyorHasFloor = wire->conveyorHasFloor;
+        route->conveyorSlideAngleDegrees = wire->conveyorSlideAngleDegrees;
+        if (wire->kind == RPG_WIRE_KIND_ELECTRIC && wire->hasReceiverSource)
+            route->ownerAttachmentId = RpgAttachments_FindReceiverIdAtCell(
+                attachments, wire->receiverCell, wire->receiverSide);
+    }
+}
+
+void RpgAttachments_BuildRuntimeWires(const RpgAttachments *attachments, RpgWires *wires)
+{
+    if (wires == NULL) return;
+    *wires = RpgWires_Default();
+    if (attachments == NULL) return;
+    for (int index = 0; index < attachments->routeCount && wires->count < RPG_WIRE_MAX_COUNT; index++) {
+        const RpgAttachmentRoute *route = &attachments->routes[index];
+        RpgWire wire = { .ownerCell = route->ownerCell, .path = route->cells, .kind = route->kind,
+                         .conveyorSpeed = route->conveyorSpeed,
+                         .conveyorDirection = route->conveyorDirection,
+                         .conveyorHasFloor = route->conveyorHasFloor,
+                         .conveyorSlideAngleDegrees = route->conveyorSlideAngleDegrees };
+        if (wire.kind == RPG_WIRE_KIND_ELECTRIC) {
+            const RpgAttachment *receiver = RpgAttachments_FindReceiverById(attachments, route->ownerAttachmentId);
+            if (receiver == NULL) continue;
+            wire.hasReceiverSource = true;
+            wire.receiverCell = receiver->cell;
+            wire.receiverSide = receiver->side;
+            wire.ownerCell = receiver->cell;
+        }
+        wires->entries[wires->count++] = wire;
+    }
+}
 
 // 保存済みの添付物と重複しないフォルダ識別子を返す。
 static int RpgAttachments_GetNextFolderId(const RpgAttachments *attachments)
@@ -110,6 +416,8 @@ static int RpgAttachments_RepairFolderId(const RpgAttachments *attachments, int 
     return folderId;
 }
 
+#if 0 /* Pre-v9 standalone format reader/writer: retained as reference only.
+          Unified v9-v11 is imported by the static loader below. */
 bool RpgAttachments_Load(const char *filePath, RpgAttachments *attachments)
 {
     FILE *file = fopen(filePath, "r");
@@ -122,7 +430,7 @@ bool RpgAttachments_Load(const char *filePath, RpgAttachments *attachments)
     currentFormat = strcmp(format, "v2") == 0 || strcmp(format, "v3") == 0 || strcmp(format, "v4") == 0 || strcmp(format, "v5") == 0 || strcmp(format, "v6") == 0 || strcmp(format, "v7") == 0 || strcmp(format, "v8") == 0;
     previewFormat = strcmp(format, "v3") == 0 || strcmp(format, "v4") == 0;
     if ((currentFormat ? fscanf(file, "%d", &loaded.count) : sscanf(format, "%d", &loaded.count)) != 1 || loaded.count < 0 ||
-        loaded.count > RPG_ATTACHMENT_MAX_COUNT) {
+        loaded.count > RPG_ATTACHMENT_LIMIT || !RpgAttachments_Reserve(&loaded, loaded.count)) {
         fclose(file);
         return false;
     }
@@ -130,14 +438,19 @@ bool RpgAttachments_Load(const char *filePath, RpgAttachments *attachments)
         RpgAttachment *attachment = &loaded.entries[index];
         int side = 0;
         int folderId = index + 1;
-        bool folderIdFormat = strcmp(format, "v4") == 0 || strcmp(format, "v5") == 0 || strcmp(format, "v6") == 0 || strcmp(format, "v7") == 0;
+        /* v8 still starts each attachment with its stable folderId.  Treating
+           it as the pre-v4 layout shifts every remaining field and makes the
+           whole area attachment file fail to load. */
+        bool folderIdFormat = strcmp(format, "v4") == 0 || strcmp(format, "v5") == 0 ||
+                              strcmp(format, "v6") == 0 || strcmp(format, "v7") == 0 ||
+                              strcmp(format, "v8") == 0;
         int fieldCount = folderIdFormat ?
             fscanf(file, "%d %d %d %d %d", &attachment->type, &folderId, &attachment->cell.row,
                    &attachment->cell.column, &side) :
             fscanf(file, "%d %d %d %d", &attachment->type, &attachment->cell.row,
                    &attachment->cell.column, &side);
         if (fieldCount != (folderIdFormat ? 5 : 4) ||
-            !RpgBlockInventory_IsAttachment(attachment->type) ||
+            !RpgAttachments_IsStoredType(attachment->type) ||
             !RpgAttachments_IsCellInStage(attachment->cell) ||
             side < RPG_GRID_SIDE_TOP || side > RPG_GRID_SIDE_LEFT) {
             fclose(file);
@@ -224,7 +537,8 @@ bool RpgAttachments_Load(const char *filePath, RpgAttachments *attachments)
             }
         }
     }
-    if (fclose(file) != 0) return false;
+    if (fclose(file) != 0) { RpgAttachments_Destroy(&loaded); return false; }
+    RpgAttachments_Destroy(attachments);
     *attachments = loaded;
     return true;
 }
@@ -250,32 +564,465 @@ bool RpgAttachments_Save(const char *filePath, const RpgAttachments *attachments
     }
     return fclose(file) == 0;
 }
+#endif
 
-bool RpgAttachments_Add(RpgAttachments *attachments, const RpgStage *stage, int type,
+/* The current area tree was written while attachments still used the
+ * standalone v2-v8 file.  Those records contain the same editable values as
+ * the newer per-kind modules, so import them once into the in-memory v12
+ * model.  Do not mark this as unified: the caller must still read the
+ * companion legacy wire/receiver files before the next save publishes v12. */
+static bool RpgAttachments_LoadLegacyStatic(const char *filePath, RpgAttachments *attachments)
+{
+    FILE *file;
+    char format[16];
+    RpgAttachments loaded = RpgAttachments_Default();
+    int count;
+    bool versioned;
+    bool previewFormat;
+    if (filePath == NULL || attachments == NULL || (file = fopen(filePath, "r")) == NULL) return false;
+    if (fscanf(file, "%15s", format) != 1) goto fail;
+    versioned = strcmp(format, "v2") == 0 || strcmp(format, "v3") == 0 ||
+                strcmp(format, "v4") == 0 || strcmp(format, "v5") == 0 ||
+                strcmp(format, "v6") == 0 || strcmp(format, "v7") == 0 ||
+                strcmp(format, "v8") == 0;
+    previewFormat = strcmp(format, "v3") == 0 || strcmp(format, "v4") == 0;
+    if ((versioned ? fscanf(file, "%d", &count) : sscanf(format, "%d", &count)) != 1 ||
+        count < 0 || count > RPG_ATTACHMENT_LIMIT) goto fail;
+    for (int index = 0; index < count; index++) {
+        RpgAttachment attachment = { 0 };
+        RpgShooterConfig shooter = { 0 };
+        RpgGridCell outerCell;
+        int folderId = index + 1;
+        int side = 0;
+        int previewEnabled = 0;
+        int flagStartConnected = 1;
+        int pathCount = 1;
+        bool folderIdFormat = strcmp(format, "v4") == 0 || strcmp(format, "v5") == 0 ||
+                              strcmp(format, "v6") == 0 || strcmp(format, "v7") == 0 ||
+                              strcmp(format, "v8") == 0;
+        bool settingsFormat = strcmp(format, "v6") == 0 || strcmp(format, "v7") == 0 ||
+                              strcmp(format, "v8") == 0;
+        bool socketSettingsFormat = strcmp(format, "v7") == 0 || strcmp(format, "v8") == 0;
+        bool flagSettingsFormat = strcmp(format, "v8") == 0;
+        float legacyPreviewSize = 0.0f, legacyPreviewSpeed = 0.0f;
+        if ((folderIdFormat ?
+             fscanf(file, "%d %d %d %d %d", &attachment.type, &folderId,
+                    &attachment.cell.row, &attachment.cell.column, &side) :
+             fscanf(file, "%d %d %d %d", &attachment.type, &attachment.cell.row,
+                    &attachment.cell.column, &side)) != (folderIdFormat ? 5 : 4) ||
+            !RpgAttachments_IsStoredType(attachment.type) ||
+            !RpgAttachments_IsCellInStage(attachment.cell) ||
+            side < RPG_GRID_SIDE_TOP || side > RPG_GRID_SIDE_LEFT) goto fail;
+        attachment.folderId = RpgAttachments_RepairFolderId(&loaded, folderId);
+        attachment.side = (RpgGridSide)side;
+        outerCell = RpgGridPath_GetSideNeighbor(attachment.cell, attachment.side);
+        shooter = (RpgShooterConfig){
+            .attachmentId = attachment.folderId, .dataSize = 8.0f, .dataSpeed = 120.0f,
+            .dataInterval = 1.0f, .sizePerFile = RPG_STAGE_TILE_SIZE * 0.25f,
+            .speedPerKilobyte = 1.0f / 64.0f, .previewFileCount = 2,
+            .path = { .cellCount = 1, .cells = { outerCell } }
+        };
+        attachment.socketRightLightAngle = 18.0f;
+        attachment.socketLightOpacity = 0.45f;
+        if (versioned) {
+            int readCount;
+            if (flagSettingsFormat) {
+                readCount = fscanf(file, "%f %f %f %d %f %f %d %llu %d %f %f %d",
+                    &shooter.dataSize, &shooter.dataSpeed, &shooter.dataInterval, &previewEnabled,
+                    &shooter.sizePerFile, &shooter.speedPerKilobyte, &shooter.previewFileCount,
+                    &shooter.previewTotalBytes, &pathCount, &attachment.socketRightLightAngle,
+                    &attachment.socketLightOpacity, &flagStartConnected);
+            } else if (socketSettingsFormat) {
+                readCount = fscanf(file, "%f %f %f %d %f %f %d %llu %d %f %f",
+                    &shooter.dataSize, &shooter.dataSpeed, &shooter.dataInterval, &previewEnabled,
+                    &shooter.sizePerFile, &shooter.speedPerKilobyte, &shooter.previewFileCount,
+                    &shooter.previewTotalBytes, &pathCount, &attachment.socketRightLightAngle,
+                    &attachment.socketLightOpacity);
+            } else if (settingsFormat) {
+                readCount = fscanf(file, "%f %f %f %d %f %f %d %llu %d",
+                    &shooter.dataSize, &shooter.dataSpeed, &shooter.dataInterval, &previewEnabled,
+                    &shooter.sizePerFile, &shooter.speedPerKilobyte, &shooter.previewFileCount,
+                    &shooter.previewTotalBytes, &pathCount);
+            } else if (strcmp(format, "v5") == 0) {
+                readCount = fscanf(file, "%f %f %f %d %f %f %d",
+                    &shooter.dataSize, &shooter.dataSpeed, &shooter.dataInterval, &previewEnabled,
+                    &legacyPreviewSize, &legacyPreviewSpeed, &pathCount);
+            } else if (previewFormat) {
+                readCount = fscanf(file, "%f %f %f %d %d", &shooter.dataSize,
+                    &shooter.dataSpeed, &shooter.dataInterval, &previewEnabled, &pathCount);
+            } else {
+                readCount = fscanf(file, "%f %f %f %d", &shooter.dataSize,
+                    &shooter.dataSpeed, &shooter.dataInterval, &pathCount);
+            }
+            if (readCount != (flagSettingsFormat ? 12 : socketSettingsFormat ? 11 :
+                              settingsFormat ? 9 : strcmp(format, "v5") == 0 ? 7 :
+                              previewFormat ? 5 : 4) || shooter.dataSize < 2.0f ||
+                shooter.dataSize > 24.0f || shooter.dataSpeed < 20.0f ||
+                shooter.dataSpeed > 480.0f || shooter.dataInterval < 0.1f ||
+                shooter.dataInterval > 10.0f || shooter.sizePerFile < 1.0f ||
+                shooter.sizePerFile > 64.0f || shooter.speedPerKilobyte < 0.0001f ||
+                shooter.speedPerKilobyte > 1.0f || shooter.previewFileCount < 1 ||
+                shooter.previewFileCount > 9999 || pathCount < 1 ||
+                pathCount > RPG_GRID_PATH_MAX_CELLS) goto fail;
+            shooter.dataPreviewEnabled = previewEnabled != 0;
+            shooter.sizePerFile = RpgAttachments_NormalizeShotSizePerFile(shooter.sizePerFile);
+            shooter.path.cellCount = pathCount;
+            attachment.socketRightLightAngle = Clamp(attachment.socketRightLightAngle, 0.0f, 80.0f);
+            attachment.socketLightOpacity = Clamp(attachment.socketLightOpacity, 0.05f, 0.95f);
+            for (int pathIndex = 0; pathIndex < shooter.path.cellCount; pathIndex++)
+                if (fscanf(file, "%d %d", &shooter.path.cells[pathIndex].row,
+                           &shooter.path.cells[pathIndex].column) != 2 ||
+                    !RpgAttachments_IsCellInStage(shooter.path.cells[pathIndex])) goto fail;
+        }
+        if (!RpgAttachments_Append(&loaded, &attachment)) goto fail;
+        if (attachment.type == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER) {
+            RpgShooterConfig *target = RpgAttachments_FindShooter(&loaded, attachment.folderId);
+            if (target == NULL) goto fail;
+            *target = shooter;
+            if (target->path.cellCount == 1 &&
+                ((target->path.cells[0].row == outerCell.row && target->path.cells[0].column == outerCell.column) ||
+                 (target->path.cells[0].row == RpgAttachments_GetShooterFrontCell(&attachment).row &&
+                  target->path.cells[0].column == RpgAttachments_GetShooterFrontCell(&attachment).column)))
+                RpgAttachments_SetDefaultShooterPath(&attachment, target);
+        } else if (attachment.type == RPG_BLOCK_ATTACHMENT_SAVE_FLAG) {
+            RpgFlagConfig *target = RpgAttachments_FindFlag(&loaded, attachment.folderId);
+            if (target == NULL) goto fail;
+            target->startZipperConnected = flagStartConnected != 0;
+        } else if (attachment.type == RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET) {
+            RpgSocketConfig *target = RpgAttachments_FindSocket(&loaded, attachment.folderId);
+            if (target == NULL) goto fail;
+            target->rightLightAngle = attachment.socketRightLightAngle;
+            target->lightOpacity = attachment.socketLightOpacity;
+        }
+    }
+    if (fclose(file) != 0) { RpgAttachments_Destroy(&loaded); return false; }
+    RpgAttachments_RefreshEditorFacades(&loaded);
+    RpgAttachments_Destroy(attachments);
+    *attachments = loaded;
+    return true;
+fail:
+    fclose(file);
+    RpgAttachments_Destroy(&loaded);
+    return false;
+}
+
+/* v9 is the canonical static format.  Keep the old v2-v8 reader above for
+   one-way migration only; runtime objects may still use specialized arrays,
+   but their editable source now has one attachment-owned file. */
+static bool RpgAttachments_ReadStaticRecord(FILE *file, RpgAttachments *attachments)
+{
+    RpgAttachment attachment = { 0 };
+    RpgShooterConfig shooter = { 0 };
+    RpgFlagConfig flag = { 0 };
+    RpgSocketConfig socket = { 0 };
+    int side, previewEnabled, startConnected;
+    if (file == NULL || attachments == NULL || attachments->count >= RPG_ATTACHMENT_LIMIT ||
+        fscanf(file, "%d %d %d %d %d %f %f %f %d %f %f %d %llu %d %f %f %d",
+               &attachment.type, &attachment.folderId, &attachment.cell.row,
+               &attachment.cell.column, &side, &shooter.dataSize,
+               &shooter.dataSpeed, &shooter.dataInterval, &previewEnabled,
+               &shooter.sizePerFile, &shooter.speedPerKilobyte,
+               &shooter.previewFileCount, &shooter.previewTotalBytes,
+               &shooter.path.cellCount, &socket.rightLightAngle,
+               &socket.lightOpacity, &startConnected) != 17 ||
+        !RpgAttachments_IsStoredType(attachment.type) ||
+        !RpgAttachments_IsCellInStage(attachment.cell) ||
+        side < RPG_GRID_SIDE_TOP || side > RPG_GRID_SIDE_LEFT ||
+        shooter.dataSize < 2.0f || shooter.dataSize > 24.0f ||
+        shooter.dataSpeed < 20.0f || shooter.dataSpeed > 480.0f ||
+        shooter.dataInterval < 0.1f || shooter.dataInterval > 10.0f ||
+        shooter.sizePerFile < 1.0f || shooter.sizePerFile > 64.0f ||
+        shooter.speedPerKilobyte < 0.0001f || shooter.speedPerKilobyte > 1.0f ||
+        shooter.previewFileCount < 1 || shooter.previewFileCount > 9999 ||
+        shooter.path.cellCount < 1 || shooter.path.cellCount > RPG_GRID_PATH_MAX_CELLS)
+        return false;
+    attachment.folderId = RpgAttachments_RepairFolderId(attachments, attachment.folderId);
+    attachment.side = (RpgGridSide)side;
+    shooter.attachmentId = attachment.folderId;
+    shooter.dataPreviewEnabled = previewEnabled != 0;
+    shooter.sizePerFile = RpgAttachments_NormalizeShotSizePerFile(shooter.sizePerFile);
+    socket.attachmentId = attachment.folderId;
+    socket.rightLightAngle = Clamp(socket.rightLightAngle, 0.0f, 80.0f);
+    socket.lightOpacity = Clamp(socket.lightOpacity, 0.05f, 0.95f);
+    flag.attachmentId = attachment.folderId; flag.startZipperConnected = startConnected != 0;
+    for (int index = 0; index < shooter.path.cellCount; index++)
+        if (fscanf(file, "%d %d", &shooter.path.cells[index].row,
+                   &shooter.path.cells[index].column) != 2 ||
+            !RpgAttachments_IsCellInStage(shooter.path.cells[index])) return false;
+    if (!RpgAttachments_Append(attachments, &attachment)) return false;
+    if (attachment.type == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER) {
+        RpgShooterConfig *target = RpgAttachments_FindShooter(attachments, attachment.folderId);
+        if (target != NULL) { *target = shooter; if (target->path.cellCount == 1) RpgAttachments_SetDefaultShooterPath(&attachment, target); }
+    } else if (attachment.type == RPG_BLOCK_ATTACHMENT_SAVE_FLAG) {
+        RpgFlagConfig *target = RpgAttachments_FindFlag(attachments, attachment.folderId); if (target != NULL) *target = flag;
+    } else if (attachment.type == RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET) {
+        RpgSocketConfig *target = RpgAttachments_FindSocket(attachments, attachment.folderId); if (target != NULL) *target = socket;
+    }
+    return true;
+}
+
+#if 0 /* v11 writer retained only to document legacy on-disk records. */
+static bool RpgAttachments_WriteStaticRecord(FILE *file, const RpgAttachment *attachment)
+{
+    if (file == NULL || attachment == NULL || attachment->dataPath.cellCount < 1 ||
+        attachment->dataPath.cellCount > RPG_GRID_PATH_MAX_CELLS ||
+        fprintf(file, "%d %d %d %d %d %.2f %.2f %.2f %d %.2f %.6f %d %llu %d %.1f %.3f %d",
+                attachment->type, attachment->folderId, attachment->cell.row,
+                attachment->cell.column, attachment->side, attachment->dataSize,
+                attachment->dataSpeed, attachment->dataInterval,
+                attachment->dataPreviewEnabled ? 1 : 0, attachment->sizePerFile,
+                attachment->speedPerKilobyte, attachment->previewFileCount,
+                attachment->previewTotalBytes, attachment->dataPath.cellCount,
+                attachment->socketRightLightAngle, attachment->socketLightOpacity,
+                attachment->flagStartZipperConnected ? 1 : 0) < 0) return false;
+    for (int index = 0; index < attachment->dataPath.cellCount; index++)
+        if (fprintf(file, " %d %d", attachment->dataPath.cells[index].row,
+                    attachment->dataPath.cells[index].column) < 0) return false;
+    return fputc('\n', file) != EOF;
+}
+#endif
+
+static bool RpgAttachments_ReadRouteRecord(FILE *file, RpgAttachmentRoute *route)
+{
+    int kind, hasFloor, pathCount;
+    RpgAttachmentRoute loaded = { 0 };
+    if (file == NULL || route == NULL ||
+        fscanf(file, "%d %d %f %d %f %d %d %d %d %d", &loaded.id, &kind,
+               &loaded.conveyorSpeed, &loaded.conveyorDirection,
+               &loaded.conveyorSlideAngleDegrees, &hasFloor, &loaded.ownerCell.row,
+               &loaded.ownerCell.column, &loaded.ownerAttachmentId, &pathCount) != 10 ||
+        loaded.id <= 0 || (kind != RPG_WIRE_KIND_ELECTRIC && kind != RPG_WIRE_KIND_CONVEYOR) ||
+        (hasFloor != 0 && hasFloor != 1) || pathCount < 1 || pathCount > RPG_GRID_PATH_MAX_CELLS ||
+        !RpgAttachments_IsCellInStage(loaded.ownerCell)) return false;
+    loaded.kind = (RpgWireKind)kind;
+    loaded.conveyorHasFloor = hasFloor != 0;
+    loaded.cells.cellCount = pathCount;
+    if (loaded.kind == RPG_WIRE_KIND_CONVEYOR &&
+        (loaded.conveyorSpeed < 16.0f || loaded.conveyorSpeed > 960.0f ||
+         (loaded.conveyorDirection != -1 && loaded.conveyorDirection != 1) ||
+         loaded.conveyorSlideAngleDegrees < 0.0f || loaded.conveyorSlideAngleDegrees > 89.0f)) return false;
+    for (int index = 0; index < pathCount; index++)
+        if (fscanf(file, "%d %d", &loaded.cells.cells[index].row, &loaded.cells.cells[index].column) != 2 ||
+            !RpgAttachments_IsCellInStage(loaded.cells.cells[index])) return false;
+    *route = loaded;
+    return true;
+}
+
+static bool RpgAttachments_WriteRouteRecord(FILE *file, const RpgAttachmentRoute *route)
+{
+    if (file == NULL || route == NULL || route->id <= 0 || route->cells.cellCount < 1 ||
+        route->cells.cellCount > RPG_GRID_PATH_MAX_CELLS) return false;
+    if (fprintf(file, "%d %d %.2f %d %.1f %d %d %d %d %d", route->id, route->kind,
+                route->conveyorSpeed, route->conveyorDirection,
+                route->conveyorSlideAngleDegrees, route->conveyorHasFloor ? 1 : 0,
+                route->ownerCell.row, route->ownerCell.column, route->ownerAttachmentId,
+                route->cells.cellCount) < 0) return false;
+    for (int index = 0; index < route->cells.cellCount; index++)
+        if (fprintf(file, " %d %d", route->cells.cells[index].row,
+                    route->cells.cells[index].column) < 0) return false;
+    return fputc('\n', file) != EOF;
+}
+
+bool RpgAttachments_LoadStatic(const char *filePath, RpgAttachments *attachments,
+                               RpgWires *wires, bool *isUnifiedFormat)
+{
+    FILE *file;
+    char format[16];
+    int attachmentCount, receiverCount = 0, routeCount = 0, wireCount = 0;
+    bool isV9, isV11;
+    RpgAttachments loadedAttachments = RpgAttachments_Default();
+    RpgWires loadedWires = RpgWires_Default();
+    if (isUnifiedFormat != NULL) *isUnifiedFormat = false;
+    if (filePath == NULL || attachments == NULL || wires == NULL ||
+        (file = fopen(filePath, "r")) == NULL) return false;
+    if (fscanf(file, "%15s", format) != 1) { fclose(file); return false; }
+    if (strcmp(format, "v2") == 0 || strcmp(format, "v3") == 0 ||
+        strcmp(format, "v4") == 0 || strcmp(format, "v5") == 0 ||
+        strcmp(format, "v6") == 0 || strcmp(format, "v7") == 0 ||
+        strcmp(format, "v8") == 0) {
+        fclose(file);
+        /* Keep isUnifiedFormat false: v2-v8 routes and receivers are still
+           loaded from their companion legacy files by stage storage. */
+        return RpgAttachments_LoadLegacyStatic(filePath, attachments);
+    }
+    if (strcmp(format, "v12") == 0) {
+        int shooters, flags, sockets;
+        if (fscanf(file, "%d %d %d %d %d", &attachmentCount, &shooters, &flags, &sockets, &routeCount) != 5 ||
+            attachmentCount < 0 || attachmentCount > RPG_ATTACHMENT_LIMIT || shooters < 0 || flags < 0 ||
+            sockets < 0 || routeCount < 0 || routeCount > RPG_WIRE_MAX_COUNT) { fclose(file); return false; }
+        for (int i = 0; i < attachmentCount; i++) {
+            RpgAttachment item = { 0 }; int side;
+            if (fscanf(file, "%d %d %d %d %d", &item.type, &item.folderId, &item.cell.row,
+                       &item.cell.column, &side) != 5 || !RpgAttachments_IsStoredType(item.type) ||
+                !RpgAttachments_IsCellInStage(item.cell) || side < RPG_GRID_SIDE_TOP || side > RPG_GRID_SIDE_LEFT) {
+                fclose(file); RpgAttachments_Destroy(&loadedAttachments); return false;
+            }
+            item.side = (RpgGridSide)side;
+            if (!RpgAttachments_Append(&loadedAttachments, &item)) { fclose(file); RpgAttachments_Destroy(&loadedAttachments); return false; }
+        }
+        for (int i = 0; i < shooters; i++) {
+            RpgShooterConfig item = { 0 }; int preview, count;
+            if (fscanf(file, "%d %f %f %f %d %f %f %d %llu %d", &item.attachmentId, &item.dataSize,
+                       &item.dataSpeed, &item.dataInterval, &preview, &item.sizePerFile, &item.speedPerKilobyte,
+                       &item.previewFileCount, &item.previewTotalBytes, &count) != 10 || count < 1 || count > RPG_GRID_PATH_MAX_CELLS) {
+                fclose(file); RpgAttachments_Destroy(&loadedAttachments); return false;
+            }
+            item.dataPreviewEnabled = preview != 0; item.path.cellCount = count;
+            for (int n = 0; n < count; n++) if (fscanf(file, "%d %d", &item.path.cells[n].row, &item.path.cells[n].column) != 2) { fclose(file); RpgAttachments_Destroy(&loadedAttachments); return false; }
+            RpgShooterConfig *target = RpgAttachments_FindShooter(&loadedAttachments, item.attachmentId);
+            if (target == NULL) { fclose(file); RpgAttachments_Destroy(&loadedAttachments); return false; } *target = item;
+        }
+        for (int i = 0; i < flags; i++) { int connected; RpgFlagConfig item = { 0 };
+            if (fscanf(file, "%d %d", &item.attachmentId, &connected) != 2 ||
+                RpgAttachments_FindFlag(&loadedAttachments, item.attachmentId) == NULL) { fclose(file); RpgAttachments_Destroy(&loadedAttachments); return false; }
+            RpgAttachments_FindFlag(&loadedAttachments, item.attachmentId)->startZipperConnected = connected != 0;
+        }
+        for (int i = 0; i < sockets; i++) { RpgSocketConfig item = { 0 };
+            if (fscanf(file, "%d %f %f", &item.attachmentId, &item.rightLightAngle, &item.lightOpacity) != 3 ||
+                RpgAttachments_FindSocket(&loadedAttachments, item.attachmentId) == NULL) { fclose(file); RpgAttachments_Destroy(&loadedAttachments); return false; }
+            *RpgAttachments_FindSocket(&loadedAttachments, item.attachmentId) = item;
+        }
+        if (routeCount > 0 && !(loadedAttachments.routes = calloc((size_t)routeCount, sizeof(*loadedAttachments.routes)))) { fclose(file); RpgAttachments_Destroy(&loadedAttachments); return false; }
+        loadedAttachments.routeCapacity = routeCount;
+        for (int i = 0; i < routeCount; i++) if (!RpgAttachments_ReadRouteRecord(file, &loadedAttachments.routes[i])) { fclose(file); RpgAttachments_Destroy(&loadedAttachments); return false; }
+        loadedAttachments.routeCount = routeCount;
+        if (fclose(file) != 0) { RpgAttachments_Destroy(&loadedAttachments); return false; }
+        RpgAttachments_RefreshEditorFacades(&loadedAttachments);
+        RpgAttachments_Destroy(attachments); *attachments = loadedAttachments;
+        RpgAttachments_BuildRuntimeWires(attachments, wires); if (isUnifiedFormat != NULL) *isUnifiedFormat = true;
+        return true;
+    }
+    isV9 = strcmp(format, "v9") == 0;
+    isV11 = strcmp(format, "v11") == 0;
+    if (!isV9 && !isV11 && strcmp(format, "v10") != 0) {
+        fclose(file);
+        return false;
+    }
+    if (isUnifiedFormat != NULL) *isUnifiedFormat = true;
+    if ((isV9 ? fscanf(file, "%d %d %d", &attachmentCount, &receiverCount, &wireCount) :
+         isV11 ? fscanf(file, "%d %d", &attachmentCount, &routeCount) :
+                 fscanf(file, "%d %d", &attachmentCount, &wireCount)) != (isV9 ? 3 : 2) ||
+        attachmentCount < 0 || attachmentCount > RPG_ATTACHMENT_LIMIT ||
+        receiverCount < 0 || receiverCount > RPG_ATTACHMENT_LIMIT ||
+        routeCount < 0 || routeCount > RPG_WIRE_MAX_COUNT ||
+        wireCount < 0 || wireCount > RPG_WIRE_MAX_COUNT) {
+        fclose(file);
+        return false;
+    }
+    for (int index = 0; index < attachmentCount; index++)
+        if (!RpgAttachments_ReadStaticRecord(file, &loadedAttachments)) {
+            fclose(file); return false;
+        }
+    for (int index = 0; index < receiverCount; index++) {
+        RpgAttachment receiver = { .type = RPG_ATTACHMENT_TYPE_RECEIVER,
+                                    .folderId = RpgAttachments_GetNextFolderId(&loadedAttachments) };
+        int side;
+        if (fscanf(file, "%d %d %d", &receiver.cell.row, &receiver.cell.column, &side) != 3 ||
+            !RpgAttachments_IsCellInStage(receiver.cell) ||
+            side < RPG_GRID_SIDE_TOP || side > RPG_GRID_SIDE_LEFT) {
+            fclose(file); RpgAttachments_Destroy(&loadedAttachments); return false;
+        }
+        receiver.side = (RpgGridSide)side;
+        for (int attachmentIndex = 0; attachmentIndex < loadedAttachments.count; attachmentIndex++)
+            if (RpgAttachments_IsReceiver(&loadedAttachments.entries[attachmentIndex]) &&
+                loadedAttachments.entries[attachmentIndex].cell.row == receiver.cell.row &&
+                loadedAttachments.entries[attachmentIndex].cell.column == receiver.cell.column) {
+                fclose(file); RpgAttachments_Destroy(&loadedAttachments); return false;
+            }
+        if (!RpgAttachments_Append(&loadedAttachments, &receiver)) {
+            fclose(file); RpgAttachments_Destroy(&loadedAttachments); return false;
+        }
+    }
+    if (isV11 && routeCount > 0) {
+        loadedAttachments.routes = (RpgAttachmentRoute *)calloc((size_t)routeCount,
+                                                                  sizeof(*loadedAttachments.routes));
+        if (loadedAttachments.routes == NULL) { fclose(file); RpgAttachments_Destroy(&loadedAttachments); return false; }
+        loadedAttachments.routeCapacity = routeCount;
+        for (int index = 0; index < routeCount; index++)
+            if (!RpgAttachments_ReadRouteRecord(file, &loadedAttachments.routes[index])) {
+                fclose(file); RpgAttachments_Destroy(&loadedAttachments); return false;
+            }
+        loadedAttachments.routeCount = routeCount;
+    }
+    for (int index = 0; index < wireCount; index++)
+        if (!RpgWires_ReadRecord(file, &loadedWires.entries[loadedWires.count])) {
+            fclose(file); return false;
+        } else loadedWires.count++;
+    if (fclose(file) != 0) { RpgAttachments_Destroy(&loadedAttachments); return false; }
+    RpgAttachments_RefreshEditorFacades(&loadedAttachments);
+    RpgAttachments_Destroy(attachments);
+    if (!isV11) RpgAttachments_ImportWires(&loadedAttachments, &loadedWires);
+    *attachments = loadedAttachments;
+    RpgAttachments_BuildRuntimeWires(attachments, wires);
+    return true;
+}
+
+bool RpgAttachments_SaveStatic(const char *filePath, const RpgAttachments *attachments,
+                               const RpgWires *wires)
+{
+    FILE *file;
+    RpgAttachments stored = RpgAttachments_Default();
+    if (filePath == NULL || attachments == NULL || wires == NULL ||
+        (file = fopen(filePath, "w")) == NULL) return false;
+    if (!RpgAttachments_Clone(&stored, attachments)) { fclose(file); return false; }
+    RpgAttachments_SynchronizeModuleConfigs(&stored);
+    RpgAttachments_ImportWires(&stored, wires);
+    if (fprintf(file, "v12 %d %d %d %d %d\n", stored.count, stored.shooterCount,
+                stored.flagCount, stored.socketCount, stored.routeCount) < 0) {
+        RpgAttachments_Destroy(&stored); fclose(file); return false;
+    }
+    for (int index = 0; index < stored.count; index++) {
+        const RpgAttachment *item = &stored.entries[index];
+        if (fprintf(file, "%d %d %d %d %d\n", item->type, item->folderId, item->cell.row,
+                    item->cell.column, item->side) < 0) {
+            RpgAttachments_Destroy(&stored); fclose(file); return false;
+        }
+    }
+    for (int index = 0; index < stored.shooterCount; index++) {
+        const RpgShooterConfig *item = &stored.shooters[index];
+        if (fprintf(file, "%d %.2f %.2f %.2f %d %.2f %.6f %d %llu %d", item->attachmentId,
+                    item->dataSize, item->dataSpeed, item->dataInterval, item->dataPreviewEnabled ? 1 : 0,
+                    item->sizePerFile, item->speedPerKilobyte, item->previewFileCount,
+                    item->previewTotalBytes, item->path.cellCount) < 0) { RpgAttachments_Destroy(&stored); fclose(file); return false; }
+        for (int cell = 0; cell < item->path.cellCount; cell++)
+            if (fprintf(file, " %d %d", item->path.cells[cell].row, item->path.cells[cell].column) < 0) { RpgAttachments_Destroy(&stored); fclose(file); return false; }
+        if (fputc('\n', file) == EOF) { RpgAttachments_Destroy(&stored); fclose(file); return false; }
+    }
+    for (int index = 0; index < stored.flagCount; index++)
+        if (fprintf(file, "%d %d\n", stored.flags[index].attachmentId,
+                    stored.flags[index].startZipperConnected ? 1 : 0) < 0) { RpgAttachments_Destroy(&stored); fclose(file); return false; }
+    for (int index = 0; index < stored.socketCount; index++)
+        if (fprintf(file, "%d %.1f %.3f\n", stored.sockets[index].attachmentId,
+                    stored.sockets[index].rightLightAngle, stored.sockets[index].lightOpacity) < 0) { RpgAttachments_Destroy(&stored); fclose(file); return false; }
+    for (int index = 0; index < stored.routeCount; index++)
+        if (!RpgAttachments_WriteRouteRecord(file, &stored.routes[index])) {
+            RpgAttachments_Destroy(&stored); fclose(file); return false;
+        }
+    RpgAttachments_Destroy(&stored);
+    return fclose(file) == 0;
+}
+
+bool RpgAttachments_Add(RpgAttachments *attachments, RpgStage *stage, int type,
                         RpgGridCell cell, RpgGridSide side)
 {
     RpgGridCell outerCell = RpgGridPath_GetSideNeighbor(cell, side);
-    RpgAttachment attachment = { .type = type, .folderId = RpgAttachments_GetNextFolderId(attachments), .cell = cell, .side = side, .dataSize = 8.0f,
-                                 .dataSpeed = 120.0f, .dataInterval = 1.0f,
-                                 .sizePerFile = RPG_STAGE_TILE_SIZE * 0.25f, .speedPerKilobyte = 1.0f / 64.0f,
-                                 .previewFileCount = 2, .previewTotalBytes = 0,
-                                 .socketRightLightAngle = 18.0f, .socketLightOpacity = 0.45f,
-                                 .flagStartZipperConnected = true,
-                                 .dataPath = { .cellCount = 1, .cells = { outerCell } } };
-    if (attachments->count >= RPG_ATTACHMENT_MAX_COUNT || !RpgBlockInventory_IsAttachment(type) ||
+    RpgAttachment attachment = { .type = type,
+        .folderId = RpgAttachments_GetNextFolderId(attachments), .cell = cell, .side = side };
+    if (!RpgBlockInventory_IsAttachment(type) ||
         !RpgAttachments_IsCellInStage(cell) || stage->blocks[cell.row][cell.column] == 0 ||
-        !RpgAttachments_HasOuterEmptyCell(stage, cell, side) ||
         side < RPG_GRID_SIDE_TOP || side > RPG_GRID_SIDE_LEFT) return false;
     /* A block socket has a gravity-facing recess and is deliberately only
        mountable on the top face of its supporting block. */
     if (type == RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET && side != RPG_GRID_SIDE_TOP) return false;
-    if (type == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER)
-        RpgAttachments_SetDefaultShooterPath(&attachment);
-    if (RpgBlockInventory_IsCellAttachment(type) && RpgAttachments_IsCellOccupied(attachments, outerCell))
+    if (RpgAttachments_RequiresEmptyOuterCell(type) &&
+        !RpgAttachments_HasOuterEmptyCell(stage, cell, side)) return false;
+    if (RpgBlockInventory_IsAttachmentBlock(type) && RpgAttachments_IsCellOccupied(attachments, outerCell))
         return false;
     for (int index = 0; index < attachments->count; index++)
         if (RpgAttachments_AreSame(&attachments->entries[index], &attachment)) return false;
-    attachments->entries[attachments->count++] = attachment;
+    if (!RpgAttachments_Append(attachments, &attachment)) return false;
+    if (RpgBlockInventory_IsAttachmentBlock(type))
+        stage->blocks[outerCell.row][outerCell.column] = type;
     return true;
 }
 
@@ -287,7 +1034,10 @@ bool RpgAttachments_MoveDataPathEndpoint(RpgAttachments *attachments, const RpgS
         attachments->entries[attachmentIndex].type != RPG_BLOCK_ATTACHMENT_RADIO_EMITTER ||
         row < 0 || row >= RPG_STAGE_ROWS ||
         column < 0 || column >= RPG_STAGE_WORLD_COLUMNS) return false;
-    return RpgGridPath_MoveEndpoint(&attachments->entries[attachmentIndex].dataPath, false,
+    RpgShooterConfig *shooter = RpgAttachments_FindShooter(attachments,
+        attachments->entries[attachmentIndex].folderId);
+    if (shooter == NULL) return false;
+    return RpgGridPath_MoveEndpoint(&shooter->path, false,
                                     (RpgGridCell){ row, column }, 1);
 }
 
@@ -296,23 +1046,116 @@ bool RpgAttachments_FindDataPathEndpoint(const RpgAttachments *attachments, int 
 {
     for (int index = attachments->count - 1; index >= 0; index--) {
         if (attachments->entries[index].type != RPG_BLOCK_ATTACHMENT_RADIO_EMITTER) continue;
-        const RpgGridPath *path = &attachments->entries[index].dataPath;
+        const RpgShooterConfig *shooter = RpgAttachments_FindShooterConst(attachments,
+            attachments->entries[index].folderId);
+        if (shooter == NULL) continue;
+        const RpgGridPath *path = &shooter->path;
         RpgGridCell end = path->cells[path->cellCount - 1];
         if (end.row == row && end.column == column) { *attachmentIndex = index; return true; }
     }
     return false;
 }
 
-bool RpgAttachments_Remove(RpgAttachments *attachments, RpgAttachment attachment)
+bool RpgAttachments_Remove(RpgAttachments *attachments, RpgStage *stage, RpgAttachment attachment)
 {
     for (int index = 0; index < attachments->count; index++) {
         if (!RpgAttachments_AreSame(&attachments->entries[index], &attachment)) continue;
+        RpgGridCell outerCell;
+        if (stage != NULL && RpgBlockInventory_IsAttachmentBlock(attachments->entries[index].type) &&
+            RpgAttachments_GetOccupiedCell(&attachments->entries[index], &outerCell) &&
+            stage->blocks[outerCell.row][outerCell.column] == attachments->entries[index].type)
+            stage->blocks[outerCell.row][outerCell.column] = 0;
         for (int next = index; next < attachments->count - 1; next++)
             attachments->entries[next] = attachments->entries[next + 1];
         attachments->count--;
         return true;
     }
     return false;
+}
+
+bool RpgAttachments_Replace(RpgAttachments *attachments, RpgStage *stage, int index,
+                            RpgAttachment replacement)
+{
+    RpgGridCell oldOuter, newOuter;
+    RpgAttachment old;
+    if (attachments == NULL || stage == NULL || index < 0 || index >= attachments->count ||
+        !RpgAttachments_IsCellInStage(replacement.cell)) return false;
+    old = attachments->entries[index];
+    if (RpgBlockInventory_IsAttachmentBlock(old.type) &&
+        RpgAttachments_GetOccupiedCell(&old, &oldOuter) &&
+        stage->blocks[oldOuter.row][oldOuter.column] == old.type)
+        stage->blocks[oldOuter.row][oldOuter.column] = 0;
+    if (RpgBlockInventory_IsAttachmentBlock(replacement.type)) {
+        if (!RpgAttachments_GetOccupiedCell(&replacement, &newOuter) ||
+            stage->blocks[newOuter.row][newOuter.column] != 0) {
+            if (RpgBlockInventory_IsAttachmentBlock(old.type) &&
+                RpgAttachments_GetOccupiedCell(&old, &oldOuter))
+                stage->blocks[oldOuter.row][oldOuter.column] = old.type;
+            return false;
+        }
+        stage->blocks[newOuter.row][newOuter.column] = replacement.type;
+    }
+    attachments->entries[index] = replacement;
+    return true;
+}
+
+bool RpgAttachments_GetOwnerBlockCell(const RpgAttachment *attachment, RpgGridCell *cell)
+{
+    RpgGridCell outerCell;
+    if (attachment == NULL || cell == NULL) return false;
+    if (RpgBlockInventory_IsAttachmentBlock(attachment->type) &&
+        RpgAttachments_GetOccupiedCell(attachment, &outerCell)) {
+        *cell = outerCell;
+        return true;
+    }
+    *cell = attachment->cell;
+    return true;
+}
+
+bool RpgAttachments_IsOwnedByBlock(const RpgAttachment *attachment, RpgGridCell blockCell)
+{
+    RpgGridCell owner;
+    return RpgAttachments_GetOwnerBlockCell(attachment, &owner) &&
+           owner.row == blockCell.row && owner.column == blockCell.column;
+}
+
+void RpgAttachments_MaterializeBlockCells(RpgAttachments *attachments, RpgStage *stage)
+{
+    if (attachments == NULL || stage == NULL) return;
+    for (int index = 0; index < attachments->count; index++) {
+        RpgAttachment *attachment = &attachments->entries[index];
+        RpgGridCell outerCell;
+        if (!RpgAttachments_GetOccupiedCell(attachment, &outerCell)) continue;
+        /* Save flags used to be block-backed.  On loading an old stage, remove
+           only the matching legacy flag cell; never erase user terrain that
+           happens to occupy the same cell. */
+        if (!RpgBlockInventory_IsAttachmentBlock(attachment->type)) {
+            if (stage->blocks[outerCell.row][outerCell.column] == attachment->type)
+                stage->blocks[outerCell.row][outerCell.column] = 0;
+            continue;
+        }
+        /* Existing stage data stored these only in rpg_attachments.cfg.  A
+           conflicting terrain cell wins; RemoveBroken will discard the stale
+           attachment rather than overwriting user-authored terrain. */
+        if (stage->blocks[outerCell.row][outerCell.column] == 0)
+            stage->blocks[outerCell.row][outerCell.column] = attachment->type;
+    }
+}
+
+bool RpgAttachments_IsRuntimeUnavailable(const RpgAttachment *attachment)
+{
+    return attachment == NULL || attachment->isZipperHeld || attachment->isOwnerBlockZipperHeld;
+}
+
+void RpgAttachments_SetOwnerBlockZipperHeld(RpgAttachments *attachments, RpgGridCell blockCell,
+                                             bool isHeld)
+{
+    if (attachments == NULL) return;
+    for (int index = 0; index < attachments->count; index++) {
+        RpgAttachment *attachment = &attachments->entries[index];
+        if (RpgAttachments_IsOwnedByBlock(attachment, blockCell))
+            attachment->isOwnerBlockZipperHeld = isHeld;
+    }
 }
 
 void RpgAttachments_MigrateLegacyButtons(RpgAttachments *attachments, RpgStage *stage)
@@ -341,7 +1184,7 @@ bool RpgAttachments_IsButtonPressed(const RpgAttachments *attachments, Vector2 p
 {
     for (int index = 0; index < attachments->count; index++) {
         const RpgAttachment *attachment = &attachments->entries[index];
-        if (attachment->isZipperHeld || attachment->type != RPG_BLOCK_ATTACHMENT_DATA_BUTTON) continue;
+        if (RpgAttachments_IsRuntimeUnavailable(attachment) || attachment->type != RPG_BLOCK_ATTACHMENT_DATA_BUTTON) continue;
         Vector2 position = RpgAttachments_GetPosition(attachment, 0);
         if (fabsf(playerPosition.x - position.x) <= 22.0f && fabsf(playerPosition.y - position.y) <= 24.0f)
             return true;
@@ -363,7 +1206,7 @@ bool RpgAttachments_IsButtonPressedWorld(const RpgAttachments *attachments, cons
         const RpgAttachment *attachment = &attachments->entries[index];
         RpgGridCell outerCell;
         Vector2 position;
-        if (attachment->isZipperHeld || attachment->type != RPG_BLOCK_ATTACHMENT_DATA_BUTTON) continue;
+        if (RpgAttachments_IsRuntimeUnavailable(attachment) || attachment->type != RPG_BLOCK_ATTACHMENT_DATA_BUTTON) continue;
         if (attachment->cell.column / RPG_STAGE_COLUMNS != playerMap) continue;
         outerCell = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
         position = RpgStage_GetWorldPositionForCell(stage, outerCell.row, outerCell.column);
@@ -376,17 +1219,18 @@ bool RpgAttachments_IsButtonPressedWorld(const RpgAttachments *attachments, cons
 int RpgAttachments_FindBlockSocketAtBoundsWorld(const RpgAttachments *attachments,
                                                 const RpgStage *stage, Rectangle blockBounds)
 {
-    const float horizontalTolerance = 0.75f;
+    const float horizontalTolerance = (float)RPG_BLOCK_SOCKET_HORIZONTAL_SNAP_TOLERANCE;
     /* A fixed block visibly settles into the 4px recess.  It still fully
        covers the source, so occupancy must tolerate only that intentional
        vertical descent, never a loose side-to-side overlap. */
-    const float verticalTolerance = RPG_BLOCK_SOCKET_RECESS_DEPTH + 0.75f;
+    const float verticalTolerance = (float)(RPG_BLOCK_SOCKET_RECESS_DEPTH +
+                                            RPG_BLOCK_SOCKET_VERTICAL_SNAP_TOLERANCE);
     if (attachments == NULL || stage == NULL) return -1;
     for (int index = 0; index < attachments->count; index++) {
         const RpgAttachment *attachment = &attachments->entries[index];
         RpgGridCell socketCell;
         Rectangle socketBounds;
-        if (attachment->isZipperHeld || attachment->type != RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET ||
+        if (RpgAttachments_IsRuntimeUnavailable(attachment) || attachment->type != RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET ||
             attachment->side != RPG_GRID_SIDE_TOP) continue;
         socketCell = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
         if (!RpgAttachments_IsCellInStage(socketCell)) continue;
@@ -407,7 +1251,7 @@ bool RpgAttachments_HasBlockSocketAtBaseCell(const RpgAttachments *attachments, 
     if (attachments == NULL) return false;
     for (int index = 0; index < attachments->count; index++) {
         const RpgAttachment *attachment = &attachments->entries[index];
-        if (!attachment->isZipperHeld && attachment->type == RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET &&
+        if (!RpgAttachments_IsRuntimeUnavailable(attachment) && attachment->type == RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET &&
             attachment->side == RPG_GRID_SIDE_TOP && attachment->cell.row == row &&
             attachment->cell.column == column) return true;
     }
@@ -424,7 +1268,7 @@ void RpgAttachments_DrawBlockSocketRecesses(const RpgAttachments *attachments, i
     int lastColumn = firstColumn + RPG_STAGE_COLUMNS;
     for (int index = 0; index < attachments->count; index++) {
         const RpgAttachment *attachment = &attachments->entries[index];
-        if (attachment->isZipperHeld || attachment->type != RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET ||
+        if (RpgAttachments_IsRuntimeUnavailable(attachment) || attachment->type != RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET ||
             attachment->side != RPG_GRID_SIDE_TOP || attachment->cell.row < 0 ||
             attachment->cell.row >= RPG_STAGE_ROWS || attachment->cell.column < firstColumn ||
             attachment->cell.column >= lastColumn) continue;
@@ -439,8 +1283,20 @@ void RpgAttachments_DrawBlockSocketRecesses(const RpgAttachments *attachments, i
 
 typedef struct RpgSocketLightOcclusionContext {
     const RpgStage *stage;
+    const RpgMovingSolidSet *movingSolids;
     Vector2 localToWorld;
 } RpgSocketLightOcclusionContext;
+
+static bool RpgAttachments_IsSocketLightOccludedByMovingSolid(
+    const RpgMovingSolidSet *movingSolids, Rectangle probe)
+{
+    if (movingSolids == NULL || movingSolids->entries == NULL) return false;
+    for (int index = 0; index < movingSolids->count; index++)
+        if (movingSolids->entries[index].bounds.width > 0.0f &&
+            movingSolids->entries[index].bounds.height > 0.0f &&
+            CheckCollisionRecs(probe, movingSolids->entries[index].bounds)) return true;
+    return false;
+}
 
 static float RpgAttachments_RaycastSocketLight(void *rawContext, Vector2 localOrigin,
                                                 Vector2 direction, float maximumLength)
@@ -455,14 +1311,15 @@ static float RpgAttachments_RaycastSocketLight(void *rawContext, Vector2 localOr
         Vector2 localPoint = Vector2Add(localOrigin, Vector2Scale(direction, distance));
         Vector2 worldPoint = Vector2Add(localPoint, context->localToWorld);
         Rectangle probe = { worldPoint.x - 0.15f, worldPoint.y - 0.15f, 0.30f, 0.30f };
-        if (RpgStage_CheckSolidCollision(context->stage, probe))
+        if (RpgStage_CheckSolidCollision(context->stage, probe) ||
+            RpgAttachments_IsSocketLightOccludedByMovingSolid(context->movingSolids, probe))
             return fmaxf(0.0f, distance - sampleStep);
     }
     return maximumLength;
 }
 
 void RpgAttachments_DrawSocketLightsMap(const RpgAttachments *attachments, const RpgStage *stage,
-                                        int mapIndex)
+                                        int mapIndex, const RpgMovingSolidSet *movingSolids)
 {
     int firstColumn;
     int lastColumn;
@@ -471,11 +1328,12 @@ void RpgAttachments_DrawSocketLightsMap(const RpgAttachments *attachments, const
     lastColumn = firstColumn + RPG_STAGE_COLUMNS;
     for (int index = 0; index < attachments->count; index++) {
         const RpgAttachment *attachment = &attachments->entries[index];
+        const RpgSocketConfig *socket = RpgAttachments_FindSocketConst(attachments, attachment->folderId);
         float left;
         float bottom;
         RpgLightSourceSegment source;
         RpgSocketLightOcclusionContext occlusion;
-        if (attachment->isZipperHeld || attachment->type != RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET ||
+        if (RpgAttachments_IsRuntimeUnavailable(attachment) || attachment->type != RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET || socket == NULL ||
             attachment->side != RPG_GRID_SIDE_TOP || attachment->cell.row < 0 ||
             attachment->cell.row >= RPG_STAGE_ROWS || attachment->cell.column < firstColumn ||
             attachment->cell.column >= lastColumn) continue;
@@ -485,14 +1343,15 @@ void RpgAttachments_DrawSocketLightsMap(const RpgAttachments *attachments, const
                                                              attachment->cell.column);
         occlusion = (RpgSocketLightOcclusionContext){
             .stage = stage,
+            .movingSolids = movingSolids,
             .localToWorld = { worldCell.x - left,
                               worldCell.y - attachment->cell.row * RPG_STAGE_TILE_SIZE }
         };
         source = (RpgLightSourceSegment){
             .first = { left, bottom }, .second = { left + RPG_STAGE_TILE_SIZE, bottom },
-            .firstDirectionDegrees = -attachment->socketRightLightAngle,
-            .secondDirectionDegrees = attachment->socketRightLightAngle,
-            .rayLength = RPG_STAGE_TILE_SIZE, .opacity = attachment->socketLightOpacity,
+            .firstDirectionDegrees = -socket->rightLightAngle,
+            .secondDirectionDegrees = socket->rightLightAngle,
+            .rayLength = RPG_STAGE_TILE_SIZE, .opacity = socket->lightOpacity,
             .color = { 70, 197, 255, 255 }
         };
         RpgLightSource_DrawSegmentFanOccluded(&source, RpgAttachments_RaycastSocketLight, &occlusion);
@@ -504,7 +1363,7 @@ int RpgAttachments_FindTouchedSaveFlag(const RpgAttachments *attachments, Vector
     if (attachments == NULL) return -1;
     for (int index = 0; index < attachments->count; index++) {
         const RpgAttachment *attachment = &attachments->entries[index];
-        if (attachment->isZipperHeld || attachment->type != RPG_BLOCK_ATTACHMENT_SAVE_FLAG) continue;
+        if (RpgAttachments_IsRuntimeUnavailable(attachment) || attachment->type != RPG_BLOCK_ATTACHMENT_SAVE_FLAG) continue;
         if (Vector2Distance(playerPosition, RpgAttachments_GetPosition(attachment, 0)) <= 28.0f) return index;
     }
     return -1;
@@ -516,11 +1375,10 @@ int RpgAttachments_FindTouchedSaveFlagWorld(const RpgAttachments *attachments, c
     if (attachments == NULL || stage == NULL) return -1;
     for (int index = 0; index < attachments->count; index++) {
         const RpgAttachment *attachment = &attachments->entries[index];
-        if (attachment->isZipperHeld || attachment->type != RPG_BLOCK_ATTACHMENT_SAVE_FLAG) continue;
-        RpgGridCell occupiedCell = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
-        if (Vector2Distance(playerPosition,
-                            RpgStage_GetWorldPositionForCell(stage, occupiedCell.row,
-                                                             occupiedCell.column)) <= 28.0f)
+        if (RpgAttachments_IsRuntimeUnavailable(attachment) || attachment->type != RPG_BLOCK_ATTACHMENT_SAVE_FLAG) continue;
+        /* A flag belongs to its owner block.  Keep its world trigger at the
+           shared attachment position rather than the former outer-cell centre. */
+        if (Vector2Distance(playerPosition, RpgAttachments_GetPosition(attachment, 0)) <= 28.0f)
             return index;
     }
     return -1;
@@ -533,8 +1391,13 @@ bool RpgAttachments_SetRaisedSaveFlag(RpgAttachments *attachments, int flagId)
     for (int index = 0; index < attachments->count; index++) {
         RpgAttachment *attachment = &attachments->entries[index];
         if (attachment->type != RPG_BLOCK_ATTACHMENT_SAVE_FLAG) continue;
-        attachment->flagRaised = attachment->folderId == flagId;
-        if (attachment->flagRaised) found = true;
+        /* A flag follows its parent block into Zipper.  It cannot be the
+           active respawn point until that parent has returned. */
+        RpgFlagConfig *flag = RpgAttachments_FindFlag(attachments, attachment->folderId);
+        if (flag == NULL) continue;
+        flag->raised = !RpgAttachments_IsRuntimeUnavailable(attachment) && attachment->folderId == flagId;
+        attachment->flagRaised = flag->raised;
+        if (flag->raised) found = true;
     }
     return found;
 }
@@ -544,30 +1407,37 @@ bool RpgAttachments_StartShooterAnimation(RpgAttachments *attachments, int attac
     if (attachments == NULL || attachmentIndex < 0 || attachmentIndex >= attachments->count)
         return false;
     RpgAttachment *attachment = &attachments->entries[attachmentIndex];
-    if (attachment->type != RPG_BLOCK_ATTACHMENT_RADIO_EMITTER ||
-        attachment->shooterAnimationElapsed > 0.0f)
+    RpgShooterConfig *shooter = RpgAttachments_FindShooter(attachments, attachment->folderId);
+    if (attachment->type != RPG_BLOCK_ATTACHMENT_RADIO_EMITTER || shooter == NULL ||
+        shooter->animationElapsed > 0.0f)
         return false;
-    attachment->shooterAnimationElapsed = RPG_SHOOTER_ANIMATION_DURATION;
+    shooter->animationElapsed = RPG_SHOOTER_ANIMATION_DURATION;
+    attachment->shooterAnimationElapsed = shooter->animationElapsed;
     return true;
 }
 
 void RpgAttachments_UpdateShooterAnimations(RpgAttachments *attachments, float deltaTime)
 {
     if (attachments == NULL || deltaTime <= 0.0f) return;
-    for (int index = 0; index < attachments->count; index++) {
-        RpgAttachment *attachment = &attachments->entries[index];
-        if (attachment->shooterAnimationElapsed <= 0.0f) continue;
-        attachment->shooterAnimationElapsed -= deltaTime;
-        if (attachment->shooterAnimationElapsed < 0.0f) attachment->shooterAnimationElapsed = 0.0f;
+    for (int index = 0; index < attachments->shooterCount; index++) {
+        RpgShooterConfig *shooter = &attachments->shooters[index];
+        if (shooter->animationElapsed <= 0.0f) continue;
+        shooter->animationElapsed -= deltaTime;
+        if (shooter->animationElapsed < 0.0f) shooter->animationElapsed = 0.0f;
+        for (int attachmentIndex = 0; attachmentIndex < attachments->count; attachmentIndex++)
+            if (attachments->entries[attachmentIndex].folderId == shooter->attachmentId) {
+                attachments->entries[attachmentIndex].shooterAnimationElapsed = shooter->animationElapsed;
+                break;
+            }
     }
 }
 
-float RpgAttachments_GetShooterAnimationProgress(const RpgAttachment *attachment)
+float RpgAttachments_GetShooterAnimationProgress(const RpgAttachments *attachments, int attachmentId)
 {
-    if (attachment == NULL || attachment->type != RPG_BLOCK_ATTACHMENT_RADIO_EMITTER ||
-        attachment->shooterAnimationElapsed <= 0.0f)
+    const RpgShooterConfig *shooter = RpgAttachments_FindShooterConst(attachments, attachmentId);
+    if (shooter == NULL || shooter->animationElapsed <= 0.0f)
         return 0.0f;
-    float progress = 1.0f - attachment->shooterAnimationElapsed / RPG_SHOOTER_ANIMATION_DURATION;
+    float progress = 1.0f - shooter->animationElapsed / RPG_SHOOTER_ANIMATION_DURATION;
     if (progress < 0.0f) return 0.0f;
     if (progress > 1.0f) return 1.0f;
     return progress;
@@ -580,8 +1450,7 @@ Vector2 RpgAttachments_GetPosition(const RpgAttachment *attachment, int firstCol
     float y = outerCell.row * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f;
     /* Cell attachments live in the adjacent empty cell, so both their visual and hit position
        are the center of that occupied cell rather than the supporting block's edge. */
-    if (RpgBlockInventory_IsCellAttachment(attachment->type) &&
-        attachment->type != RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET) return (Vector2){ x, y };
+    if (RpgBlockInventory_IsAttachmentBlock(attachment->type)) return (Vector2){ x, y };
     /* The socket reserves the empty cell above for a seated block, but its
        actual body is a recess cut into the supporting block. */
     if (attachment->type == RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET)
@@ -657,15 +1526,16 @@ bool RpgAttachments_FindSnap(const RpgAttachments *attachments, const RpgStage *
             if (type == RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET && side != RPG_GRID_SIDE_TOP) continue;
             RpgAttachment candidate = { .type = type, .cell = { row, column },
                                         .side = (RpgGridSide)side };
-            if (!RpgAttachments_HasOuterEmptyCell(stage, candidate.cell, candidate.side)) continue;
+            if (RpgAttachments_RequiresEmptyOuterCell(type) &&
+                !RpgAttachments_HasOuterEmptyCell(stage, candidate.cell, candidate.side)) continue;
             RpgGridCell outerCell = RpgGridPath_GetSideNeighbor(candidate.cell, candidate.side);
-            if (RpgBlockInventory_IsCellAttachment(type)) {
+            if (RpgBlockInventory_IsAttachmentBlock(type)) {
                 bool occupied = false;
                 for (int attachmentIndex = 0; attachments != NULL && attachmentIndex < attachments->count; attachmentIndex++) {
                     const RpgAttachment *existing = &attachments->entries[attachmentIndex];
                     RpgGridCell occupiedCell;
                     if (attachmentIndex == ignoredAttachmentIndex ||
-                        !RpgBlockInventory_IsCellAttachment(existing->type)) continue;
+                        !RpgBlockInventory_IsAttachmentBlock(existing->type)) continue;
                     occupiedCell = RpgGridPath_GetSideNeighbor(existing->cell, existing->side);
                     if (occupiedCell.row == outerCell.row && occupiedCell.column == outerCell.column)
                         occupied = true;
@@ -682,15 +1552,27 @@ bool RpgAttachments_FindSnap(const RpgAttachments *attachments, const RpgStage *
     return found;
 }
 
-void RpgAttachments_RemoveBroken(RpgAttachments *attachments, const RpgStage *stage)
+void RpgAttachments_RemoveBroken(RpgAttachments *attachments, RpgStage *stage)
 {
     for (int index = 0; index < attachments->count;) {
-        RpgGridCell cell = attachments->entries[index].cell;
-        if (RpgAttachments_IsCellInStage(cell) && stage->blocks[cell.row][cell.column] != 0 &&
-            RpgAttachments_HasOuterEmptyCell(stage, cell, attachments->entries[index].side)) {
+        RpgAttachment *attachment = &attachments->entries[index];
+        RpgGridCell cell = attachment->cell;
+        RpgGridCell outerCell;
+        bool isReceiver = RpgAttachments_IsReceiver(attachment);
+        bool isBlockAttachment = RpgBlockInventory_IsAttachmentBlock(attachment->type);
+        bool hasValidOuterCell = isReceiver || attachment->type == RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET ? true : isBlockAttachment ?
+            (RpgAttachments_GetOccupiedCell(attachment, &outerCell) &&
+             stage->blocks[outerCell.row][outerCell.column] == attachment->type) :
+            RpgAttachments_HasOuterEmptyCell(stage, cell, attachment->side);
+        if (RpgAttachments_IsRuntimeUnavailable(attachment) ||
+            (RpgAttachments_IsCellInStage(cell) && stage->blocks[cell.row][cell.column] != 0 &&
+             hasValidOuterCell)) {
             index++;
             continue;
         }
+        if (isBlockAttachment && RpgAttachments_GetOccupiedCell(attachment, &outerCell) &&
+            stage->blocks[outerCell.row][outerCell.column] == attachment->type)
+            stage->blocks[outerCell.row][outerCell.column] = 0;
         for (int next = index; next < attachments->count - 1; next++)
             attachments->entries[next] = attachments->entries[next + 1];
         attachments->count--;
@@ -779,12 +1661,14 @@ static void RpgAttachments_DrawIcon(int type, Vector2 position, RpgGridSide side
     DrawCircleLines((int)sphere.x, (int)sphere.y, 6.5f, Fade(SKYBLUE, alpha * 0.65f));
 }
 
-static void RpgAttachments_DrawSaveFlag(const RpgAttachment *attachment, Vector2 position, float alpha)
+static void RpgAttachments_DrawSaveFlag(const RpgAttachments *attachments, const RpgAttachment *attachment,
+                                        Vector2 position, float alpha)
 {
+    const RpgFlagConfig *flag = RpgAttachments_FindFlagConst(attachments, attachment->folderId);
     position = RpgStage_SnapRenderPoint(position);
     RpgAttachments_DrawIcon(attachment->type, position, attachment->side, alpha,
-                            RpgAttachments_GetShooterAnimationProgress(attachment));
-    if (attachment->type == RPG_BLOCK_ATTACHMENT_SAVE_FLAG && attachment->flagRaised) {
+                             RpgAttachments_GetShooterAnimationProgress(attachments, attachment->folderId));
+    if (attachment->type == RPG_BLOCK_ATTACHMENT_SAVE_FLAG && flag != NULL && flag->raised) {
         Vector2 poleTop = { position.x, position.y - 22.0f };
         Vector2 flagBottom = { poleTop.x + 1.0f, poleTop.y + 11.0f };
         Vector2 flagTip = { poleTop.x + 13.0f, poleTop.y + 6.0f };
@@ -802,11 +1686,13 @@ static void RpgAttachments_DrawWithOffset(const RpgAttachments *attachments, int
     for (int index = 0; index < attachments->count; index++) {
         if (index == excludedIndex) continue;
         const RpgAttachment *attachment = &attachments->entries[index];
-        if (attachment->isZipperHeld) continue;
+        /* Receivers are drawn by the receiver compatibility view. */
+        if (RpgAttachments_IsReceiver(attachment)) continue;
+        if (RpgAttachments_IsRuntimeUnavailable(attachment)) continue;
         RpgGridCell outerCell = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
         if (outerCell.column < firstColumn || outerCell.column >= lastColumn) continue;
         Vector2 position = RpgAttachments_GetPosition(attachment, firstColumn);
-        RpgAttachments_DrawSaveFlag(attachment, position, 0.94f);
+        RpgAttachments_DrawSaveFlag(attachments, attachment, position, 0.94f);
     }
 }
 
@@ -835,9 +1721,12 @@ void RpgAttachments_DrawDataPaths(const RpgAttachments *attachments, int mapInde
     int firstColumn = mapIndex * RPG_STAGE_COLUMNS;
     int lastColumn = firstColumn + RPG_STAGE_COLUMNS;
     for (int index = 0; index < attachments->count; index++) {
-        if (attachments->entries[index].isZipperHeld ||
+        if (RpgAttachments_IsRuntimeUnavailable(&attachments->entries[index]) ||
             attachments->entries[index].type != RPG_BLOCK_ATTACHMENT_RADIO_EMITTER) continue;
-        const RpgGridPath *path = &attachments->entries[index].dataPath;
+        const RpgShooterConfig *shooter = RpgAttachments_FindShooterConst(attachments,
+            attachments->entries[index].folderId);
+        if (shooter == NULL) continue;
+        const RpgGridPath *path = &shooter->path;
         for (int cellIndex = 0; cellIndex < path->cellCount - 1; cellIndex++) {
             RpgGridCell first = path->cells[cellIndex];
             RpgGridCell second = path->cells[cellIndex + 1];

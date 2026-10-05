@@ -3,6 +3,7 @@
 #define RPG_WIRE_H
 
 #include <stdbool.h>
+#include <stdio.h>
 
 #include "rpg_grid_path.h"
 #include "rpg_physics.h"
@@ -43,6 +44,10 @@ struct RpgDataShots;
 RpgWires RpgWires_Default(void);
 bool RpgWires_Load(const char *filePath, RpgWires *wires);
 bool RpgWires_Save(const char *filePath, const RpgWires *wires);
+/* One v6-format path record. Shared by rpg_wires.cfg legacy import and the
+   unified rpg_attachments.cfg static format. */
+bool RpgWires_ReadRecord(FILE *file, RpgWire *wire);
+bool RpgWires_WriteRecord(FILE *file, const RpgWire *wire);
 bool RpgWires_AddAdjacentConveyor(RpgWires *wires, const RpgStage *stage, int row, int column);
 bool RpgWires_AddFromReceiver(RpgWires *wires, const RpgStage *stage, RpgWireCell cell,
                               RpgGridSide side);

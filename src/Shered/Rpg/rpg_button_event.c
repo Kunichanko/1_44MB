@@ -12,20 +12,25 @@ RpgButtonEvent RpgButtonEvent_Default(void)
 
 void RpgButtonEvent_Publish(RpgButtonEvent *event, int sourceMapIndex, RpgButtonEventSource source)
 {
+    RpgButtonEvent_PublishState(event, sourceMapIndex, source, true);
+}
+
+void RpgButtonEvent_PublishState(RpgButtonEvent *event, int sourceMapIndex,
+                                 RpgButtonEventSource source, bool isActive)
+{
     if (event == NULL) return;
     event->sequence++;
     // 連番のゼロは未受信状態に使うため、周回時も通知として扱える値を維持する。
     if (event->sequence == 0) event->sequence = 1;
     event->sourceMapIndex = sourceMapIndex;
     event->source = source;
-    event->isActive = true;
+    event->isActive = isActive;
 }
 
 void RpgButtonEvent_PublishBlockSocket(RpgButtonEvent *event, int sourceMapIndex, bool isActive)
 {
-    if (event == NULL) return;
-    RpgButtonEvent_Publish(event, sourceMapIndex, RPG_BUTTON_EVENT_SOURCE_BLOCK_SOCKET);
-    event->isActive = isActive;
+    RpgButtonEvent_PublishState(event, sourceMapIndex,
+                                RPG_BUTTON_EVENT_SOURCE_BLOCK_SOCKET, isActive);
 }
 
 bool RpgButtonEvent_Consume(const RpgButtonEvent *event, unsigned int *lastConsumedSequence)

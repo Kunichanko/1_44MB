@@ -316,6 +316,24 @@ static bool GetDirectoryFilePath(const char *directory, const char *name, char *
            snprintf(path, (size_t)size, "%s\\%s", directory, name) > 0;
 }
 
+/* These files were the pre-v9 split static representation. The unified
+   attachment file is written first; only then are stale copies removed. */
+static void RemoveLegacyAttachmentStaticFiles(const char *directory)
+{
+#ifdef _WIN32
+    static const char *names[] = { "rpg_block_paths.cfg", "rpg_wires.cfg", "rpg_receivers.cfg" };
+    char path[RPG_STAGE_PATH_LENGTH];
+    wchar_t widePath[RPG_STAGE_PATH_LENGTH];
+    if (directory == NULL) return;
+    for (int index = 0; index < (int)(sizeof(names) / sizeof(names[0])); index++)
+        if (GetDirectoryFilePath(directory, names[index], path, (int)sizeof(path)) &&
+            MultiByteToWideChar(CP_UTF8, 0, path, -1, widePath, RPG_STAGE_PATH_LENGTH) > 0)
+            (void)DeleteFileW(widePath);
+#else
+    (void)directory;
+#endif
+}
+
 /* Version 0 was a single monolithic stage file set.  Keep this reader solely
    for the one-time migration below; new saves are never written this way. */
 static bool LoadLegacyStageDataFromDirectory(const char *directory, RpgStageData *data)
@@ -332,7 +350,8 @@ static bool LoadLegacyStageDataFromDirectory(const char *directory, RpgStageData
     RpgAreaEntryEvents_Initialize(&data->areaEntryEvents);
     data->npcInspectData = RpgInspect_Default("Inspect", "Nothing unusual here.");
     data->items = RpgItems_Default(); data->wires = RpgWires_Default();
-    data->receivers = RpgReceivers_Default(); data->attachments = RpgAttachments_Default();
+    data->attachments = RpgAttachments_Default(); data->receivers = RpgReceivers_Default();
+    RpgReceivers_Bind(&data->receivers, &data->attachments);
     data->signalBlocks = RpgSignalBlocks_Default(); data->mapEvents = RpgMapEvents_Default();
 #define LOAD_DIRECTORY_FILE(name, function, target) do { \
     if (GetDirectoryFilePath(directory, (name), path, (int)sizeof(path)) && FileExists(path)) function(path, (target)); \
@@ -351,16 +370,26 @@ static bool LoadLegacyStageDataFromDirectory(const char *directory, RpgStageData
     }
     LOAD_DIRECTORY_FILE("rpg_inspect.cfg", RpgInspect_Load, &data->npcInspectData);
     LOAD_DIRECTORY_FILE("rpg_items.cfg", RpgItems_Load, &data->items);
-    /* Legacy import only.  Current paths are block-owned metadata. */
-    LOAD_DIRECTORY_FILE("rpg_wires.cfg", RpgWires_Load, &data->wires);
-    LOAD_DIRECTORY_FILE("rpg_receivers.cfg", RpgReceivers_Load, &data->receivers);
-    LOAD_DIRECTORY_FILE("rpg_attachments.cfg", RpgAttachments_Load, &data->attachments);
+    /* A v9 attachment file owns every static attachment path.  The split
+       files remain readable only so an older stage can migrate on save. */
+    {
+        bool unifiedAttachments = false;
+        if (GetDirectoryFilePath(directory, "rpg_attachments.cfg", path, (int)sizeof(path)) && FileExists(path))
+            (void)RpgAttachments_LoadStatic(path, &data->attachments, &data->wires,
+                                            &unifiedAttachments);
+        if (!unifiedAttachments) {
+            LOAD_DIRECTORY_FILE("rpg_wires.cfg", RpgWires_Load, &data->wires);
+            LOAD_DIRECTORY_FILE("rpg_receivers.cfg", RpgReceivers_LoadLegacy, &data->receivers);
+            RpgAttachments_ImportWires(&data->attachments, &data->wires);
+        }
+    }
     LOAD_DIRECTORY_FILE("rpg_signal_blocks.cfg", RpgSignalBlocks_Load, &data->signalBlocks);
     LOAD_DIRECTORY_FILE("rpg_map_events.cfg", RpgMapEvents_Load, &data->mapEvents);
 #undef LOAD_DIRECTORY_FILE
+    RpgAttachments_MigrateLegacyButtons(&data->attachments, &data->stage);
+    RpgAttachments_MaterializeBlockCells(&data->attachments, &data->stage);
     RpgWires_RemoveBroken(&data->wires, &data->stage);
     RpgReceivers_RemoveBroken(&data->receivers, &data->stage);
-    RpgAttachments_MigrateLegacyButtons(&data->attachments, &data->stage);
     RpgAttachments_RemoveBroken(&data->attachments, &data->stage);
     RpgSignalBlocks_RemoveBroken(&data->signalBlocks, &data->stage);
     return true;
@@ -409,9 +438,10 @@ static void InitializeStageData(RpgStageData *data)
     RpgAreaEntryEvents_Initialize(&data->areaEntryEvents);
     data->npcInspectData = RpgInspect_Default("Inspect", "Nothing unusual here.");
     data->items = RpgItems_Default();
-    data->wires = RpgWires_Default();
-    data->receivers = RpgReceivers_Default();
     data->attachments = RpgAttachments_Default();
+    data->receivers = RpgReceivers_Default();
+    RpgReceivers_Bind(&data->receivers, &data->attachments);
+    data->wires = RpgWires_Default();
     data->signalBlocks = RpgSignalBlocks_Default();
     data->mapEvents = RpgMapEvents_Default();
 }
@@ -591,6 +621,37 @@ static bool LoadStageLayout(const char *directory, RpgStage *stage)
     return true;
 }
 
+/* Area partitioning must move an attachment together with its per-kind
+ * configuration.  RpgAttachments_Append intentionally creates defaults for
+ * a newly placed attachment, so using it by itself during extract/merge would
+ * silently reset shooter, flag, and socket settings on every stage save. */
+static bool AppendAttachmentWithConfigs(RpgAttachments *target, const RpgAttachments *source,
+                                        int sourceIndex)
+{
+    const RpgAttachment *entry;
+    if (target == NULL || source == NULL || sourceIndex < 0 || sourceIndex >= source->count) return false;
+    entry = &source->entries[sourceIndex];
+    if (!RpgAttachments_Append(target, entry)) return false;
+    if (entry->type == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER) {
+        const RpgShooterConfig *from = RpgAttachments_FindShooterConst(source, entry->folderId);
+        RpgShooterConfig *to = RpgAttachments_FindShooter(target, entry->folderId);
+        if (from == NULL || to == NULL) return false;
+        *to = *from;
+    } else if (entry->type == RPG_BLOCK_ATTACHMENT_SAVE_FLAG) {
+        const RpgFlagConfig *from = RpgAttachments_FindFlagConst(source, entry->folderId);
+        RpgFlagConfig *to = RpgAttachments_FindFlag(target, entry->folderId);
+        if (from == NULL || to == NULL) return false;
+        *to = *from;
+    } else if (entry->type == RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET) {
+        const RpgSocketConfig *from = RpgAttachments_FindSocketConst(source, entry->folderId);
+        RpgSocketConfig *to = RpgAttachments_FindSocket(target, entry->folderId);
+        if (from == NULL || to == NULL) return false;
+        *to = *from;
+    }
+    RpgAttachments_RefreshEditorFacades(target);
+    return true;
+}
+
 static void ExtractAreaData(const RpgStageData *source, int areaId, RpgStageData *area)
 {
     int firstColumn = areaId * RPG_STAGE_COLUMNS;
@@ -619,16 +680,14 @@ static void ExtractAreaData(const RpgStageData *source, int areaId, RpgStageData
         if (area->stage.imageObjects.entries[index].id >= area->stage.imageObjects.nextId)
             area->stage.imageObjects.nextId = area->stage.imageObjects.entries[index].id + 1;
     for (int index = 0; index < source->attachments.count; index++)
-        if (CellBelongsToArea(source->attachments.entries[index].cell, areaId) && area->attachments.count < RPG_ATTACHMENT_MAX_COUNT)
-            area->attachments.entries[area->attachments.count++] = source->attachments.entries[index];
+        if (CellBelongsToArea(source->attachments.entries[index].cell, areaId) &&
+            !AppendAttachmentWithConfigs(&area->attachments, &source->attachments, index))
+            return;
     for (int index = 0; index < source->wires.count; index++) {
         const RpgWire *wire = &source->wires.entries[index];
         if (PathBelongsToArea(&wire->path, areaId) && (!wire->hasReceiverSource || CellBelongsToArea(wire->receiverCell, areaId)) &&
             area->wires.count < RPG_WIRE_MAX_COUNT) area->wires.entries[area->wires.count++] = *wire;
     }
-    for (int index = 0; index < source->receivers.count; index++)
-        if (CellBelongsToArea(source->receivers.entries[index].cell, areaId) && area->receivers.count < RPG_RECEIVER_MAX_COUNT)
-            area->receivers.entries[area->receivers.count++] = source->receivers.entries[index];
     for (int index = 0; index < source->signalBlocks.count; index++)
         if (source->signalBlocks.entries[index].column / RPG_STAGE_COLUMNS == areaId && area->signalBlocks.count < RPG_SIGNAL_BLOCK_MAX_COUNT)
             area->signalBlocks.entries[area->signalBlocks.count++] = source->signalBlocks.entries[index];
@@ -669,13 +728,13 @@ static bool SaveAreaData(const char *directory, const RpgStageData *source, int 
 #define SAVE_AREA_FILE(name, function, sourceValue) \
     (GetDirectoryFilePath(blockAreaPath, (name), path, (int)sizeof(path)) && function(path, (sourceValue)))
     result = SAVE_AREA_FILE("rpg_area_stage.cfg", RpgStage_Save, &area->stage) &&
-             SAVE_AREA_FILE("rpg_block_paths.cfg", RpgWires_Save, &area->wires) &&
-             SAVE_AREA_FILE("rpg_receivers.cfg", RpgReceivers_Save, &area->receivers) &&
-             SAVE_AREA_FILE("rpg_attachments.cfg", RpgAttachments_Save, &area->attachments) &&
+             GetDirectoryFilePath(blockAreaPath, "rpg_attachments.cfg", path, (int)sizeof(path)) &&
+             RpgAttachments_SaveStatic(path, &area->attachments, &area->wires) &&
              SAVE_AREA_FILE("rpg_signal_blocks.cfg", RpgSignalBlocks_Save, &area->signalBlocks) &&
              (GetDirectoryFilePath(blockAreaPath, "rpg_area_entry_event.cfg", path, (int)sizeof(path)) &&
               RpgStage3Event_Save(path, &source->areaEntryEvents.entries[areaId]));
 #undef SAVE_AREA_FILE
+    if (result) RemoveLegacyAttachmentStaticFiles(blockAreaPath);
     if (result) {
         result = GetDirectoryFilePath(movableAreaPath, "rpg_items.cfg", path, (int)sizeof(path)) &&
                  RpgItems_Save(path, &area->items) &&
@@ -684,6 +743,7 @@ static bool SaveAreaData(const char *directory, const RpgStageData *source, int 
                  GetDirectoryFilePath(movableAreaPath, "rpg_map_events.cfg", path, (int)sizeof(path)) &&
                  RpgMapEvents_Save(path, &area->mapEvents);
     }
+    RpgAttachments_Destroy(&area->attachments);
     free(area);
     return result;
 }
@@ -700,9 +760,9 @@ static void MergeAreaData(RpgStageData *target, const RpgStageData *area, int ar
     for (int index = 0; index < (sourceCollection).count && (targetCollection).count < (maxCount); index++) \
         (targetCollection).entries[(targetCollection).count++] = (sourceCollection).entries[index]; \
 } while (0)
-    APPEND_ALL(target->attachments, area->attachments, RPG_ATTACHMENT_MAX_COUNT);
+    for (int index = 0; index < area->attachments.count; index++)
+        if (!AppendAttachmentWithConfigs(&target->attachments, &area->attachments, index)) return;
     APPEND_ALL(target->wires, area->wires, RPG_WIRE_MAX_COUNT);
-    APPEND_ALL(target->receivers, area->receivers, RPG_RECEIVER_MAX_COUNT);
     APPEND_ALL(target->signalBlocks, area->signalBlocks, RPG_SIGNAL_BLOCK_MAX_COUNT);
     APPEND_ALL(target->items, area->items, RPG_ITEM_MAX_COUNT);
     APPEND_ALL(target->mapEvents, area->mapEvents, RPG_MAP_EVENT_MAX_COUNT);
@@ -778,12 +838,20 @@ static bool LoadAreaData(const char *directory, RpgStageData *target, int areaId
         (void)RpgItems_Load(path, &area->items);
     if (GetDirectoryFilePath(movableAreaPath, "rpg_reference_objects.cfg", path, (int)sizeof(path)) && FileExists(path))
         (void)LoadReferenceObjects(path, &area->stage.referenceObjects);
-    if (GetDirectoryFilePath(blockAreaPath, "rpg_block_paths.cfg", path, (int)sizeof(path)) && FileExists(path))
-        (void)RpgWires_Load(path, &area->wires);
-    else
-        LOAD_AREA_FILE("rpg_wires.cfg", RpgWires_Load, &area->wires);
-    LOAD_AREA_FILE("rpg_receivers.cfg", RpgReceivers_Load, &area->receivers);
-    LOAD_AREA_FILE("rpg_attachments.cfg", RpgAttachments_Load, &area->attachments);
+    {
+        bool unifiedAttachments = false;
+        if (GetDirectoryFilePath(blockAreaPath, "rpg_attachments.cfg", path, (int)sizeof(path)) && FileExists(path))
+            (void)RpgAttachments_LoadStatic(path, &area->attachments, &area->wires,
+                                            &unifiedAttachments);
+        if (!unifiedAttachments) {
+            if (GetDirectoryFilePath(blockAreaPath, "rpg_block_paths.cfg", path, (int)sizeof(path)) && FileExists(path))
+                (void)RpgWires_Load(path, &area->wires);
+            else
+                LOAD_AREA_FILE("rpg_wires.cfg", RpgWires_Load, &area->wires);
+            LOAD_AREA_FILE("rpg_receivers.cfg", RpgReceivers_LoadLegacy, &area->receivers);
+            RpgAttachments_ImportWires(&area->attachments, &area->wires);
+        }
+    }
     LOAD_AREA_FILE("rpg_signal_blocks.cfg", RpgSignalBlocks_Load, &area->signalBlocks);
     if (GetDirectoryFilePath(movableAreaPath, "rpg_map_events.cfg", path, (int)sizeof(path)) && FileExists(path))
         (void)RpgMapEvents_Load(path, &area->mapEvents);
@@ -793,6 +861,7 @@ static bool LoadAreaData(const char *directory, RpgStageData *target, int areaId
     MergeAreaData(target, area, areaId);
     result = true;
 finish:
+    RpgAttachments_Destroy(&area->attachments);
     free(area);
     return result;
 }
@@ -898,9 +967,10 @@ static bool LoadStageDataFromDirectory(const char *directory, RpgStageData *data
 #undef LOAD_GLOBAL_FILE
     for (int areaId = 0; areaId < RPG_STAGE_MAP_COUNT; areaId++)
         if (data->stage.mapActive[areaId] && !LoadAreaData(directory, data, areaId)) return false;
+    RpgAttachments_MigrateLegacyButtons(&data->attachments, &data->stage);
+    RpgAttachments_MaterializeBlockCells(&data->attachments, &data->stage);
     RpgWires_RemoveBroken(&data->wires, &data->stage);
     RpgReceivers_RemoveBroken(&data->receivers, &data->stage);
-    RpgAttachments_MigrateLegacyButtons(&data->attachments, &data->stage);
     RpgAttachments_RemoveBroken(&data->attachments, &data->stage);
     RpgSignalBlocks_RemoveBroken(&data->signalBlocks, &data->stage);
     if (legacyAreaLayout && RpgStageStorage_GetDomain() == RPG_STAGE_STORAGE_SETTINGS)
@@ -1364,9 +1434,10 @@ bool RpgStageStorage_LoadStage(int stageNumber, RpgStageData *data)
     LOAD_STAGE_FILE("rpg_signal_blocks.cfg", RpgSignalBlocks_Load, &data->signalBlocks);
     LOAD_STAGE_FILE("rpg_map_events.cfg", RpgMapEvents_Load, &data->mapEvents);
 #undef LOAD_STAGE_FILE
+    RpgAttachments_MigrateLegacyButtons(&data->attachments, &data->stage);
+    RpgAttachments_MaterializeBlockCells(&data->attachments, &data->stage);
     RpgWires_RemoveBroken(&data->wires, &data->stage);
     RpgReceivers_RemoveBroken(&data->receivers, &data->stage);
-    RpgAttachments_MigrateLegacyButtons(&data->attachments, &data->stage);
     RpgAttachments_RemoveBroken(&data->attachments, &data->stage);
     RpgSignalBlocks_RemoveBroken(&data->signalBlocks, &data->stage);
     RebasePackagedReferenceFiles(stageNumber, &data->stage);

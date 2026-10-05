@@ -6,7 +6,9 @@
 
 #include "rpg_attachment.h"
 #include "rpg_data_shot.h"
+#include "rpg_receiver.h"
 #include "rpg_stage.h"
+#include "rpg_wire.h"
 
 typedef struct RpgObjectFolder { RpgGridCell cell; } RpgObjectFolder;
 
@@ -26,6 +28,9 @@ bool RpgObjectFolder_StoreFileInDirectory(const char *sourcePath, const char *de
 /* ブロック固有の build/objects フォルダを、ランタイム格納先として取得する。 */
 bool RpgObjectFolder_GetBlockDirectory(const RpgObjectFolder *folder, int blockType,
                                        char *path, size_t pathSize);
+/* Runtime folder ownership is also the ownership relation used by composite
+   blocks and their attachment metadata. */
+bool RpgObjectFolders_HaveSameBlockOwner(RpgGridCell first, RpgGridCell second);
 bool RpgObjectFolder_OpenZipperDirectory(void);
 /* Creates and activates the runtime Zipper folder for an already
    connected Zipper.  The caller must have an active stage build. */
@@ -39,18 +44,22 @@ RpgZipperCommandRequest RpgObjectFolder_GetPendingZipperCommandRequest(void);
 bool RpgObjectFolder_CompleteZipperCommandRequest(void);
 
 // Zipper 操作は複製ではなく、対象フォルダそのものを Zipper 直下へ移動して行う。
-bool RpgObjectFolder_MoveAttachmentToZipper(const RpgAttachment *attachment);
 bool RpgObjectFolder_MoveDataShotToZipper(RpgDataShot *shot);
 bool RpgObjectFolder_MoveBlockToZipper(const RpgObjectFolder *folder, int blockType);
+/* Builds the parent folder as the immediate result of eating a block, then
+   moves that one folder with every owned attachment/receiver metadata file
+   inside it. */
+bool RpgObjectFolder_MoveBlockWithAttachmentsToZipper(const RpgObjectFolder *folder, int blockType,
+                                                       const RpgAttachments *attachments,
+                                                       const RpgReceivers *receivers,
+                                                       const RpgWires *wires);
 /* A file object owns the small runtime folder which contains its real file.
    Move that folder as one unit so eat/spit never copies the file or creates a
    missing terrain cell. */
 bool RpgObjectFolder_MoveReferenceFileToZipper(const RpgReferenceObject *object);
 /* 返却演出中は build の親（StageN）へ一時移動し、演出完了時に Return で build へ確定する。 */
-bool RpgObjectFolder_BeginReturnAttachmentFromZipper(const RpgAttachment *attachment);
 bool RpgObjectFolder_BeginReturnDataShotFromZipper(const RpgDataShot *shot);
 bool RpgObjectFolder_BeginReturnBlockFromZipper(const RpgObjectFolder *folder, int blockType);
-bool RpgObjectFolder_ReturnAttachmentFromZipper(const RpgAttachment *attachment);
 bool RpgObjectFolder_ReturnDataShotFromZipper(const RpgDataShot *shot);
 bool RpgObjectFolder_ReturnBlockFromZipper(const RpgObjectFolder *folder, int blockType);
 bool RpgObjectFolder_BeginReturnReferenceFileFromZipper(const RpgReferenceObject *object);
@@ -66,7 +75,10 @@ bool RpgObjectFolder_ReturnDynamicBlockFromZipper(RpgGridCell identityCell, int 
 bool RpgObjectFolder_RestoreDataShotFromMetadata(RpgDataShot *shot);
 
 // フォルダ寿命はオブジェクト寿命と一致する。メタデータだけの通常ブロックには生成しない。
-void RpgObjectFolders_PrepareAttachmentFolders(const RpgAttachments *attachments);
+/* Shared ownership serialization for normal build, preview repair, and eat. */
+void RpgObjectFolders_PrepareBlockOwnedMetadata(const RpgAttachments *attachments,
+                                                const RpgReceivers *receivers,
+                                                const RpgWires *wires);
 void RpgObjectFolders_PrepareReferenceFolderMetadata(const RpgStage *stage);
 /* PNG配置物はマスを占有せず、データ弾と同じ build/objects 配下の所有フォルダを使う。 */
 void RpgObjectFolders_PrepareImageObjectFolders(const RpgImageObjects *objects);
@@ -81,7 +93,9 @@ void RpgObjectFolder_RemoveAttachmentFolder(const RpgAttachment *attachment);
 
 /* 指定ステージの build を生成し、その中をオブジェクトフォルダの保存先として選択する。 */
 bool RpgObjectFolders_BeginStageBuild(int stageNumber, RpgStage *stage,
-                                      const RpgAttachments *attachments, Vector2 playerStartPosition,
+                                      const RpgAttachments *attachments,
+                                      const RpgReceivers *receivers,
+                                      const RpgWires *wires, Vector2 playerStartPosition,
                                       bool isSimpleBuild,
                                       char *buildPath, size_t buildPathSize);
 /* 続きから用。静的ステージを再生成せず、残っている本編用オブジェクトフォルダを操作対象に戻す。 */
@@ -107,6 +121,8 @@ bool RpgObjectFolders_RefreshEditorPreviewCompactCells(const RpgStage *stage);
    only missing static folders and metadata are repaired. */
 bool RpgObjectFolders_RepairEditorPreview(const RpgStage *stage,
                                           const RpgAttachments *attachments,
+                                          const RpgReceivers *receivers,
+                                          const RpgWires *wires,
                                           Vector2 playerStartPosition);
 /* Play marks this only when a static block/reference folder is actually
    moved or changed.  Stop can then skip the expensive static-cache audit for

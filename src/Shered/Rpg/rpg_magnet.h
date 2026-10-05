@@ -50,6 +50,9 @@ typedef struct RpgPlayerPushState {
 
 typedef struct RpgMagnetRuntime {
     bool isInitialized;
+    /* Magnets consume the shared area communication independently from the
+       electrical data-shot/receiver system. */
+    unsigned int lastCommunicationSequence;
     int metalCount;
     RpgMagnetMetal metals[RPG_MAGNET_MAX_METALS];
     RpgMovingSolid movingSolids[RPG_MAGNET_MAX_METALS];
@@ -57,7 +60,8 @@ typedef struct RpgMagnetRuntime {
 
 RpgMagnetRuntime RpgMagnetRuntime_Default(void);
 RpgPlayerPushState RpgPlayerPushState_Default(void);
-bool RpgMagnets_ToggleAtCell(RpgStage *stage, int row, int column);
+void RpgMagnets_ConsumeCommunication(RpgMagnetRuntime *runtime, RpgStage *stage,
+                                     const RpgButtonEvent *communication);
 /* ステージに保存された金属を、実行時だけ細かく動く固体へ変換する。 */
 void RpgMagnets_InitializeForStage(RpgMagnetRuntime *runtime, RpgStage *stage);
 /* Starts a world frame; movement code may replace previousPosition before changing a block. */

@@ -4,13 +4,18 @@
 #define RPG_STAGE_BUILD_H
 
 #include "rpg_attachment.h"
+#include "rpg_receiver.h"
 #include "rpg_stage.h"
+#include "rpg_wire.h"
 
 /* 「ビルドする」操作で全マスと設置物のフォルダを生成し、監視を開始する。 */
 bool RpgStageBuild_Create(int stageNumber, RpgStage *stage, const RpgAttachments *attachments,
+                          const RpgReceivers *receivers, const RpgWires *wires,
                           Vector2 playerStartPosition);
 /* エディター内プレイ用。保存方式にかかわらず開始エリアのみを準備する。 */
-bool RpgStageBuild_CreateEditorPreview(int stageNumber, RpgStage *stage, const RpgAttachments *attachments,
+bool RpgStageBuild_CreateEditorPreview(int stageNumber, RpgStage *stage,
+                                       const RpgAttachments *attachments,
+                                       const RpgReceivers *receivers, const RpgWires *wires,
                                        Vector2 playerStartPosition);
 /* 続きから用。既存の build フォルダを消さず、変更監視だけを再接続する。 */
 bool RpgStageBuild_Resume(int stageNumber, RpgStage *stage);
@@ -24,6 +29,8 @@ bool RpgStageBuild_RefreshEditorPreviewCompactCells(const RpgStage *stage);
    during editor Play, keeping the unchanged preview cache in place. */
 bool RpgStageBuild_RepairEditorPreview(const RpgStage *stage,
                                        const RpgAttachments *attachments,
+                                       const RpgReceivers *receivers,
+                                       const RpgWires *wires,
                                        Vector2 playerStartPosition);
 /* 非同期通知を処理し、削除されたセルを赤い実行時壁へ反映する。 */
 void RpgStageBuild_Update(RpgStage *stage);

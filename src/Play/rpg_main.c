@@ -314,7 +314,7 @@ static bool DoesZipperHitAttachment(const RpgAttachments *attachments, Rectangle
                                     RpgGridCell *attachmentCell, int *attachmentIndex)
 {
     for (int index = 0; index < attachments->count; index++) {
-        if (attachments->entries[index].isZipperHeld) continue;
+        if (RpgAttachments_IsRuntimeUnavailable(&attachments->entries[index])) continue;
         Vector2 position = RpgAttachments_GetPosition(&attachments->entries[index], 0);
         Rectangle attachmentBounds = { position.x - 22.0f, position.y - 22.0f, 44.0f, 44.0f };
         if (CheckCollisionRecs(bounds, attachmentBounds)) {
@@ -505,7 +505,7 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
     // ファイルを紐づけた設置物だけを、実際の描画位置に合わせて強調する。
     for (int index = 0; index < attachments->count; index++) {
         const RpgAttachment *attachment = &attachments->entries[index];
-        if (attachment->isZipperHeld) continue;
+        if (RpgAttachments_IsRuntimeUnavailable(attachment)) continue;
         if (!RpgObjectFolder_AttachmentHasLinkedFiles(attachment)) continue;
         Vector2 position = RpgStage_SnapRenderPoint(RpgAttachments_GetPosition(attachment, 0));
         DrawCircleV(position, 15.0f, Fade(GOLD, 0.30f));
@@ -679,12 +679,15 @@ int main(void)
     RpgItems items = stageData.items;
     RpgReferenceObjects referenceDrops = stage.referenceObjects;
     RpgWires wires = stageData.wires;
-    RpgReceivers receivers = stageData.receivers;
-    RpgAttachments attachments = stageData.attachments;
+    RpgAttachments attachments = RpgAttachments_Default();
+    if (!RpgAttachments_Clone(&attachments, &stageData.attachments)) return 1;
+    RpgReceivers receivers = RpgReceivers_Default();
+    RpgReceivers_Bind(&receivers, &attachments);
     RpgSignalBlocks signalBlocks = stageData.signalBlocks;
     RpgDataShots dataShots = RpgDataShots_Default();
     RpgMagnetRuntime magnetRuntime = RpgMagnetRuntime_Default();
     RpgButtonEvent buttonEvent = RpgButtonEvent_Default();
+    RpgButtonEvent socketCommunicationEvent = RpgButtonEvent_Default();
     // 前回が異常終了しても、プレイ中だけ使う実フォルダとInboxを残さない。
     RpgObjectFolders_ClearSessionStorage();
     RpgMapEvents events = stageData.mapEvents;
@@ -797,7 +800,7 @@ int main(void)
                                     RPG_STAGE_WORLD_HEIGHT / 2.0f },
                         .zoom = RPG_SCREEN_WIDTH / (float)(RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE) };
     RpgRuntimeContext runtime = {
-        .layout=&layout, .stageBackground=&stageBackground, .stage=&stage, .items=&items, .referenceDrops=&referenceDrops, .wires=&wires, .receivers=&receivers, .attachments=&attachments, .signalBlocks=&signalBlocks, .dataShots=&dataShots, .buttonEvent=&buttonEvent, .events=&events, .dialogue=&dialogue, .stage3Event=&stage3Event, .areaEntryEvents=&areaEntryEvents, .zipper=&zipper, .inspect=&inspect, .player=&player, .npc=&npc, .magnetRuntime=&magnetRuntime,
+        .layout=&layout, .stageBackground=&stageBackground, .stage=&stage, .items=&items, .referenceDrops=&referenceDrops, .wires=&wires, .receivers=&receivers, .attachments=&attachments, .signalBlocks=&signalBlocks, .dataShots=&dataShots, .buttonEvent=&buttonEvent, .socketCommunicationEvent=&socketCommunicationEvent, .events=&events, .dialogue=&dialogue, .stage3Event=&stage3Event, .areaEntryEvents=&areaEntryEvents, .zipper=&zipper, .inspect=&inspect, .player=&player, .npc=&npc, .magnetRuntime=&magnetRuntime,
         .dialogueIndex=&dialogueIndex, .stage3IntroIndex=&stage3IntroIndex, .inspectFunctionIndex=&inspectFunctionIndex, .inspectLineIndex=&inspectLineIndex, .inspectTarget=&inspectTarget, .isInspectMoveRunning=&isInspectMoveRunning, .inspectMoveElapsed=&inspectMoveElapsed, .inspectMoveStartX=&inspectMoveStartX, .inspectMoveStartY=&inspectMoveStartY, .activeInspectMove=&activeInspectMove, .inspectMoveTransitionElapsed=&inspectMoveTransitionElapsed, .activeWaitFunctionIndex=&activeWaitFunctionIndex, .inspectWaitElapsed=&inspectWaitElapsed, .stage3IntroShown=&stage3IntroShown, .areaEntryShown=areaEntryShown, .activeEntryEvent=&activeEntryEvent, .zipperFollowsPlayer=&zipperFollowsPlayer, .isZipperLaunched=&isZipperLaunched, .zipperLaunchVelocity=&zipperLaunchVelocity, .attachedDataShotIndex=&attachedDataShotIndex, .attachedAttachmentIndex=&attachedAttachmentIndex, .attachedDataShotOffset=&attachedDataShotOffset, .attachedDynamicBlockIndex=&attachedDynamicBlockIndex, .attachedReferenceObjectIndex=&attachedReferenceObjectIndex,
         .zipperPointerSelected=&zipperPointerSelected, .isZipperPointerFeedbackSuppressed=&isZipperPointerFeedbackSuppressed, .lastZipperPointerClickTime=&lastZipperPointerClickTime, .selectedReferencePointerTarget=&selectedReferencePointerTarget, .isReferencePointerFeedbackSuppressed=&isReferencePointerFeedbackSuppressed, .isReferencePointerPressed=&isReferencePointerPressed, .pressedReferenceTarget=&pressedReferenceTarget, .referencePressPosition=&referencePressPosition, .isReferenceDragActive=&isReferenceDragActive, .draggedReferenceTarget=&draggedReferenceTarget, .referenceDragPosition=&referenceDragPosition, .lastReferencePointerClickTime=&lastReferencePointerClickTime, .zipperAnimationElapsed=&zipperAnimationElapsed, .npcInspectCompleted=&npcInspectCompleted, .zipperInspectCompleted=&zipperInspectCompleted, .isZipperControllable=&isZipperControllable, .wasDataButtonPressed=&wasDataButtonPressed, .previousMap=&previousMap, .worldCoordinatesInitialized=&runtimeWorldCoordinatesInitialized, .cameraFollowsPlayer=&cameraFollowsPlayer, .itemMessage=itemMessage, .itemMessageSize=(int)sizeof(itemMessage), .itemMessageTimer=&itemMessageTimer, .referenceText=referenceText, .referenceTextSize=(int)sizeof(referenceText), .referenceFileName=referenceFileName, .referenceFileNameSize=(int)sizeof(referenceFileName), .isReferenceTextOpen=&isReferenceTextOpen, .camera=&camera, .zipperTexture=zipperTexture, .fileTexture=fileTexture, .scene=&scene
     };
@@ -821,13 +824,23 @@ int main(void)
                 RpgStageStorage_LoadRuntimeState(scene.selectedStageNumber, &stageData) :
                 RpgStageStorage_LoadStage(scene.selectedStageNumber, &stageData));
             if (shouldReloadStage && shouldContinue && stageLoaded) {
-                RpgStageData staticStageData;
+                RpgStageData staticStageData = { 0 };
                 if (RpgStageStorage_LoadStage(scene.selectedStageNumber, &staticStageData) &&
                     !HasMatchingAreaTopology(&stageData.stage, &staticStageData.stage)) {
+                    RpgAttachments replacement = RpgAttachments_Default();
+                    if (!RpgAttachments_Clone(&replacement, &staticStageData.attachments)) {
+                        RpgAttachments_Destroy(&staticStageData.attachments);
+                        stageLoaded = false;
+                    } else {
+                        RpgAttachments_Destroy(&stageData.attachments);
+                        stageData = staticStageData;
+                        stageData.attachments = replacement;
+                        RpgReceivers_Bind(&stageData.receivers, &stageData.attachments);
+                    }
                     (void)RpgStageStorage_ClearRuntimeState(scene.selectedStageNumber);
-                    stageData = staticStageData;
                     shouldContinue = false;
                 }
+                RpgAttachments_Destroy(&staticStageData.attachments);
             }
             /* An editor topology change deliberately removes the old runtime snapshot.  Continue then
                falls back to the published static stage instead of leaving the game without a stage. */
@@ -849,12 +862,16 @@ int main(void)
                 items = stageData.items;
                 referenceDrops = stage.referenceObjects;
                 wires = stageData.wires;
-                receivers = stageData.receivers;
-                attachments = stageData.attachments;
+                if (!RpgAttachments_Clone(&attachments, &stageData.attachments)) {
+                    RpgObjectFolders_EndStageBuild();
+                    break;
+                }
+                RpgReceivers_Bind(&receivers, &attachments);
                 signalBlocks = stageData.signalBlocks;
                 dataShots = RpgDataShots_Default();
                 magnetRuntime = RpgMagnetRuntime_Default();
                 buttonEvent = RpgButtonEvent_Default();
+                socketCommunicationEvent = RpgButtonEvent_Default();
                 events = stageData.mapEvents;
                 dialogue = stageData.dialogue;
                 stage3Event = stageData.stage3Event;
@@ -892,6 +909,7 @@ int main(void)
                 if (shouldContinue && RpgAttachments_SetRaisedSaveFlag(&attachments, continueSave.flagId)) {
                     for (int index = 0; index < attachments.count; index++) {
                         if (attachments.entries[index].type != RPG_BLOCK_ATTACHMENT_SAVE_FLAG ||
+                            RpgAttachments_IsRuntimeUnavailable(&attachments.entries[index]) ||
                             attachments.entries[index].folderId != continueSave.flagId) continue;
                         player.position = RpgAttachments_GetSaveFlagRespawnPositionWorld(&attachments.entries[index], &stage);
                         continueRespawnAreaId = attachments.entries[index].cell.column / RPG_STAGE_COLUMNS;
@@ -922,17 +940,23 @@ int main(void)
                            Continue unusable. Recreate its runtime artifacts from
                            the already-loaded runtime snapshot instead. */
                         buildReady = resumedRuntimeBuild ||
-                            RpgStageBuild_Create(currentStageNumber, &stage, &attachments, player.position);
+                            RpgStageBuild_Create(currentStageNumber, &stage, &attachments,
+                                                 &receivers, &wires, player.position);
                     } else {
-                        buildReady = RpgStageBuild_Create(currentStageNumber, &stage, &attachments, player.position);
+                        buildReady = RpgStageBuild_Create(currentStageNumber, &stage, &attachments,
+                                                           &receivers, &wires, player.position);
                     }
                     if (buildReady && (!shouldContinue || !resumedRuntimeBuild)) {
                         /* static を読んで build 構成を作成した直後だけ、実行用の初期構成を書き出す。 */
+                        RpgAttachments_Destroy(&runtimeState.attachments);
                         runtimeState = stageData;
                         runtimeState.layout = layout;
                         runtimeState.stage = stage;
                         runtimeState.stage.referenceObjects = referenceDrops;
-                        runtimeState.attachments = attachments;
+                        runtimeState.attachments = RpgAttachments_Default();
+                        if (!RpgAttachments_Clone(&runtimeState.attachments, &attachments))
+                            buildReady = false;
+                        RpgReceivers_Bind(&runtimeState.receivers, &runtimeState.attachments);
                         if (!RpgStageStorage_SaveRuntimeState(currentStageNumber, &runtimeState))
                             buildReady = false;
                     }
@@ -949,7 +973,7 @@ int main(void)
                 } else {
                     RpgObjectFolders_EndStageBuild();
                     RpgObjectFolders_ClearSessionStorage();
-                    RpgObjectFolders_PrepareAttachmentFolders(&attachments);
+                    RpgObjectFolders_PrepareBlockOwnedMetadata(&attachments, &receivers, &wires);
                     RpgObjectFolder_PrepareZipperAnimationCommand();
                 }
                 GameFont_BeginTextBatch();

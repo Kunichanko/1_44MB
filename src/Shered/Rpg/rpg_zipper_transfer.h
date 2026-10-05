@@ -6,12 +6,16 @@
 #include "rpg_attachment.h"
 #include "rpg_data_shot.h"
 #include "rpg_magnet.h"
+#include "rpg_receiver.h"
 #include "rpg_stage.h"
+#include "rpg_wire.h"
 #include "rpg_zipper.h"
 
 typedef struct RpgZipperTransferContext {
     RpgStage *stage;
     RpgAttachments *attachments;
+    RpgReceivers *receivers;
+    RpgWires *wires;
     RpgDataShots *dataShots;
     RpgMagnetRuntime *magnetRuntime;
     RpgReferenceObjects *referenceObjects;

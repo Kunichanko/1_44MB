@@ -335,11 +335,12 @@ bool RpgBlockInventory_IsAttachment(int blockType)
            blockType == RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET;
 }
 
-bool RpgBlockInventory_IsCellAttachment(int blockType)
+bool RpgBlockInventory_IsAttachmentBlock(int blockType)
 {
-    return blockType == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER ||
-           blockType == RPG_BLOCK_ATTACHMENT_SAVE_FLAG ||
-           blockType == RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET;
+    /* Normal attachments (button, flag, receiver and socket) belong to
+       their supporting block only.  Only the emitter owns its outer cell as
+       a real terrain block. */
+    return blockType == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER;
 }
 
 bool RpgBlockInventory_IsMapEventProperty(int blockType)
@@ -395,6 +396,7 @@ RpgBlockStructureKind RpgBlockInventory_GetStructureKind(int blockType)
         RpgBlockInventory_IsOneWayPlatform(blockType) || RpgBlockInventory_IsMetalBlock(blockType) ||
         RpgBlockInventory_IsPushBlock(blockType) || RpgBlockInventory_IsSocketSignalBlock(blockType))
         return RPG_BLOCK_STRUCTURE_NORMAL_CELL;
+    if (RpgBlockInventory_IsAttachmentBlock(blockType)) return RPG_BLOCK_STRUCTURE_NORMAL_CELL;
     if (RpgBlockInventory_IsAttachment(blockType)) return RPG_BLOCK_STRUCTURE_ATTACHMENT;
     if (RpgBlockInventory_IsReferenceObject(blockType) || blockType == RPG_BLOCK_IMAGE_OBJECT)
         return RPG_BLOCK_STRUCTURE_REFERENCE;

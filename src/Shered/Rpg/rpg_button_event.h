@@ -21,6 +21,11 @@ typedef struct RpgButtonEvent {
 
 RpgButtonEvent RpgButtonEvent_Default(void);
 void RpgButtonEvent_Publish(RpgButtonEvent *event, int sourceMapIndex, RpgButtonEventSource source);
+/* A communication source can explicitly assert or release its state.  Pulse
+   consumers keep using Publish(), while state consumers (such as magnets)
+   receive both edges through the same area-scoped channel. */
+void RpgButtonEvent_PublishState(RpgButtonEvent *event, int sourceMapIndex,
+                                 RpgButtonEventSource source, bool isActive);
 void RpgButtonEvent_PublishBlockSocket(RpgButtonEvent *event, int sourceMapIndex, bool isActive);
 bool RpgButtonEvent_Consume(const RpgButtonEvent *event, unsigned int *lastConsumedSequence);
 

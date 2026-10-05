@@ -23,7 +23,9 @@ typedef struct RpgRuntimeUpdateContext {
     RpgAttachments *attachments;
     RpgSignalBlocks *signalBlocks;
     RpgDataShots *dataShots;
+    /* Player buttons and block sockets publish onto independent channels. */
     RpgButtonEvent *buttonEvent;
+    RpgButtonEvent *socketCommunicationEvent;
     RpgReceivers *receivers;
     RpgWires *wires;
     RpgMagnetRuntime *magnetRuntime;

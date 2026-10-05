@@ -450,6 +450,13 @@ static RpgStageData stageSaveBuffer;
    snapshot/work buffer. */
 static RpgStageData stageFolderSyncBuffer;
 static RpgStageData lastStageFolderSync;
+/* These are full-world comparison workspaces.  Keeping them static is
+   deliberate: the idle stage-folder synchronizer runs after startup and a
+   RpgStageData is too large for the editor thread stack. */
+static RpgStageData stageDataComparisonFirst;
+static RpgStageData stageDataComparisonSecond;
+static RpgStageData compactCellComparisonBefore;
+static RpgStageData compactCellComparisonAfter;
 /* A full stage contains the world-sized reference-path matrix.  Comparing a
    fresh copy every render frame is needless work while the editor is idle. */
 static double nextStageFolderComparisonTime;
@@ -630,8 +637,8 @@ static bool LoadEditorStageState(int stageNumber, RpgLayout *layout, RpgCharacte
                 GameFont_AddText(areaEntryEvents.entries[areaIndex].inspect.functions[functionIndex].dialogue.lines[lineIndex]);
             }
     wires = stageLoadBuffer.wires;
-    receivers = stageLoadBuffer.receivers;
-    attachments = stageLoadBuffer.attachments;
+    if (!RpgAttachments_Clone(&attachments, &stageLoadBuffer.attachments)) return false;
+    RpgReceivers_Bind(&receivers, &attachments);
     signalBlocks = stageLoadBuffer.signalBlocks;
     mapEvents = stageLoadBuffer.mapEvents;
     npcInspectData = stageLoadBuffer.npcInspectData;
@@ -646,7 +653,7 @@ static bool LoadEditorStageState(int stageNumber, RpgLayout *layout, RpgCharacte
     npc->position = (Vector2){ -RPG_STAGE_WORLD_COLUMNS * RPG_STAGE_TILE_SIZE, -RPG_STAGE_TILE_SIZE };
     previewStage = stage;
     RpgObjectFolders_ClearSessionStorage();
-    RpgObjectFolders_PrepareAttachmentFolders(&attachments);
+    RpgObjectFolders_PrepareBlockOwnedMetadata(&attachments, &receivers, &wires);
     RpgObjectFolder_PrepareZipperAnimationCommand();
     return true;
 }
@@ -1503,7 +1510,8 @@ static bool GetSaveFlagEditorPlayStart(const RpgAttachments *attachments, const 
     if (attachments == NULL || stage == NULL || startPosition == NULL || startMapIndex == NULL ||
         attachmentIndex < 0 || attachmentIndex >= attachments->count) return false;
     const RpgAttachment *flag = &attachments->entries[attachmentIndex];
-    if (flag->type != RPG_BLOCK_ATTACHMENT_SAVE_FLAG || flag->isZipperHeld) return false;
+    if (flag->type != RPG_BLOCK_ATTACHMENT_SAVE_FLAG ||
+        RpgAttachments_IsRuntimeUnavailable(flag)) return false;
     /* The attachment is stored in a packed slot, but runtime characters use the
        connected two-dimensional world.  In particular, a flag on an area's edge
        must not select the neighbouring storage slot just to validate its start. */
@@ -1528,7 +1536,8 @@ static int FindAreaSaveFlagForEditorPlay(const RpgAttachments *attachments, cons
         const RpgAttachment *attachment = &attachments->entries[index];
         Vector2 respawn;
         int flagMapIndex;
-        if (attachment->type != RPG_BLOCK_ATTACHMENT_SAVE_FLAG || attachment->isZipperHeld ||
+        if (attachment->type != RPG_BLOCK_ATTACHMENT_SAVE_FLAG ||
+            RpgAttachments_IsRuntimeUnavailable(attachment) ||
             !GetSaveFlagEditorPlayStart(attachments, stage, index, &respawn, &flagMapIndex) ||
             flagMapIndex != mapIndex) continue;
         if (attachment->folderId < selectedId) {
@@ -1740,7 +1749,10 @@ static bool MoveAttachmentPathEndpointToward(RpgAttachments *attachmentList, con
                                              int attachmentIndex, int destinationRow, int destinationColumn)
 {
     if (attachmentIndex < 0 || attachmentIndex >= attachmentList->count) return false;
-    RpgGridPath *path = &attachmentList->entries[attachmentIndex].dataPath;
+    RpgShooterConfig *shooter = RpgAttachments_FindShooter(attachmentList,
+        attachmentList->entries[attachmentIndex].folderId);
+    if (shooter == NULL) return false;
+    RpgGridPath *path = &shooter->path;
     if (path->cellCount <= 0) return false;
     bool changed = false;
     while (path->cells[path->cellCount - 1].row != destinationRow ||
@@ -1846,10 +1858,40 @@ static void ComposeEditorStageData(RpgStageData *destination, const RpgLayout *l
     destination->npcInspectData = npcInspectData;
     destination->items = *items;
     destination->wires = wires;
-    destination->receivers = receivers;
-    destination->attachments = attachments;
+    (void)RpgAttachments_Clone(&destination->attachments, &attachments);
+    RpgReceivers_Bind(&destination->receivers, &destination->attachments);
     destination->signalBlocks = signalBlocks;
     destination->mapEvents = mapEvents;
+}
+
+/* RpgAttachments owns heap storage.  Stage-data snapshots therefore need an
+ * explicit deep copy instead of a structure assignment. */
+static bool CopyEditorStageData(RpgStageData *destination, const RpgStageData *source)
+{
+    RpgAttachments copied = RpgAttachments_Default();
+    if (destination == NULL || source == NULL ||
+        !RpgAttachments_Clone(&copied, &source->attachments)) return false;
+    RpgAttachments_Destroy(&destination->attachments);
+    *destination = *source;
+    destination->attachments = copied;
+    RpgReceivers_Bind(&destination->receivers, &destination->attachments);
+    return true;
+}
+
+static bool IsEditorStageDataDifferent(const RpgStageData *first, const RpgStageData *second)
+{
+    if (first == NULL || second == NULL) return first != second;
+    if (AreAttachmentsDifferent(&first->attachments, &second->attachments)) return true;
+    stageDataComparisonFirst = *first;
+    stageDataComparisonSecond = *second;
+    stageDataComparisonFirst.attachments = RpgAttachments_Default();
+    stageDataComparisonSecond.attachments = RpgAttachments_Default();
+    /* Receiver is only a view of attachments; its address must not make the
+       static-preview comparison dirty every frame. */
+    stageDataComparisonFirst.receivers = RpgReceivers_Default();
+    stageDataComparisonSecond.receivers = RpgReceivers_Default();
+    return memcmp(&stageDataComparisonFirst, &stageDataComparisonSecond,
+                  sizeof(stageDataComparisonFirst)) != 0;
 }
 
 /* The editor preview cache is a copy of the static stage.  Do not let runtime
@@ -1876,9 +1918,12 @@ static void NormalizeEditorPreviewSyncData(RpgStageData *data)
     }
     for (int index = 0; index < data->attachments.count; index++) {
         RpgAttachment *attachment = &data->attachments.entries[index];
-        attachment->flagRaised = false;
-        attachment->shooterAnimationElapsed = 0.0f;
+        RpgFlagConfig *flag = RpgAttachments_FindFlag(&attachments, attachment->folderId);
+        RpgShooterConfig *shooter = RpgAttachments_FindShooter(&attachments, attachment->folderId);
+        if (flag != NULL) flag->raised = false;
+        if (shooter != NULL) shooter->animationElapsed = 0.0f;
         attachment->isZipperHeld = false;
+        attachment->isOwnerBlockZipperHeld = false;
     }
     for (int index = 0; index < data->signalBlocks.count; index++) {
         data->signalBlocks.entries[index].activeRemaining = 0.0f;
@@ -1912,7 +1957,7 @@ static bool BuildEditorPreviewCache(int stageNumber, const RpgLayout *layout, co
     RpgStageAuthority_Enter(RPG_STAGE_AUTHORITY_EDITOR_RUNTIME);
     editorPreviewBuildStage = *stage;
     built = RpgStageBuild_CreateEditorPreview(stageNumber, &editorPreviewBuildStage, &attachments,
-                                               layout->playerPosition);
+                                               &receivers, &wires, layout->playerPosition);
     /* Keep the preview build path while the editor is open: it owns the
        low-priority remaining-area queue.  RpgStageBuild_Close() still stops
        its watcher, so no filesystem watcher runs during editing. */
@@ -1930,7 +1975,7 @@ static bool RebuildEditorPreviewCache(int stageNumber, const RpgLayout *layout,
                                       const RpgStage *stage)
 {
     if (!BuildEditorPreviewCache(stageNumber, layout, stage)) return false;
-    RpgObjectFolders_PrepareAttachmentFolders(&attachments);
+    RpgObjectFolders_PrepareBlockOwnedMetadata(&attachments, &receivers, &wires);
     RpgObjectFolder_PrepareZipperAnimationCommand();
     return true;
 }
@@ -1947,11 +1992,15 @@ static bool EnsureEditorPreviewCache(int stageNumber, const RpgLayout *layout,
     if (layout == NULL || stage == NULL) return false;
     previousAuthority = RpgStageAuthority_Get();
     RpgStageAuthority_Enter(RPG_STAGE_AUTHORITY_EDITOR_RUNTIME);
-    repaired = RpgStageBuild_RepairEditorPreview(stage, &attachments, layout->playerPosition);
+    repaired = RpgStageBuild_RepairEditorPreview(stage, &attachments, &receivers, &wires,
+                                                  layout->playerPosition);
     RpgStageAuthority_Enter(previousAuthority);
     if (repaired) {
         editorPreviewBuildStage = *stage;
-        RpgObjectFolders_AbandonStageBuild();
+        /* Keep the repaired editor preview attached.  RpgStageBuild_Close()
+           already closes its watcher; retaining the build path lets the next
+           edit repair this cache instead of discarding it and recreating the
+           complete Stage/editor folder tree. */
         return true;
     }
     RpgObjectFolders_AbandonStageBuild();
@@ -1965,12 +2014,17 @@ static bool EnsureEditorPreviewCache(int stageNumber, const RpgLayout *layout,
 static bool IsCompactCellOnlyPreviewChange(const RpgStageData *before,
                                            const RpgStageData *after)
 {
-    RpgStageData normalized;
     bool changed = false;
     if (before == NULL || after == NULL) return false;
-    normalized = *before;
-    memcpy(normalized.stage.blocks, after->stage.blocks, sizeof(normalized.stage.blocks));
-    if (memcmp(&normalized, after, sizeof(normalized)) != 0) return false;
+    if (AreAttachmentsDifferent(&before->attachments, &after->attachments)) return false;
+    compactCellComparisonBefore = *before;
+    compactCellComparisonAfter = *after;
+    compactCellComparisonBefore.attachments = RpgAttachments_Default();
+    compactCellComparisonAfter.attachments = RpgAttachments_Default();
+    memcpy(compactCellComparisonBefore.stage.blocks, after->stage.blocks,
+           sizeof(compactCellComparisonBefore.stage.blocks));
+    if (memcmp(&compactCellComparisonBefore, &compactCellComparisonAfter,
+               sizeof(compactCellComparisonBefore)) != 0) return false;
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0;
          column < RPG_STAGE_WORLD_COLUMNS; column++) {
         int oldType = before->stage.blocks[row][column];
@@ -2011,7 +2065,7 @@ static void SyncEditorStageFolderWhenIdle(const RpgLayout *layout, const RpgStag
     ComposeEditorStageData(&stageFolderSyncBuffer, layout, stage, dialogue, stage3Event, items);
     NormalizeEditorPreviewSyncData(&stageFolderSyncBuffer);
     if (!*hasLastPublished || *lastPublishedStageNumber != stageNumber) {
-        *lastPublished = stageFolderSyncBuffer;
+        (void)CopyEditorStageData(lastPublished, &stageFolderSyncBuffer);
         *hasLastPublished = true;
         *lastPublishedStageNumber = stageNumber;
         *previewBuildDirty = true;
@@ -2019,7 +2073,7 @@ static void SyncEditorStageFolderWhenIdle(const RpgLayout *layout, const RpgStag
         *nextSyncTime = now + (double)EDITOR_STAGE_FOLDER_SYNC_DELAY_MS / 1000.0;
         return;
     }
-    stageChanged = memcmp(lastPublished, &stageFolderSyncBuffer, sizeof(stageFolderSyncBuffer)) != 0;
+    stageChanged = IsEditorStageDataDifferent(lastPublished, &stageFolderSyncBuffer);
     if (stageChanged) {
         compactCellOnlyChange = *previewBuildReady && *previewBuildStageNumber == stageNumber &&
                                 IsCompactCellOnlyPreviewChange(lastPublished, &stageFolderSyncBuffer);
@@ -2039,7 +2093,7 @@ static void SyncEditorStageFolderWhenIdle(const RpgLayout *layout, const RpgStag
         *nextSyncTime = now + (double)EDITOR_STAGE_FOLDER_SYNC_DELAY_MS / 1000.0;
         return;
     }
-    if (stageChanged) *lastPublished = stageFolderSyncBuffer;
+    if (stageChanged) (void)CopyEditorStageData(lastPublished, &stageFolderSyncBuffer);
     bool refreshedCompactCells = false;
     if (compactCellOnlyChange) {
         RpgStageAuthority authorityBeforeRefresh = RpgStageAuthority_Get();
@@ -2092,8 +2146,8 @@ static bool SaveEditorData(RpgLayout *layout, const RpgCharacter *player,
     if (stageFolderSaved) {
         savedMapEvents = mapEvents;
         savedWires = wires;
-        savedReceivers = receivers;
-        savedAttachments = attachments;
+        (void)RpgAttachments_Clone(&savedAttachments, &attachments);
+        RpgReceivers_Bind(&savedReceivers, &savedAttachments);
         savedSignalBlocks = signalBlocks;
     }
     return zipperSaved && zipperInspectSaved && globalRuntimeSaved && stageFolderSaved;
@@ -2233,7 +2287,8 @@ static BlockHistoryEntry CreateReceiverChangedHistory(int receiverIndex,
 {
     BlockHistoryEntry entry = { .kind = BLOCK_HISTORY_RECEIVER_CHANGED,
                                 .propertyIndex = receiverIndex,
-                                .receiver = receiverList->entries[receiverIndex] };
+                                .receiver = { 0 } };
+    if (!RpgReceivers_Get(receiverList, receiverIndex, &entry.receiver)) entry.propertyIndex = -1;
     const RpgReceiver *receiver = &entry.receiver;
     for (int wireIndex = 0; wireIndex < wireList->count; wireIndex++) {
         const RpgWire *wire = &wireList->entries[wireIndex];
@@ -2286,7 +2341,7 @@ static bool PlaceReceiverProperty(BlockPropertyPlacementContext *context, RpgGri
                                   const char **message)
 {
     if (!RpgReceivers_Add(context->receivers, context->stage, cell)) return false;
-    PushReceiverAddedHistory(context->history, context->receivers->count - 1);
+    PushReceiverAddedHistory(context->history, RpgReceivers_Count(context->receivers) - 1);
     if (RpgWires_AddFromReceiver(context->wires, context->stage, cell, RPG_GRID_SIDE_TOP))
         *message = "Receiver and default wire added";
     else *message = "Receiver added, but wire limit reached";
@@ -2538,8 +2593,8 @@ static RPG_UNUSED bool UndoBlockChange(BlockHistory *history, RpgStage *stage, R
         return true;
     }
     if (entry.kind == BLOCK_HISTORY_RECEIVER_ADDED) {
-        if (entry.propertyIndex < 0 || entry.propertyIndex >= receiverList->count) return false;
-        RpgReceiver receiver = receiverList->entries[entry.propertyIndex];
+        RpgReceiver receiver;
+        if (entry.propertyIndex < 0 || !RpgReceivers_Get(receiverList, entry.propertyIndex, &receiver)) return false;
         // 受容体の作成時に自動生成した導線も、同じ一回のUndoで取り除く。
         for (int wireIndex = wireList->count - 1; wireIndex >= 0; wireIndex--) {
             RpgWire *wire = &wireList->entries[wireIndex];
@@ -2549,14 +2604,10 @@ static RPG_UNUSED bool UndoBlockChange(BlockHistory *history, RpgStage *stage, R
                 wireList->entries[next] = wireList->entries[next + 1];
             wireList->count--;
         }
-        for (int index = entry.propertyIndex; index < receiverList->count - 1; index++)
-            receiverList->entries[index] = receiverList->entries[index + 1];
-        receiverList->count--;
-        return true;
+        return RpgReceivers_Remove(receiverList, entry.propertyIndex);
     }
     if (entry.kind == BLOCK_HISTORY_RECEIVER_CHANGED) {
-        if (entry.propertyIndex < 0 || entry.propertyIndex >= receiverList->count) return false;
-        receiverList->entries[entry.propertyIndex] = entry.receiver;
+        if (entry.propertyIndex < 0 || !RpgReceivers_Set(receiverList, entry.propertyIndex, entry.receiver)) return false;
         for (int index = 0; index < entry.receiverWireCount; index++) {
             int wireIndex = entry.receiverWireIndices[index];
             if (wireIndex >= 0 && wireIndex < wireList->count)
@@ -2569,16 +2620,14 @@ static RPG_UNUSED bool UndoBlockChange(BlockHistory *history, RpgStage *stage, R
         return true;
     }
     if (entry.kind == BLOCK_HISTORY_ATTACHMENT_ADDED)
-        return RpgAttachments_Remove(attachmentList, entry.attachment);
+        return RpgAttachments_Remove(attachmentList, stage, entry.attachment);
     if (entry.kind == BLOCK_HISTORY_ATTACHMENT_CHANGED) {
         if (entry.propertyIndex < 0 || entry.propertyIndex >= attachmentList->count) return false;
         attachmentList->entries[entry.propertyIndex] = entry.attachment;
         return true;
     }
     if (entry.kind == BLOCK_HISTORY_ATTACHMENT_REMOVED) {
-        if (attachmentList->count >= RPG_ATTACHMENT_MAX_COUNT) return false;
-        attachmentList->entries[attachmentList->count++] = entry.attachment;
-        return true;
+        return RpgAttachments_Append(attachmentList, &entry.attachment);
     }
 
     stage->blocks[entry.row][entry.column] = entry.previousValue;
@@ -2606,8 +2655,8 @@ static RPG_UNUSED void RevertToSavedSnapshot(const EditorSaveSnapshot *snapshot,
     zipperInspectData = snapshot->zipperInspectSnapshot;
     mapEvents = savedMapEvents;
     wires = savedWires;
-    receivers = savedReceivers;
-    attachments = savedAttachments;
+    (void)RpgAttachments_Clone(&attachments, &savedAttachments);
+    RpgReceivers_Bind(&receivers, &attachments);
 }
 
 static bool IsDialogueDifferent(const RpgDialogue *first, const RpgDialogue *second)
@@ -2639,12 +2688,26 @@ static bool AreWiresDifferent(const RpgWires *first, const RpgWires *second)
 
 static bool AreReceiversDifferent(const RpgReceivers *first, const RpgReceivers *second)
 {
-    return memcmp(first, second, sizeof(*first)) != 0;
+    if (first == NULL || second == NULL) return first != second;
+    if (RpgReceivers_Count(first) != RpgReceivers_Count(second)) return true;
+    /* isOwnerBlockZipperHeld is runtime-only state: eating a parent block in
+       a preview must never make the editor's static receiver data dirty. */
+    for (int index = 0; index < RpgReceivers_Count(first); index++) {
+        RpgReceiver a, b;
+        if (!RpgReceivers_Get(first, index, &a) || !RpgReceivers_Get(second, index, &b) ||
+            a.cell.row != b.cell.row || a.cell.column != b.cell.column || a.side != b.side) return true;
+    }
+    return false;
 }
 
 static bool AreAttachmentsDifferent(const RpgAttachments *first, const RpgAttachments *second)
 {
-    return memcmp(first, second, sizeof(*first)) != 0;
+    if (first == NULL || second == NULL) return first != second;
+    return first->count != second->count ||
+           (first->count > 0 &&
+            (first->entries == NULL || second->entries == NULL ||
+             memcmp(first->entries, second->entries,
+                    (size_t)first->count * sizeof(*first->entries)) != 0));
 }
 
 // 実行中・プレビュー中の残り時間は保存対象ではないため、設定値だけを比較する。
@@ -4072,8 +4135,9 @@ static void DrawAttachmentInspector(int attachmentIndex, bool isPathEditing)
         DrawSettingsText("開始時のジッパー", 716, 220, 15, BLACK);
         Rectangle connectedBounds = { 716, 242, 90, 26 };
         Rectangle disconnectedBounds = { 814, 242, 90, 26 };
-        DrawRectangleRec(connectedBounds, attachment->flagStartZipperConnected ? DARKBLUE : GRAY);
-        DrawRectangleRec(disconnectedBounds, attachment->flagStartZipperConnected ? GRAY : DARKBLUE);
+        const RpgFlagConfig *flag = RpgAttachments_FindFlagConst(&attachments, attachment->folderId);
+        DrawRectangleRec(connectedBounds, flag != NULL && flag->startZipperConnected ? DARKBLUE : GRAY);
+        DrawRectangleRec(disconnectedBounds, flag != NULL && flag->startZipperConnected ? GRAY : DARKBLUE);
         DrawRectangleLinesEx(connectedBounds, 1.0f, RAYWHITE);
         DrawRectangleLinesEx(disconnectedBounds, 1.0f, RAYWHITE);
         DrawSettingsText("接続", 742, 247, 15, RAYWHITE);
@@ -4097,12 +4161,13 @@ static void DrawAttachmentInspector(int attachmentIndex, bool isPathEditing)
         DrawSettingsText("上面ブロック設置部品", 716, 122, 16, isUnsaved ? MAROON : BLACK);
         DrawSettingsText("可動ブロックを真上へ設置", 716, 150, 14, BLACK);
         DrawSettingsText("信号：ブロック設置（エリア内のみ）", 716, 178, 14, BLACK);
-        DrawSettingsText(TextFormat("右側の光: +%.0f度", attachment->socketRightLightAngle), 716, 212, 15, BLACK);
+        const RpgSocketConfig *socket = RpgAttachments_FindSocketConst(&attachments, attachment->folderId);
+        DrawSettingsText(TextFormat("右側の光: +%.0f度", socket != NULL ? socket->rightLightAngle : 0.0f), 716, 212, 15, BLACK);
         DrawRectangle(716, 232, 42, 24, MAROON);
         DrawRectangle(772, 232, 42, 24, DARKGREEN);
         DrawText("-", 731, 235, 20, RAYWHITE);
         DrawText("+", 789, 235, 20, RAYWHITE);
-        DrawSettingsText(TextFormat("透明度: %.0f%%", attachment->socketLightOpacity * 100.0f), 716, 276, 15, BLACK);
+        DrawSettingsText(TextFormat("透明度: %.0f%%", (socket != NULL ? socket->lightOpacity : 0.0f) * 100.0f), 716, 276, 15, BLACK);
         DrawRectangle(716, 296, 42, 24, MAROON);
         DrawText("-", 731, 299, 20, RAYWHITE);
         DrawRectangle(772, 296, 42, 24, DARKGREEN);
@@ -5172,7 +5237,9 @@ static void DrawEditor(const RpgCharacter *player, const RpgCharacter *npc, cons
     RpgWires_DrawElectric(&wires, dataShots,
                           mapIndex * RPG_STAGE_COLUMNS, RPG_STAGE_COLUMNS);
     RpgReceivers_DrawMap(&receivers, mapIndex);
-    RpgAttachments_DrawSocketLightsMap(&attachments, stage, mapIndex);
+    /* Edit mode has no runtime movable-block set.  Editor Play renders via
+       the shared runtime path, which supplies the live blockers. */
+    RpgAttachments_DrawSocketLightsMap(&attachments, stage, mapIndex, NULL);
     RpgAttachments_DrawMapExcept(&attachments, mapIndex, attachmentDragDrawSkipIndex);
     RpgDataShots_DrawMap(dataShots, mapIndex);
     RpgImageObjects_DrawLayer(&stage->imageObjects, mapIndex, RPG_STAGE_COLUMNS,
@@ -5558,12 +5625,12 @@ int main(void)
         }
     wires = stageLoadBuffer.wires;
     savedWires = wires;
-    receivers = stageLoadBuffer.receivers;
-    savedReceivers = receivers;
-    attachments = stageLoadBuffer.attachments;
-    RpgObjectFolders_PrepareAttachmentFolders(&attachments);
+    (void)RpgAttachments_Clone(&attachments, &stageLoadBuffer.attachments);
+    RpgReceivers_Bind(&receivers, &attachments);
+    RpgObjectFolders_PrepareBlockOwnedMetadata(&attachments, &receivers, &wires);
     RpgObjectFolder_PrepareZipperAnimationCommand();
-    savedAttachments = attachments;
+    (void)RpgAttachments_Clone(&savedAttachments, &attachments);
+    RpgReceivers_Bind(&savedReceivers, &savedAttachments);
     signalBlocks = stageLoadBuffer.signalBlocks;
     savedSignalBlocks = signalBlocks;
     previewStage = &stage;
@@ -5813,6 +5880,7 @@ int main(void)
     RpgDataShots editorPlayShots = RpgDataShots_Default();
     RpgMagnetRuntime editorPlayMagnetRuntime = RpgMagnetRuntime_Default();
     RpgButtonEvent editorPlayButtonEvent = RpgButtonEvent_Default();
+    RpgButtonEvent editorPlaySocketCommunicationEvent = RpgButtonEvent_Default();
     bool wasEditorPlayButtonPressed = false;
     int editorPlayDialogueIndex = -1;
     int editorPlayInspectTarget = 0;
@@ -5847,7 +5915,7 @@ int main(void)
     editorPreviewBuildStageNumber = editorPreviewBuildReady ? currentStageNumber : 0;
     ComposeEditorStageData(&stageFolderSyncBuffer, &layout, &stage, &dialogue, &stage3Event, &items);
     NormalizeEditorPreviewSyncData(&stageFolderSyncBuffer);
-    lastStageFolderSync = stageFolderSyncBuffer;
+    (void)CopyEditorStageData(&lastStageFolderSync, &stageFolderSyncBuffer);
     hasStageFolderSync = true;
     lastStageFolderSyncNumber = currentStageNumber;
     nextStageFolderComparisonTime = GetTime() + 0.20;
@@ -5906,7 +5974,7 @@ int main(void)
         bool blockEditedThisFrame = false;
         if (isEditorPlaying) {
             RpgRuntimeContext runtime = {
-                .layout=&editorPlayRuntime.layout, .stageBackground=&stageBackground, .stage=&editorPlayRuntime.stage, .items=&editorPlayRuntime.items, .referenceDrops=&editorPlayReferenceDrops, .wires=&editorPlayRuntime.wires, .receivers=&editorPlayRuntime.receivers, .attachments=&editorPlayRuntime.attachments, .signalBlocks=&editorPlayRuntime.signalBlocks, .dataShots=&editorPlayShots, .buttonEvent=&editorPlayButtonEvent, .events=&editorPlayRuntime.mapEvents, .dialogue=&editorPlayRuntime.dialogue, .stage3Event=&editorPlayRuntime.stage3Event, .areaEntryEvents=&editorPlayRuntime.areaEntryEvents, .zipper=&editorPlayRuntime.zipper, .inspect=&editorPlayRuntime.runtimeNpcInspect, .player=&editorPlayRuntime.player, .npc=&editorPlayRuntime.npc, .magnetRuntime=&editorPlayMagnetRuntime,
+                .layout=&editorPlayRuntime.layout, .stageBackground=&stageBackground, .stage=&editorPlayRuntime.stage, .items=&editorPlayRuntime.items, .referenceDrops=&editorPlayReferenceDrops, .wires=&editorPlayRuntime.wires, .receivers=&editorPlayRuntime.receivers, .attachments=&editorPlayRuntime.attachments, .signalBlocks=&editorPlayRuntime.signalBlocks, .dataShots=&editorPlayShots, .buttonEvent=&editorPlayButtonEvent, .socketCommunicationEvent=&editorPlaySocketCommunicationEvent, .events=&editorPlayRuntime.mapEvents, .dialogue=&editorPlayRuntime.dialogue, .stage3Event=&editorPlayRuntime.stage3Event, .areaEntryEvents=&editorPlayRuntime.areaEntryEvents, .zipper=&editorPlayRuntime.zipper, .inspect=&editorPlayRuntime.runtimeNpcInspect, .player=&editorPlayRuntime.player, .npc=&editorPlayRuntime.npc, .magnetRuntime=&editorPlayMagnetRuntime,
                 .dialogueIndex=&editorPlayDialogueIndex, .stage3IntroIndex=&editorPlayStage3IntroIndex, .inspectFunctionIndex=&editorPlayInspectFunctionIndex, .inspectLineIndex=&editorPlayInspectLineIndex, .inspectTarget=&editorPlayInspectTarget, .isInspectMoveRunning=&isEditorPlayInspectMoveRunning, .inspectMoveElapsed=&editorPlayInspectMoveElapsed, .inspectMoveStartX=&editorPlayInspectMoveStartX, .inspectMoveStartY=&editorPlayInspectMoveStartY, .activeInspectMove=&editorPlayActiveInspectMove, .inspectMoveTransitionElapsed=&editorPlayInspectMoveTransitionElapsed, .activeWaitFunctionIndex=&editorPlayActiveWaitFunctionIndex, .inspectWaitElapsed=&editorPlayInspectWaitElapsed, .stage3IntroShown=&editorPlayStage3IntroShown, .areaEntryShown=editorPlayAreaEntryShown, .activeEntryEvent=&editorPlayActiveEntryEvent, .zipperFollowsPlayer=&editorPlayZipperFollowsPlayer, .isZipperLaunched=&editorPlayZipperLaunched, .zipperLaunchVelocity=&editorPlayZipperLaunchVelocity, .attachedDataShotIndex=&editorPlayAttachedDataShotIndex, .attachedAttachmentIndex=&editorPlayAttachedAttachmentIndex, .attachedDataShotOffset=&editorPlayAttachedDataShotOffset, .attachedDynamicBlockIndex=&editorPlayAttachedDynamicBlockIndex, .attachedReferenceObjectIndex=&editorPlayAttachedReferenceObjectIndex,
                 .zipperPointerSelected=&editorPlayZipperPointerSelected, .isZipperPointerFeedbackSuppressed=&editorPlayZipperPointerFeedbackSuppressed, .lastZipperPointerClickTime=&editorPlayLastZipperPointerClickTime, .selectedReferencePointerTarget=&editorPlaySelectedReference, .isReferencePointerFeedbackSuppressed=&editorPlayReferencePointerFeedbackSuppressed, .isReferencePointerPressed=&editorPlayReferencePointerPressed, .pressedReferenceTarget=&editorPlayPressedReference, .referencePressPosition=&editorPlayReferencePressPosition, .isReferenceDragActive=&editorPlayReferenceDragActive, .draggedReferenceTarget=&editorPlayDraggedReference, .referenceDragPosition=&editorPlayReferenceDragPosition, .lastReferencePointerClickTime=&editorPlayLastReferenceClickTime, .zipperAnimationElapsed=&editorPlayZipperAnimationElapsed, .npcInspectCompleted=&editorPlayNpcInspectCompleted, .zipperInspectCompleted=&editorPlayZipperInspectCompleted, .isZipperControllable=&editorPlayZipperControllable, .wasDataButtonPressed=&wasEditorPlayButtonPressed, .previousMap=&editorPlayPreviousMap, .worldCoordinatesInitialized=&editorPlayWorldCoordinatesInitialized, .cameraFollowsPlayer=&editorPlayCameraFollowsPlayer, .itemMessage=editorPlayItemMessage, .itemMessageSize=(int)sizeof(editorPlayItemMessage), .itemMessageTimer=&editorPlayItemMessageTimer, .referenceText=editorPlayReferenceText, .referenceTextSize=(int)sizeof(editorPlayReferenceText), .referenceFileName=editorPlayReferenceFileName, .referenceFileNameSize=(int)sizeof(editorPlayReferenceFileName), .isReferenceTextOpen=&editorPlayReferenceTextOpen, .camera=&editorPlayCamera, .zipperTexture=zipperTexture, .fileTexture=fileTexture,
                 // エディターではゲーム設定だけを共有し、タイトルへの遷移は許可しない。
@@ -5949,6 +6017,7 @@ int main(void)
             editorPlayShots = RpgDataShots_Default();
             editorPlayMagnetRuntime = RpgMagnetRuntime_Default();
             editorPlayButtonEvent = RpgButtonEvent_Default();
+            editorPlaySocketCommunicationEvent = RpgButtonEvent_Default();
             wasEditorPlayButtonPressed = false;
             editorPlayDialogueIndex = -1; editorPlayStage3IntroIndex = -1; editorPlayStage3IntroShown = false; memset(editorPlayAreaEntryShown, 0, sizeof(editorPlayAreaEntryShown)); editorPlayActiveEntryEvent = &stage3Event; editorPlayInspectTarget = -1;
             editorPlayInspectFunctionIndex = -1; editorPlayInspectLineIndex = -1;
@@ -6233,9 +6302,28 @@ int main(void)
                 editorPlayPreviousMap = isSaveFlagPlayRequested ? saveFlagPlayMapIndex :
                     RpgStage_FindNearestActiveMap(
                         &editorPlayRuntime.stage, (int)(editorPlayRuntime.player.position.x / (RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE)));
-                /* The idle editor sync pre-generates Stage/editor/StageN.  Reconnect
-                   that cache when it still represents this exact edit state; a
-                   just-edited or absent cache safely falls back to a normal build. */
+                /* The idle editor sync pre-generates Stage/editor/StageN.  Play may
+                   be requested before its 700 ms debounce expires, so compare the
+                   current static state here as well.  For the same stage, repair
+                   the attached cache rather than deleting and rebuilding its whole
+                   folder tree.  The idle publisher still persists this snapshot
+                   afterward, keeping static saving off the play-start hot path. */
+                ComposeEditorStageData(&stageFolderSyncBuffer, &layout, &stage,
+                                       &dialogue, &stage3Event, &items);
+                NormalizeEditorPreviewSyncData(&stageFolderSyncBuffer);
+                bool previewSnapshotChanged = !hasStageFolderSync ||
+                                              lastStageFolderSyncNumber != currentStageNumber ||
+                                              IsEditorStageDataDifferent(&lastStageFolderSync,
+                                                                         &stageFolderSyncBuffer);
+                if (editorPreviewBuildStageNumber == currentStageNumber &&
+                    (editorPreviewBuildDirty || previewSnapshotChanged)) {
+                    RpgObjectFolders_MarkEditorPreviewStaticMutation();
+                    editorPreviewBuildReady = EnsureEditorPreviewCache(currentStageNumber,
+                                                                         &layout, &stage);
+                    editorPreviewBuildDirty = !editorPreviewBuildReady;
+                    editorPreviewBuildStageNumber = editorPreviewBuildReady ?
+                        currentStageNumber : 0;
+                }
                 bool previewCacheEligible = editorPreviewBuildReady &&
                                             !editorPreviewBuildDirty &&
                                             editorPreviewBuildStageNumber == currentStageNumber;
@@ -6244,6 +6332,8 @@ int main(void)
                 if (!usingPreparedEditorPreview &&
                     !RpgStageBuild_CreateEditorPreview(currentStageNumber, &editorPlayRuntime.stage,
                                                        &editorPlayRuntime.attachments,
+                                                       &editorPlayRuntime.receivers,
+                                                       &editorPlayRuntime.wires,
                                                        editorPlayRuntime.player.position)) {
                     RpgEditorPlay_End(&editorPlayRuntime);
                     message = "Play build failed";
@@ -6265,6 +6355,7 @@ int main(void)
                 editorPlayShots = RpgDataShots_Default();
                 editorPlayMagnetRuntime = RpgMagnetRuntime_Default();
                 editorPlayButtonEvent = RpgButtonEvent_Default();
+                editorPlaySocketCommunicationEvent = RpgButtonEvent_Default();
                 wasEditorPlayButtonPressed = false;
                 editorPlayDialogueIndex = -1;
                 editorPlayInspectTarget = -1;
@@ -6322,6 +6413,7 @@ int main(void)
                 editorPlayShots = RpgDataShots_Default();
                 editorPlayMagnetRuntime = RpgMagnetRuntime_Default();
                 editorPlayButtonEvent = RpgButtonEvent_Default();
+                editorPlaySocketCommunicationEvent = RpgButtonEvent_Default();
                 wasEditorPlayButtonPressed = false;
                 editorPlayDialogueIndex = -1; editorPlayStage3IntroIndex = -1; editorPlayStage3IntroShown = false; memset(editorPlayAreaEntryShown, 0, sizeof(editorPlayAreaEntryShown)); editorPlayActiveEntryEvent = &stage3Event; editorPlayInspectTarget = -1;
                 editorPlayInspectFunctionIndex = -1; editorPlayInspectLineIndex = -1;
@@ -6858,8 +6950,8 @@ int main(void)
                 currentStageNumber = targetStageNumber;
                 RpgStageCatalog_Select(&stageCatalogData, currentStageNumber);
                 savedItems = items;
-                savedMapEvents = mapEvents; savedWires = wires; savedReceivers = receivers;
-                savedAttachments = attachments; savedSignalBlocks = signalBlocks;
+                savedMapEvents = mapEvents; savedWires = wires;
+                (void)RpgAttachments_Clone(&savedAttachments, &attachments); RpgReceivers_Bind(&savedReceivers, &savedAttachments); savedSignalBlocks = signalBlocks;
                 UpdateSaveSnapshot(&savedSnapshot, &player, &npc, &layout, &stage, &dialogue, &stage3Event);
                 mapIndex = RpgStage_FindNearestActiveMap(&stage, 0);
                 selected = RPG_EDITOR_STAGE_SETTINGS_INSPECTOR;
@@ -7386,7 +7478,7 @@ int main(void)
                 LoadEditorStageState(currentStageNumber, &layout, &player, &npc, &stage, &items,
                                      &dialogue, &stage3Event);
                 savedItems = items; savedMapEvents = mapEvents; savedWires = wires;
-                savedReceivers = receivers; savedAttachments = attachments; savedSignalBlocks = signalBlocks;
+                (void)RpgAttachments_Clone(&savedAttachments, &attachments); RpgReceivers_Bind(&savedReceivers, &savedAttachments); savedSignalBlocks = signalBlocks;
                 UpdateSaveSnapshot(&savedSnapshot, &player, &npc, &layout, &stage, &dialogue, &stage3Event);
             }
             mapIndex = RpgStage_FindNearestActiveMapAtGrid(&stage, previousGridX, previousGridY);
@@ -8035,7 +8127,7 @@ int main(void)
                 message = "Base speed edit cancelled";
             } else if (IsKeyPressed(KEY_ENTER)) {
                 float value = strtof(attachmentSpeedInput, NULL);
-                attachments.entries[selectedAttachmentIndex].dataSpeed = Clamp(value, 1.0f, 480.0f);
+                RpgAttachments_FindShooter(&attachments, attachments.entries[selectedAttachmentIndex].folderId)->dataSpeed = Clamp(value, 1.0f, 480.0f);
                 isAttachmentSpeedEditing = false;
                 message = "Base speed changed";
             } else {
@@ -8379,9 +8471,9 @@ int main(void)
                                                                        worldPosition, 30.0f);
             if (attachmentIndex >= 0) {
                 RpgAttachment removedAttachment = attachments.entries[attachmentIndex];
-                if (RpgAttachments_Remove(&attachments, removedAttachment)) {
+                if (RpgAttachments_Remove(&attachments, &stage, removedAttachment)) {
                     RpgObjectFolder_RemoveAttachmentFolder(&removedAttachment);
-                    RpgObjectFolders_PrepareAttachmentFolders(&attachments);
+                    RpgObjectFolders_PrepareBlockOwnedMetadata(&attachments, &receivers, &wires);
                     PushAttachmentRemovedHistory(&blockHistory, removedAttachment);
                     isAttachmentErasePointerHeld = true;
                     blockEditedThisFrame = true;
@@ -8469,8 +8561,9 @@ int main(void)
                                                  attachments.entries[draggedAttachmentIndex]);
                     RpgObjectFolder_MoveAttachmentFolder(&attachments.entries[draggedAttachmentIndex],
                                                          &attachmentDragPreview);
-                    attachments.entries[draggedAttachmentIndex] = attachmentDragPreview;
-                    RpgObjectFolders_PrepareAttachmentFolders(&attachments);
+                    (void)RpgAttachments_Replace(&attachments, &stage,
+                                                   draggedAttachmentIndex, attachmentDragPreview);
+                    RpgObjectFolders_PrepareBlockOwnedMetadata(&attachments, &receivers, &wires);
                     blockEditedThisFrame = true;
                     message = "Attachment moved";
                 } else if (!isAttachmentDragPreviewSnapped) message = "Attachment move cancelled";
@@ -8657,8 +8750,9 @@ int main(void)
         if (isReceiverClickPending && IsMouseButtonDown(MOUSE_BUTTON_LEFT) &&
             !isUiBlockingMap &&
             Vector2Distance(mousePosition, receiverPressPosition) >= 5.0f) {
-            int receiverWireIndex = FindWireStartingAtReceiver(&wires,
-                                                                 &receivers.entries[pendingReceiverIndex]);
+            RpgReceiver pendingReceiver;
+            int receiverWireIndex = RpgReceivers_Get(&receivers, pendingReceiverIndex, &pendingReceiver) ?
+                FindWireStartingAtReceiver(&wires, &pendingReceiver) : -1;
             if (receiverWireIndex >= 0) {
                 draggedWireIndex = receiverWireIndex;
                 draggedWireStart = false;
@@ -8675,17 +8769,22 @@ int main(void)
             pendingReceiverIndex = -1;
         }
         if (isReceiverClickPending && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
-            RpgReceiver *receiver = &receivers.entries[pendingReceiverIndex];
-            RpgGridSide previousSide = receiver->side;
+            RpgReceiver receiver;
+            if (!RpgReceivers_Get(&receivers, pendingReceiverIndex, &receiver)) {
+                isReceiverClickPending = false;
+                pendingReceiverIndex = -1;
+                continue;
+            }
+            RpgGridSide previousSide = receiver.side;
             BlockHistoryEntry receiverHistory = CreateReceiverChangedHistory(pendingReceiverIndex,
                                                                               &receivers, &wires);
             if (RpgReceivers_CycleSide(&receivers, pendingReceiverIndex)) {
                 AppendBlockHistory(&blockHistory, receiverHistory);
                 for (int wireIndex = 0; wireIndex < wires.count; wireIndex++) {
                     RpgWire *wire = &wires.entries[wireIndex];
-                    if (wire->hasReceiverSource && wire->receiverCell.row == receiver->cell.row &&
-                        wire->receiverCell.column == receiver->cell.column &&
-                        wire->receiverSide == previousSide) wire->receiverSide = receiver->side;
+                    if (wire->hasReceiverSource && wire->receiverCell.row == receiver.cell.row &&
+                        wire->receiverCell.column == receiver.cell.column &&
+                        wire->receiverSide == previousSide) wire->receiverSide = (RpgGridSide)((previousSide + 1) % 4);
                 }
                 blockEditedThisFrame = true;
                 message = "Receiver side changed";
@@ -8887,7 +8986,7 @@ int main(void)
             if (RPG_STAGE_TILE_SIZE - localY < nearest) { nearest = RPG_STAGE_TILE_SIZE - localY; side = RPG_GRID_SIDE_BOTTOM; }
             if (localX < nearest) side = RPG_GRID_SIDE_LEFT;
             if (RpgAttachments_Add(&attachments, &stage, selectedBlockType, (RpgGridCell){ row, column }, side)) {
-                RpgObjectFolders_PrepareAttachmentFolders(&attachments);
+                RpgObjectFolders_PrepareBlockOwnedMetadata(&attachments, &receivers, &wires);
                 PushAttachmentAddedHistory(&blockHistory, attachments.entries[attachments.count - 1]);
                 blockEditedThisFrame = true;
                 message = selectedBlockType == RPG_BLOCK_ATTACHMENT_DATA_BUTTON ?

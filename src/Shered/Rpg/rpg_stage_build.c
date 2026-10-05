@@ -260,6 +260,7 @@ static void ProcessChanges(RpgStage *stage, DWORD byteCount)
 #endif
 
 static bool CreateStageBuild(int stageNumber, RpgStage *stage, const RpgAttachments *attachments,
+                             const RpgReceivers *receivers, const RpgWires *wires,
                              Vector2 playerStartPosition, bool isSimpleBuild)
 {
 #ifdef _WIN32
@@ -267,7 +268,7 @@ static bool CreateStageBuild(int stageNumber, RpgStage *stage, const RpgAttachme
     RpgStageBuild_Close();
     /* 参照Fileの復元失敗は、そのFileだけの問題として扱い、Play全体は止めない。 */
     (void)RpgStageStorage_RepairReferenceFileCopies(stageNumber, stage);
-    if (!RpgObjectFolders_BeginStageBuild(stageNumber, stage, attachments, playerStartPosition,
+    if (!RpgObjectFolders_BeginStageBuild(stageNumber, stage, attachments, receivers, wires, playerStartPosition,
                                           isSimpleBuild, buildPath, sizeof(buildPath))) return false;
     memcpy(watcher.originalBlocks, stage->blocks, sizeof(watcher.originalBlocks));
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++)
@@ -279,23 +280,27 @@ static bool CreateStageBuild(int stageNumber, RpgStage *stage, const RpgAttachme
     if (!isSimpleBuild) RpgStageStorage_ClearPackagedStaticStage(stageNumber);
     return true;
 #else
-    (void)stageNumber; (void)stage; (void)attachments; (void)playerStartPosition; (void)isSimpleBuild;
+    (void)stageNumber; (void)stage; (void)attachments; (void)receivers; (void)wires;
+    (void)playerStartPosition; (void)isSimpleBuild;
     return false;
 #endif
 }
 
 bool RpgStageBuild_Create(int stageNumber, RpgStage *stage, const RpgAttachments *attachments,
+                          const RpgReceivers *receivers, const RpgWires *wires,
                           Vector2 playerStartPosition)
 {
     if (!RpgStageAuthority_CanWriteGameRuntime()) return false;
-    return CreateStageBuild(stageNumber, stage, attachments, playerStartPosition, false);
+    return CreateStageBuild(stageNumber, stage, attachments, receivers, wires, playerStartPosition, false);
 }
 
-bool RpgStageBuild_CreateEditorPreview(int stageNumber, RpgStage *stage, const RpgAttachments *attachments,
+bool RpgStageBuild_CreateEditorPreview(int stageNumber, RpgStage *stage,
+                                       const RpgAttachments *attachments,
+                                       const RpgReceivers *receivers, const RpgWires *wires,
                                        Vector2 playerStartPosition)
 {
     if (!RpgStageAuthority_CanWriteEditorRuntime()) return false;
-    return CreateStageBuild(stageNumber, stage, attachments, playerStartPosition, true);
+    return CreateStageBuild(stageNumber, stage, attachments, receivers, wires, playerStartPosition, true);
 }
 
 static bool ResumeStageBuildForKind(int stageNumber, RpgStage *stage, bool isEditorPreview)
@@ -355,10 +360,12 @@ bool RpgStageBuild_RefreshEditorPreviewCompactCells(const RpgStage *stage)
 
 bool RpgStageBuild_RepairEditorPreview(const RpgStage *stage,
                                        const RpgAttachments *attachments,
+                                       const RpgReceivers *receivers,
+                                       const RpgWires *wires,
                                        Vector2 playerStartPosition)
 {
     if (!RpgStageAuthority_CanWriteEditorRuntime()) return false;
-    return RpgObjectFolders_RepairEditorPreview(stage, attachments, playerStartPosition);
+    return RpgObjectFolders_RepairEditorPreview(stage, attachments, receivers, wires, playerStartPosition);
 }
 
 void RpgStageBuild_Update(RpgStage *stage)

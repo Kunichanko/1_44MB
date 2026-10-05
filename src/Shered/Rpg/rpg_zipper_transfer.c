@@ -131,9 +131,13 @@ bool RpgZipperTransfer_Eat(RpgZipperTransferContext *context, const RpgZipperHel
 {
     if (context == NULL || target == NULL) return false;
     if (target->kind == RPG_ZIPPER_HELD_OBJECT_BLOCK) {
-        if (!RpgObjectFolder_MoveBlockToZipper(&(RpgObjectFolder){ .cell = target->blockCell }, target->blockType))
+        if (!RpgObjectFolder_MoveBlockWithAttachmentsToZipper(
+                &(RpgObjectFolder){ .cell = target->blockCell }, target->blockType,
+                context->attachments, context->receivers, context->wires))
             return false;
         SetBlockMissingState(context->stage, target, true);
+        RpgAttachments_SetOwnerBlockZipperHeld(context->attachments, target->blockCell, true);
+        RpgReceivers_SetOwnerBlockZipperHeld(context->receivers, target->blockCell, true);
         return true;
     }
     return target->kind == RPG_ZIPPER_HELD_OBJECT_MOVABLE && EatMovable(context, target);
@@ -154,7 +158,11 @@ bool RpgZipperTransfer_CompleteSpit(RpgZipperTransferContext *context, const Rpg
     if (target->kind == RPG_ZIPPER_HELD_OBJECT_BLOCK) {
         bool returned = RpgObjectFolder_ReturnBlockFromZipper(&(RpgObjectFolder){ .cell = target->blockCell },
                                                                target->blockType);
-        if (returned) SetBlockMissingState(context->stage, target, false);
+        if (returned) {
+            SetBlockMissingState(context->stage, target, false);
+            RpgAttachments_SetOwnerBlockZipperHeld(context->attachments, target->blockCell, false);
+            RpgReceivers_SetOwnerBlockZipperHeld(context->receivers, target->blockCell, false);
+        }
         return returned;
     }
     return target->kind == RPG_ZIPPER_HELD_OBJECT_MOVABLE && CompleteSpitMovable(context, target);

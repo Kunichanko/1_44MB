@@ -45,20 +45,27 @@ static bool IsWithinPushBlockInteractionRange(const RpgCharacter *player,
            Vector2Distance(player->position, center) <= maximumDistance;
 }
 
-bool RpgMagnets_ToggleAtCell(RpgStage *stage, int row, int column)
+void RpgMagnets_ConsumeCommunication(RpgMagnetRuntime *runtime, RpgStage *stage,
+                                     const RpgButtonEvent *communication)
 {
-    if (stage == NULL || row < 0 || row >= RPG_STAGE_ROWS || column < 0 ||
-        column >= RPG_STAGE_WORLD_COLUMNS) return false;
-    int *blockType = &stage->blocks[row][column];
-    if (*blockType == RPG_BLOCK_EFFECT_MAGNET_OFF) {
-        *blockType = RPG_BLOCK_EFFECT_MAGNET_ON;
-        return true;
+    if (runtime == NULL || stage == NULL || communication == NULL ||
+        !RpgButtonEvent_Consume(communication, &runtime->lastCommunicationSequence) ||
+        communication->sourceMapIndex < 0) return;
+
+    /* Communication is area-scoped, like the other signal consumers.  It is
+       intentionally unrelated to receiver-owned electrical wire paths. */
+    for (int row = 0; row < RPG_STAGE_ROWS; row++) {
+        for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
+            int *blockType = &stage->blocks[row][column];
+            Vector2 center;
+            if (!RpgBlockInventory_IsMagnetBlock(*blockType)) continue;
+            center = RpgStage_GetWorldPositionForCell(stage, row, column);
+            if (RpgStage_GetMapAtWorldPosition(stage, center) != communication->sourceMapIndex)
+                continue;
+            *blockType = communication->isActive ? RPG_BLOCK_EFFECT_MAGNET_ON :
+                                                    RPG_BLOCK_EFFECT_MAGNET_OFF;
+        }
     }
-    if (*blockType == RPG_BLOCK_EFFECT_MAGNET_ON) {
-        *blockType = RPG_BLOCK_EFFECT_MAGNET_OFF;
-        return true;
-    }
-    return false;
 }
 
 static bool IsCellInsideStage(int row, int column)
@@ -134,6 +141,17 @@ void RpgMagnets_LockInBlockSockets(RpgMagnetRuntime *runtime, RpgStage *stage,
             continue;
         }
         if (metal->requiresSocketDeparture) continue;
+        /* The test intentionally accepts a small physics tolerance.  Once a
+           block is accepted, snap it to the actual target cell before its
+           4px seating animation so its collision, signal, and light occlusion
+           all agree on one exact socket position. */
+        {
+            RpgGridCell socketCell = RpgGridPath_GetSideNeighbor(
+                attachments->entries[socketIndex].cell, attachments->entries[socketIndex].side);
+            Rectangle socketBounds = RpgStage_GetWorldBoundsForCell(stage, socketCell.row,
+                                                                     socketCell.column);
+            metal->position = (Vector2){ socketBounds.x, socketBounds.y };
+        }
         metal->lockedSocketAttachmentIndex = socketIndex;
         metal->verticalSpeed = 0.0f;
         metal->isGrounded = true;

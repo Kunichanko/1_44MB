@@ -32,8 +32,8 @@ void RpgEditorPlay_Begin(RpgEditorPlayRuntime *runtime, int mapIndex, const RpgL
     runtime->items = *items;
     runtime->mapEvents = *mapEvents;
     runtime->wires = *wires;
-    runtime->receivers = *receivers;
-    runtime->attachments = *attachments;
+    if (!RpgAttachments_Clone(&runtime->attachments, attachments)) return;
+    RpgReceivers_Bind(&runtime->receivers, &runtime->attachments);
     runtime->signalBlocks = *signalBlocks;
     runtime->zipper = *zipper;
     /* From this point until End, only Stage/editor runtime artifacts and the
@@ -44,6 +44,10 @@ void RpgEditorPlay_Begin(RpgEditorPlayRuntime *runtime, int mapIndex, const RpgL
 
 void RpgEditorPlay_End(RpgEditorPlayRuntime *runtime)
 {
-    if (runtime != NULL) runtime->active = false;
+    if (runtime != NULL) {
+        runtime->active = false;
+        RpgAttachments_Destroy(&runtime->attachments);
+        runtime->receivers = RpgReceivers_Default();
+    }
     RpgStageAuthority_Enter(RPG_STAGE_AUTHORITY_EDITOR_STATIC);
 }

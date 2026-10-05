@@ -257,6 +257,13 @@ static RpgGridCell GetBuildCellOwner(RpgGridCell cell)
     return buildCellOwners[cell.row][cell.column];
 }
 
+bool RpgObjectFolders_HaveSameBlockOwner(RpgGridCell first, RpgGridCell second)
+{
+    RpgGridCell firstOwner = GetBuildCellOwner(first);
+    RpgGridCell secondOwner = GetBuildCellOwner(second);
+    return firstOwner.row == secondOwner.row && firstOwner.column == secondOwner.column;
+}
+
 /* Q で開く実 Zipper フォルダそのものを容量対象にし、Explorer のプロパティと一致させる。 */
 static bool GetZipperStorageDirectory(char *path, size_t size)
 {
@@ -508,7 +515,7 @@ static bool AttachmentPath(const RpgAttachment *attachment, bool inInbox, char *
     RpgObjectFolder owner;
     char blockPath[1200];
     if (attachment == NULL) return false;
-    owner.cell = attachment->cell;
+    if (!RpgAttachments_GetOwnerBlockCell(attachment, &owner.cell)) return false;
     return BlockPath(&owner, 0, inInbox, blockPath, sizeof(blockPath)) &&
            snprintf(path, size, "%s\\attachment_%06d_t%03d.meta", blockPath,
                     attachment->folderId, attachment->type) > 0;
@@ -519,8 +526,32 @@ static bool AttachmentOwnerBlockPath(const RpgAttachment *attachment, bool inInb
 {
     RpgObjectFolder owner;
     if (attachment == NULL) return false;
-    owner.cell = attachment->cell;
+    if (!RpgAttachments_GetOwnerBlockCell(attachment, &owner.cell)) return false;
     return BlockPath(&owner, 0, inInbox, path, size);
+}
+
+/* Legacy receiver-only records are removed on the next metadata refresh.
+   A receiver is now an ordinary attachment_<id>_t204.meta record. */
+static bool ReceiverPath(const RpgReceiver *receiver, bool inInbox, char *path, size_t size)
+{
+    RpgObjectFolder owner;
+    char blockPath[1200];
+    if (receiver == NULL) return false;
+    owner.cell = receiver->cell;
+    return BlockPath(&owner, 0, inInbox, blockPath, sizeof(blockPath)) &&
+           snprintf(path, size, "%s\\receiver_r%03d_c%03d.meta", blockPath,
+                    receiver->cell.row, receiver->cell.column) > 0;
+}
+
+static bool ReceiverWirePath(const RpgReceiver *receiver, bool inInbox, char *path, size_t size)
+{
+    RpgObjectFolder owner;
+    char blockPath[1200];
+    if (receiver == NULL) return false;
+    owner.cell = receiver->cell;
+    return BlockPath(&owner, 0, inInbox, blockPath, sizeof(blockPath)) &&
+           snprintf(path, size, "%s\\wire_receiver_r%03d_c%03d.meta", blockPath,
+                    receiver->cell.row, receiver->cell.column) > 0;
 }
 
 static bool DataShotPath(const RpgDataShot *shot, bool inInbox, char *path, size_t size)
@@ -1245,28 +1276,84 @@ static bool EnsureAttachment(const RpgAttachment *attachment)
 #ifdef _WIN32
     char metadataPath[1200], ownerPath[1200], blocks[1200];
     wchar_t wideMetadataPath[1200];
+    RpgGridCell ownerCell;
     FILE *file;
-    if (attachment == NULL || !AttachmentPath(attachment, false, metadataPath, sizeof(metadataPath)) ||
+    if (attachment == NULL || !RpgAttachments_GetOwnerBlockCell(attachment, &ownerCell) ||
+        !AttachmentPath(attachment, false, metadataPath, sizeof(metadataPath)) ||
         !AttachmentOwnerBlockPath(attachment, false, ownerPath, sizeof(ownerPath)) ||
         !GetCellsPath(blocks, sizeof(blocks)) || !CreateFolderUtf8(blocks) ||
         !CreateFolderUtf8(ownerPath) || !ToWide(metadataPath, wideMetadataPath, 1200)) return false;
     file = _wfopen(wideMetadataPath, L"wb");
     if (file == NULL) return false;
-    fprintf(file, "kind=attachment\ntype=%d\nid=%d\nowner_row=%d\nowner_column=%d\nside=%d\n",
-            attachment->type, attachment->folderId, attachment->cell.row, attachment->cell.column,
-            attachment->side);
-    fprintf(file, "data_size=%.2f\ndata_speed=%.2f\ndata_interval=%.2f\npath_count=%d\n",
-            attachment->dataSize, attachment->dataSpeed, attachment->dataInterval,
-            attachment->dataPath.cellCount);
-    for (int index = 0; index < attachment->dataPath.cellCount; index++)
-        fprintf(file, "path=%d,%d\n", attachment->dataPath.cells[index].row,
-                attachment->dataPath.cells[index].column);
+    fprintf(file, "kind=attachment\ntype=%d\nid=%d\nowner_row=%d\nowner_column=%d\n"
+            "mount_row=%d\nmount_column=%d\nside=%d\n",
+            attachment->type, attachment->folderId, ownerCell.row, ownerCell.column,
+            attachment->cell.row, attachment->cell.column, attachment->side);
     if (fclose(file) != 0) return false;
     NotifyShellChange(RPG_SHCNE_UPDATEITEM, metadataPath, NULL);
     NotifyShellParentChanged(metadataPath);
     return true;
 #else
     (void)attachment;
+    return false;
+#endif
+}
+
+static bool EnsureReceiverWire(const RpgReceiver *receiver, const RpgWires *wires)
+{
+#ifdef _WIN32
+    char metadataPath[1200];
+    wchar_t wideMetadataPath[1200];
+    const RpgWire *wire = NULL;
+    FILE *file;
+    if (receiver == NULL || wires == NULL ||
+        !ReceiverWirePath(receiver, false, metadataPath, sizeof(metadataPath)) ||
+        !ToWide(metadataPath, wideMetadataPath, 1200)) return false;
+    for (int index = 0; index < wires->count; index++) {
+        const RpgWire *candidate = &wires->entries[index];
+        if (candidate->kind == RPG_WIRE_KIND_ELECTRIC && candidate->hasReceiverSource &&
+            candidate->receiverCell.row == receiver->cell.row &&
+            candidate->receiverCell.column == receiver->cell.column &&
+            candidate->receiverSide == receiver->side) {
+            wire = candidate;
+            break;
+        }
+    }
+    /* No path is a valid receiver state.  Remove stale derived metadata rather
+       than inventing a standalone wire object. */
+    if (wire == NULL) {
+        DeleteFileW(wideMetadataPath);
+        return true;
+    }
+    file = _wfopen(wideMetadataPath, L"wb");
+    if (file == NULL) return false;
+    fprintf(file, "kind=receiver_wire\\nowner_row=%d\\nowner_column=%d\\nside=%d\\npath_count=%d\\n",
+            receiver->cell.row, receiver->cell.column, receiver->side, wire->path.cellCount);
+    for (int index = 0; index < wire->path.cellCount; index++)
+        fprintf(file, "path=%d,%d\\n", wire->path.cells[index].row, wire->path.cells[index].column);
+    if (fclose(file) != 0) return false;
+    NotifyShellChange(RPG_SHCNE_UPDATEITEM, metadataPath, NULL);
+    NotifyShellParentChanged(metadataPath);
+    return true;
+#else
+    (void)receiver; (void)wires;
+    return false;
+#endif
+}
+
+static bool EnsureReceiver(const RpgReceiver *receiver, const RpgWires *wires)
+{
+#ifdef _WIN32
+    char metadataPath[1200];
+    wchar_t wideMetadataPath[1200];
+    if (receiver == NULL) return false;
+    /* Remove the retired split receiver record.  The corresponding generic
+       attachment record is emitted by EnsureAttachment before this call. */
+    if (ReceiverPath(receiver, false, metadataPath, sizeof(metadataPath)) &&
+        ToWide(metadataPath, wideMetadataPath, 1200)) (void)DeleteFileW(wideMetadataPath);
+    return EnsureReceiverWire(receiver, wires);
+#else
+    (void)receiver; (void)wires;
     return false;
 #endif
 }
@@ -1402,8 +1489,9 @@ static void UpdateDataShotProperties(int shotIndex, RpgDataShot *shot, const Rpg
     shot->speed = 360.0f / (1.0f + (float)totalBytes / (64.0f * 1024.0f));
     if (shot->speed < 30.0f) shot->speed = 30.0f;
     if (shot->speed > 360.0f) shot->speed = 360.0f;
-    RpgDataShot_SetFileProperties(shot, &attachments->entries[shot->attachmentIndex],
-                                  fileCount, totalBytes);
+    const RpgShooterConfig *shooter = RpgAttachments_FindShooterConst(attachments,
+        attachments->entries[shot->attachmentIndex].folderId);
+    if (shooter != NULL) RpgDataShot_SetFileProperties(shot, shooter, fileCount, totalBytes);
 }
 
 /* データ弾はマスを占有しないため、フォルダに最後のグリッド位置と親装置上の軌道位置だけを残す。 */
@@ -1480,6 +1568,53 @@ static bool MaterializeBlockInInbox(const RpgObjectFolder *folder, int blockType
     position = (Vector2){ (folder->cell.column + 0.5f) * RPG_STAGE_TILE_SIZE,
                           (folder->cell.row + 0.5f) * RPG_STAGE_TILE_SIZE };
     return WriteObjectInfo(inbox, blockType, position);
+}
+
+/* This is intentionally an eat-time operation, not a global pre-sync.  A
+   block becomes a real folder only because Zipper is taking it, and that
+   folder is complete before its single move into Zipper. */
+static bool MaterializeBlockWithAttachmentsInInbox(const RpgObjectFolder *folder, int blockType,
+                                                    const RpgAttachments *attachments,
+                                                    const RpgReceivers *receivers,
+                                                    const RpgWires *wires)
+{
+    char source[1200], inbox[1200], inboxParent[1200];
+    Vector2 position;
+    int storedBlockType = blockType;
+    RpgGridCell owner;
+    if (folder == NULL || !BlockPath(folder, blockType, false, source, sizeof(source)) ||
+        !BlockPath(folder, blockType, true, inbox, sizeof(inbox)) ||
+        !GetInboxPath(inboxParent, sizeof(inboxParent)) || !CreateFolderUtf8(inboxParent)) return false;
+    if (FolderExistsUtf8(inbox)) return true;
+
+    /* Keep the existing compact-cell behavior, but materialize the source
+       folder first so child metadata and object_info always share one move. */
+    if (!FolderExistsUtf8(source) && activeBuildPath[0] != '\0') {
+        RpgBuildCellStorageBackend storageBackend = GetBuildCellStorageBackend();
+        if (!RpgBuildCellStorage_EnsureCell(folder->cell, blockType, &storageBackend) &&
+            !ExtractCompactCellMetadata(folder, &storedBlockType)) return false;
+    }
+    position = (Vector2){ (folder->cell.column + 0.5f) * RPG_STAGE_TILE_SIZE,
+                          (folder->cell.row + 0.5f) * RPG_STAGE_TILE_SIZE };
+    if (!WriteObjectInfo(source, storedBlockType, position)) return false;
+
+    owner = GetBuildCellOwner(folder->cell);
+    for (int index = 0; attachments != NULL && index < attachments->count; index++) {
+        const RpgAttachment *attachment = &attachments->entries[index];
+        RpgGridCell attachmentOwner;
+        if (RpgAttachments_GetOwnerBlockCell(attachment, &attachmentOwner))
+            attachmentOwner = GetBuildCellOwner(attachmentOwner);
+        if (attachmentOwner.row == owner.row && attachmentOwner.column == owner.column &&
+            !EnsureAttachment(attachment)) return false;
+    }
+    for (int index = 0; receivers != NULL && index < RpgReceivers_Count(receivers); index++) {
+        RpgReceiver receiver;
+        if (!RpgReceivers_Get(receivers, index, &receiver)) continue;
+        RpgGridCell receiverOwner = GetBuildCellOwner(receiver.cell);
+        if (receiverOwner.row == owner.row && receiverOwner.column == owner.column &&
+            !EnsureReceiver(&receiver, wires)) return false;
+    }
+    return MoveDirectory(source, inbox);
 }
 
 static void SetStageEffectFolderMissing(RpgStage *stage, RpgGridCell rootCell, int rootType, bool missing)
@@ -1831,11 +1966,6 @@ bool RpgObjectFolder_CompleteZipperCommandRequest(void)
 #endif
 }
 
-bool RpgObjectFolder_MoveAttachmentToZipper(const RpgAttachment *attachment)
-{
-    (void)attachment; return false;
-}
-
 /* A movable file is represented on disk by the directory containing its
  * materialized file (movables/reference_files/reference_<id>).  Keep that
  * directory as the transfer unit; moving only the leaf file would lose the
@@ -1906,9 +2036,21 @@ bool RpgObjectFolder_MoveBlockToZipper(const RpgObjectFolder *folder, int blockT
 #endif
 }
 
-bool RpgObjectFolder_BeginReturnAttachmentFromZipper(const RpgAttachment *attachment)
+bool RpgObjectFolder_MoveBlockWithAttachmentsToZipper(const RpgObjectFolder *folder, int blockType,
+                                                       const RpgAttachments *attachments,
+                                                       const RpgReceivers *receivers,
+                                                       const RpgWires *wires)
 {
-    (void)attachment; return false;
+#ifdef _WIN32
+    bool moved = (blockType != 0 || activeBuildPath[0] != '\0') &&
+                 MaterializeBlockWithAttachmentsInInbox(folder, blockType, attachments, receivers, wires);
+    if (moved && folder != NULL)
+        RpgObjectFolders_MarkEditorPreviewCellMutation(folder->cell, blockType);
+    return moved;
+#else
+    (void)folder; (void)blockType; (void)attachments; (void)receivers; (void)wires;
+    return false;
+#endif
 }
 
 bool RpgObjectFolder_BeginReturnDataShotFromZipper(const RpgDataShot *shot)
@@ -1944,18 +2086,6 @@ bool RpgObjectFolder_BeginReturnReferenceFileFromZipper(const RpgReferenceObject
 #else
     (void)object;
     return false;
-#endif
-}
-
-bool RpgObjectFolder_ReturnAttachmentFromZipper(const RpgAttachment *attachment)
-{
-#ifdef _WIN32
-    char source[1200], inbox[1200], objects[1200];
-    /* 返却先は常に実行中のbuild成果物に限定し、設定元のStageは書き換えない。 */
-    (void)attachment; (void)source; (void)inbox; (void)objects;
-    return false;
-#else
-    (void)attachment; return false;
 #endif
 }
 
@@ -2105,12 +2235,25 @@ bool RpgObjectFolder_ReturnDynamicBlockFromZipper(RpgGridCell identityCell, int 
 #endif
 }
 
-void RpgObjectFolders_PrepareAttachmentFolders(const RpgAttachments *attachments)
+void RpgObjectFolders_PrepareBlockOwnedMetadata(const RpgAttachments *attachments,
+                                                const RpgReceivers *receivers,
+                                                const RpgWires *wires)
 {
 #ifdef _WIN32
-    if (attachments != NULL) for (int index = 0; index < attachments->count; index++) EnsureAttachment(&attachments->entries[index]);
+    if (attachments != NULL) for (int index = 0; index < attachments->count; index++) {
+        /* A parent held by Zipper owns this metadata in Inbox.  Never rebuild
+           a second child file at the absent stage location. */
+        if (!RpgAttachments_IsRuntimeUnavailable(&attachments->entries[index]))
+            (void)EnsureAttachment(&attachments->entries[index]);
+    }
+    if (receivers != NULL) for (int index = 0; index < RpgReceivers_Count(receivers); index++) {
+        RpgReceiver receiver;
+        if (RpgReceivers_Get(receivers, index, &receiver) &&
+            !RpgReceivers_IsRuntimeUnavailable(&receiver))
+            (void)EnsureReceiver(&receiver, wires);
+    }
 #else
-    (void)attachments;
+    (void)attachments; (void)receivers; (void)wires;
 #endif
 }
 
@@ -2235,7 +2378,9 @@ void RpgObjectFolder_RemoveAttachmentFolder(const RpgAttachment *attachment)
 }
 
 bool RpgObjectFolders_BeginStageBuild(int stageNumber, RpgStage *stage,
-                                      const RpgAttachments *attachments, Vector2 playerStartPosition,
+                                      const RpgAttachments *attachments,
+                                      const RpgReceivers *receivers,
+                                      const RpgWires *wires, Vector2 playerStartPosition,
                                       bool isSimpleBuild,
                                       char *buildPath, size_t buildPathSize)
 {
@@ -2310,7 +2455,7 @@ bool RpgObjectFolders_BeginStageBuild(int stageNumber, RpgStage *stage,
             RpgObjectFolders_EndStageBuild(); isBulkBuildOperation = false; return false;
         }
     }
-    RpgObjectFolders_PrepareAttachmentFolders(attachments);
+    RpgObjectFolders_PrepareBlockOwnedMetadata(attachments, receivers, wires);
     RpgObjectFolders_PrepareReferenceFolderMetadata(stage);
     RpgObjectFolders_PrepareImageObjectFolders(&stage->imageObjects);
     if (!EnsurePlayerFolder(playerStartPosition)) {
@@ -2518,18 +2663,31 @@ bool RpgObjectFolders_EnsureAllMapsGenerated(RpgStage *stage)
 {
 #ifdef _WIN32
     RpgBuildCellStorageBackend storageBackend;
+    bool generated = true;
     if (stage == NULL) return false;
     storageBackend = GetBuildCellStorageBackend();
+    /* Play requires every area before it starts.  Do the cheap per-area cell
+       materialization first, then run stage-wide work once.  Calling
+       EnsureMapGenerated() here used to repeat component collection and the
+       full reference-object scan for every active area after an edit. */
+    isBulkBuildOperation = true;
     RpgBuildCellStorage_BeginMetadataBatch();
     for (int mapIndex = 0; mapIndex < RPG_STAGE_MAP_COUNT; mapIndex++) {
         if (!RpgStage_IsMapActive(stage, mapIndex)) continue;
-        if (!RpgObjectFolders_EnsureMapGenerated(stage, mapIndex)) {
-            (void)RpgBuildCellStorage_EndMetadataBatch(&storageBackend);
-            return false;
+        if (!RpgBuildCellStorage_EnsureMap(stage, mapIndex, &storageBackend)) {
+            generated = false;
+            break;
         }
     }
-    if (!RpgBuildCellStorage_EndMetadataBatch(&storageBackend)) return false;
-    return true;
+    if (!RpgBuildCellStorage_EndMetadataBatch(&storageBackend)) generated = false;
+    if (generated) generated = CollectEffectComponentFolders(stage);
+    if (generated) {
+        PrepareRuntimeReferenceFiles(stage, -1);
+        generated = PrepareRuntimeReferenceFolders(stage, -1);
+    }
+    isBulkBuildOperation = false;
+    if (generated) NotifyShellChange(RPG_SHCNE_UPDATEDIR, activeBuildPath, NULL);
+    return generated;
 #else
     (void)stage;
     return false;
@@ -2559,6 +2717,8 @@ bool RpgObjectFolders_RefreshEditorPreviewCompactCells(const RpgStage *stage)
 
 bool RpgObjectFolders_RepairEditorPreview(const RpgStage *stage,
                                           const RpgAttachments *attachments,
+                                          const RpgReceivers *receivers,
+                                          const RpgWires *wires,
                                           Vector2 playerStartPosition)
 {
 #ifdef _WIN32
@@ -2641,7 +2801,7 @@ bool RpgObjectFolders_RepairEditorPreview(const RpgStage *stage,
         PrepareRuntimeReferenceFiles(&repairRuntimeStage, -1);
         repaired = PrepareRuntimeReferenceFolders(&repairRuntimeStage, -1);
         if (repaired) {
-            RpgObjectFolders_PrepareAttachmentFolders(attachments);
+            RpgObjectFolders_PrepareBlockOwnedMetadata(attachments, receivers, wires);
             RpgObjectFolders_PrepareReferenceFolderMetadata(&repairRuntimeStage);
             RpgObjectFolders_PrepareImageObjectFolders(&repairRuntimeStage.imageObjects);
             repaired = EnsurePlayerFolder(playerStartPosition);

@@ -10,7 +10,8 @@ void RpgRuntime_UpdateWorld(RpgRuntimeUpdateContext *context, float deltaTime)
 {
     if (context == NULL || context->player == NULL || context->npc == NULL || context->stage == NULL ||
         context->attachments == NULL || context->signalBlocks == NULL || context->dataShots == NULL ||
-        context->buttonEvent == NULL || context->receivers == NULL || context->wires == NULL ||
+        context->buttonEvent == NULL || context->socketCommunicationEvent == NULL ||
+        context->receivers == NULL || context->wires == NULL ||
         context->layout == NULL || context->wasButtonPressed == NULL) return;
 
     /* 本編は入力用の前段と世界更新の後段からこの関数を呼ぶ。前段では何も更新せず、
@@ -24,9 +25,9 @@ void RpgRuntime_UpdateWorld(RpgRuntimeUpdateContext *context, float deltaTime)
        button event, so an already seated block can fire the normal area signal
        without a special signal pipeline. */
     RpgMagnets_LockInBlockSockets(context->magnetRuntime, context->stage, context->attachments,
-                                  context->buttonEvent, context->playerPushState);
+                                  context->socketCommunicationEvent, context->playerPushState);
     RpgMagnets_UpdateBlockSocketSignals(context->magnetRuntime, context->stage,
-                                        context->attachments, context->buttonEvent);
+                                        context->attachments, context->socketCommunicationEvent);
     RpgMovingSolidSet dataShotSolids = RpgMagnets_GetMovingSolids(context->magnetRuntime);
     RpgMovingSolidSet movingSolids = dataShotSolids;
     bool isHoldingPushBlock = RpgMagnets_IsPlayerPushHeld(context->magnetRuntime,
@@ -115,10 +116,10 @@ void RpgRuntime_UpdateWorld(RpgRuntimeUpdateContext *context, float deltaTime)
                step.  Test again after its shared movement path, so locking
                happens immediately rather than requiring another frame or G. */
             RpgMagnets_LockInBlockSockets(context->magnetRuntime, context->stage,
-                                          context->attachments, context->buttonEvent,
+                                          context->attachments, context->socketCommunicationEvent,
                                           context->playerPushState);
             RpgMagnets_UpdateBlockSocketSignals(context->magnetRuntime, context->stage,
-                                                context->attachments, context->buttonEvent);
+                                                context->attachments, context->socketCommunicationEvent);
         }
     } else player->isMoving = false;
     RpgStage_SetSpatialReferenceMap(context->stage, -1);
@@ -134,10 +135,13 @@ void RpgRuntime_UpdateWorld(RpgRuntimeUpdateContext *context, float deltaTime)
     bool isButtonPressed = player->isGrounded &&
                            RpgAttachments_IsButtonPressedWorld(context->attachments, context->stage,
                                                                player->position);
-    if (isButtonPressed && !*context->wasButtonPressed)
-        RpgButtonEvent_Publish(context->buttonEvent, context->currentMapIndex,
-                               RPG_BUTTON_EVENT_SOURCE_PLAYER_BUTTON);
+    if (isButtonPressed != *context->wasButtonPressed)
+        RpgButtonEvent_PublishState(context->buttonEvent, context->currentMapIndex,
+                                    RPG_BUTTON_EVENT_SOURCE_PLAYER_BUTTON,
+                                    isButtonPressed);
     *context->wasButtonPressed = isButtonPressed;
+    RpgMagnets_ConsumeCommunication(context->magnetRuntime, context->stage,
+                                    context->socketCommunicationEvent);
     RpgDataShots_ConsumeButtonEvent(context->dataShots, context->attachments, context->buttonEvent);
     RpgSignalBlocks_Update(context->signalBlocks, context->stage, context->buttonEvent, deltaTime);
     RpgDataShots_Update(context->dataShots, context->attachments, context->stage, context->receivers,
@@ -151,9 +155,9 @@ void RpgRuntime_UpdateWorld(RpgRuntimeUpdateContext *context, float deltaTime)
        Recheck after their movement so a block never loses its socket property
        merely because it was moving rather than being carried by the player. */
     RpgMagnets_LockInBlockSockets(context->magnetRuntime, context->stage, context->attachments,
-                                  context->buttonEvent, context->playerPushState);
+                                  context->socketCommunicationEvent, context->playerPushState);
     RpgMagnets_UpdateBlockSocketSignals(context->magnetRuntime, context->stage,
-                                        context->attachments, context->buttonEvent);
+                                        context->attachments, context->socketCommunicationEvent);
     /* A carried block remains a moving solid throughout the whole frame.  The
        pair synchronizer above maintains the one-tile gap; this shared resolver
        still handles contacts with every other moving object. */

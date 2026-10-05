@@ -29,6 +29,60 @@ RpgWires RpgWires_Default(void)
     return (RpgWires){ 0 };
 }
 
+bool RpgWires_ReadRecord(FILE *file, RpgWire *wire)
+{
+    RpgWire loaded = { 0 };
+    int kind, hasFloor, receiverSource, sourceSide, pathCount;
+    if (file == NULL || wire == NULL ||
+        fscanf(file, "%d %f %d %f %d %d %d %d %d %d %d %d", &kind,
+               &loaded.conveyorSpeed, &loaded.conveyorDirection,
+               &loaded.conveyorSlideAngleDegrees, &hasFloor,
+               &loaded.ownerCell.row, &loaded.ownerCell.column, &receiverSource,
+               &loaded.receiverCell.row, &loaded.receiverCell.column, &sourceSide,
+               &pathCount) != 12 ||
+        (kind != RPG_WIRE_KIND_ELECTRIC && kind != RPG_WIRE_KIND_CONVEYOR) ||
+        (hasFloor != 0 && hasFloor != 1) || (receiverSource != 0 && receiverSource != 1) ||
+        pathCount < 1 || pathCount > RPG_WIRE_MAX_CELLS ||
+        !RpgWires_IsCellInStage(loaded.ownerCell.row, loaded.ownerCell.column)) return false;
+    loaded.kind = (RpgWireKind)kind;
+    loaded.conveyorHasFloor = hasFloor != 0;
+    loaded.hasReceiverSource = receiverSource != 0;
+    loaded.receiverSide = (RpgGridSide)sourceSide;
+    if (loaded.receiverSide < RPG_GRID_SIDE_TOP || loaded.receiverSide > RPG_GRID_SIDE_LEFT ||
+        (loaded.kind == RPG_WIRE_KIND_CONVEYOR &&
+         (loaded.conveyorSpeed < 16.0f || loaded.conveyorSpeed > 960.0f ||
+          (loaded.conveyorDirection != -1 && loaded.conveyorDirection != 1) ||
+          loaded.conveyorSlideAngleDegrees < 0.0f || loaded.conveyorSlideAngleDegrees > 89.0f ||
+          loaded.hasReceiverSource)) ||
+        (loaded.hasReceiverSource && !RpgWires_IsCellInStage(loaded.receiverCell.row,
+                                                               loaded.receiverCell.column))) return false;
+    loaded.path.cellCount = pathCount;
+    if (!loaded.hasReceiverSource && loaded.path.cellCount < 2) return false;
+    for (int index = 0; index < loaded.path.cellCount; index++)
+        if (fscanf(file, "%d %d", &loaded.path.cells[index].row,
+                   &loaded.path.cells[index].column) != 2 ||
+            !RpgWires_IsCellInStage(loaded.path.cells[index].row,
+                                     loaded.path.cells[index].column)) return false;
+    *wire = loaded;
+    return true;
+}
+
+bool RpgWires_WriteRecord(FILE *file, const RpgWire *wire)
+{
+    if (file == NULL || wire == NULL || wire->path.cellCount < 1 ||
+        wire->path.cellCount > RPG_WIRE_MAX_CELLS) return false;
+    if (fprintf(file, "%d %.2f %d %.1f %d %d %d %d %d %d %d %d", wire->kind,
+                wire->conveyorSpeed, wire->conveyorDirection,
+                wire->conveyorSlideAngleDegrees, wire->conveyorHasFloor ? 1 : 0,
+                wire->ownerCell.row, wire->ownerCell.column,
+                wire->hasReceiverSource ? 1 : 0, wire->receiverCell.row,
+                wire->receiverCell.column, wire->receiverSide, wire->path.cellCount) < 0) return false;
+    for (int index = 0; index < wire->path.cellCount; index++)
+        if (fprintf(file, " %d %d", wire->path.cells[index].row,
+                    wire->path.cells[index].column) < 0) return false;
+    return fputc('\n', file) != EOF;
+}
+
 bool RpgWires_Load(const char *filePath, RpgWires *wires)
 {
     FILE *file = fopen(filePath, "r");
@@ -206,20 +260,11 @@ bool RpgWires_Save(const char *filePath, const RpgWires *wires)
     FILE *file = fopen(filePath, "w");
     if (file == NULL) return false;
     fprintf(file, "v6 %d\n", wires->count);
-    for (int wireIndex = 0; wireIndex < wires->count; wireIndex++) {
-        const RpgWire *wire = &wires->entries[wireIndex];
-        fprintf(file, "%d %.2f %d %.1f %d %d %d %d %d %d %d %d", wire->kind, wire->conveyorSpeed,
-                wire->conveyorDirection, wire->conveyorSlideAngleDegrees,
-                wire->conveyorHasFloor ? 1 : 0,
-                wire->ownerCell.row, wire->ownerCell.column,
-                wire->hasReceiverSource ? 1 : 0,
-                wire->receiverCell.row, wire->receiverCell.column, wire->receiverSide,
-                wire->path.cellCount);
-        for (int cellIndex = 0; cellIndex < wire->path.cellCount; cellIndex++)
-            fprintf(file, " %d %d", wire->path.cells[cellIndex].row,
-                    wire->path.cells[cellIndex].column);
-        fputc('\n', file);
-    }
+    for (int wireIndex = 0; wireIndex < wires->count; wireIndex++)
+        if (!RpgWires_WriteRecord(file, &wires->entries[wireIndex])) {
+            fclose(file);
+            return false;
+        }
     return fclose(file) == 0;
 }
 

@@ -139,6 +139,7 @@ static void DrawConnectedStageMaps(const RpgStage *stage, const RpgMagnetRuntime
                                    Texture2D fileTexture, const RpgStageBackground *stageBackground,
                                    float backgroundBrightness, float blockBrightness)
 {
+    RpgMovingSolidSet movingSolids = RpgMagnets_GetMovingSolids(magnetRuntime);
     for (int mapIndex = 0; mapIndex < RPG_STAGE_MAP_COUNT; mapIndex++) {
         if (!RpgStage_IsMapActive(stage, mapIndex)) continue;
 
@@ -183,7 +184,7 @@ static void DrawConnectedStageMaps(const RpgStage *stage, const RpgMagnetRuntime
         RpgWires_DrawMap(wires, stage, mapIndex);
         RpgWires_DrawElectric(wires, dataShots, firstColumn, RPG_STAGE_COLUMNS);
         RpgReceivers_DrawMap(receivers, mapIndex);
-        RpgAttachments_DrawSocketLightsMap(attachments, stage, mapIndex);
+        RpgAttachments_DrawSocketLightsMap(attachments, stage, mapIndex, &movingSolids);
         RpgAttachments_DrawMap(attachments, mapIndex);
         RpgDataShots_DrawMap(dataShots, mapIndex);
         RpgImageObjects_DrawLayer(&stage->imageObjects, mapIndex, RPG_STAGE_COLUMNS,
@@ -912,6 +913,8 @@ static RpgZipperTransferContext GetZipperTransferContext(RpgRuntimeContext *cont
     return (RpgZipperTransferContext){
         .stage = context == NULL ? NULL : context->stage,
         .attachments = context == NULL ? NULL : context->attachments,
+        .receivers = context == NULL ? NULL : context->receivers,
+        .wires = context == NULL ? NULL : context->wires,
         .dataShots = context == NULL ? NULL : context->dataShots,
         .magnetRuntime = context == NULL ? NULL : context->magnetRuntime,
         .referenceObjects = context == NULL ? NULL : context->referenceDrops,
@@ -1279,7 +1282,14 @@ static void UpdateZipperFollow(RpgZipper *zipper, const RpgCharacter *player, fl
 
 static Rectangle GetZipperCollisionBounds(const RpgZipper *zipper)
 {
-    return RpgCharacter_GetCollisionBounds(&zipper->character);
+    /* Zipper is visually larger than its physical contact point.  Keep its
+       collision small, but preserve the legacy collision centre: connection
+       snapping uses that centre as its visual placement reference. */
+    const float collisionSize = 8.0f;
+    return (Rectangle){ zipper->character.position.x - collisionSize * 0.5f,
+                        zipper->character.position.y - RPG_STAGE_TILE_SIZE * 0.5f -
+                            collisionSize * 0.5f,
+                        collisionSize, collisionSize };
 }
 
 static Vector2 GetZipperCollisionCenter(const RpgZipper *zipper)
@@ -1335,14 +1345,18 @@ static bool DoesZipperHitAttachment(const RpgStage *stage, const RpgAttachments 
                                     RpgGridCell *attachmentCell, int *attachmentIndex)
 {
     for (int index = 0; index < attachments->count; index++) {
-        if (attachments->entries[index].isZipperHeld) continue;
-        RpgGridCell outerCell = RpgGridPath_GetSideNeighbor(attachments->entries[index].cell,
-                                                            attachments->entries[index].side);
+        const RpgAttachment *attachment = &attachments->entries[index];
+        /* Edge attachments are metadata owned by their parent block folder;
+           they are not independent Zipper targets.  Attachment blocks occupy
+           their adjacent cell and deliberately remain collision targets. */
+        if (RpgAttachments_IsRuntimeUnavailable(attachment) ||
+            !RpgBlockInventory_IsAttachmentBlock(attachment->type)) continue;
+        RpgGridCell outerCell = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
         Vector2 position = RpgStage_GetWorldPositionForCell(stage, outerCell.row, outerCell.column);
         Rectangle attachmentBounds = { position.x - 22.0f, position.y - 22.0f, 44.0f, 44.0f };
         if (CheckCollisionRecs(bounds, attachmentBounds)) {
             *center = position;
-            *attachmentCell = attachments->entries[index].cell;
+            (void)RpgAttachments_GetOwnerBlockCell(attachment, attachmentCell);
             *attachmentIndex = index;
             return true;
         }
@@ -1613,7 +1627,7 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
     // ファイルを紐づけた設置物だけを、実際の描画位置に合わせて強調する。
     for (int index = 0; index < attachments->count; index++) {
         const RpgAttachment *attachment = &attachments->entries[index];
-        if (attachment->isZipperHeld) continue;
+        if (RpgAttachments_IsRuntimeUnavailable(attachment)) continue;
         if (!RpgObjectFolder_AttachmentHasLinkedFiles(attachment)) continue;
         Vector2 position = RpgStage_SnapRenderPoint(RpgAttachments_GetPosition(attachment, 0));
         DrawCircleV(position, 15.0f, Fade(GOLD, 0.30f));
@@ -2335,6 +2349,7 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
         RpgRuntimeUpdateContext runtimeMovementContext = {
             .player = &(*context->player), .npc = &(*context->npc), .stage = &(*context->stage), .attachments = &(*context->attachments),
             .signalBlocks = &(*context->signalBlocks), .dataShots = &(*context->dataShots), .buttonEvent = &(*context->buttonEvent),
+            .socketCommunicationEvent = &(*context->socketCommunicationEvent),
             .receivers = &(*context->receivers), .wires = &(*context->wires), .layout = &(*context->layout),
             .magnetRuntime = context->magnetRuntime,
             .playerPushState = &playerPushState,

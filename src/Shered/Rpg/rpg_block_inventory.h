@@ -136,7 +136,9 @@ bool RpgBlockInventory_IsKeyDoorBlock(int blockType);
 bool RpgBlockInventory_IsKeyDoorOpen(int blockType);
 bool RpgBlockInventory_IsSignalShrinkBlock(int blockType);
 bool RpgBlockInventory_IsAttachment(int blockType);
-bool RpgBlockInventory_IsCellAttachment(int blockType);
+/* These are visually attached but their outside cell is a real terrain-cell
+   owner: it gets one block folder and follows normal missing-cell handling. */
+bool RpgBlockInventory_IsAttachmentBlock(int blockType);
 bool RpgBlockInventory_IsMapEventProperty(int blockType);
 bool RpgBlockInventory_IsConveyorProperty(int blockType);
 bool RpgBlockInventory_IsOneWayPlatform(int blockType);

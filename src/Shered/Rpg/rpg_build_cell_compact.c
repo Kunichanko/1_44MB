@@ -212,6 +212,27 @@ bool RpgBuildCellCompact_EnsureMap(const RpgStage *stage, int mapIndex,
     return WriteMap(stage, mapIndex, backend);
 }
 
+bool RpgBuildCellCompact_IsMapGenerated(const RpgStage *stage, int mapIndex)
+{
+    if (stage == NULL || mapIndex < 0 || mapIndex >= RPG_STAGE_MAP_COUNT ||
+        !RpgStage_IsMapActive(stage, mapIndex)) return false;
+    for (int row = 0; row < RPG_STAGE_ROWS; row++) {
+        for (int localColumn = 0; localColumn < RPG_STAGE_COLUMNS; localColumn++) {
+            if (!generatedCells[row][mapIndex * RPG_STAGE_COLUMNS + localColumn]) return false;
+        }
+    }
+    return true;
+}
+
+void RpgBuildCellCompact_InvalidateMap(int mapIndex)
+{
+    if (mapIndex < 0 || mapIndex >= RPG_STAGE_MAP_COUNT) return;
+    for (int row = 0; row < RPG_STAGE_ROWS; row++) {
+        for (int localColumn = 0; localColumn < RPG_STAGE_COLUMNS; localColumn++)
+            generatedCells[row][mapIndex * RPG_STAGE_COLUMNS + localColumn] = false;
+    }
+}
+
 bool RpgBuildCellCompact_RewriteGeneratedMetadata(const RpgStage *stage,
                                                   const RpgBuildCellStorageBackend *backend)
 {
@@ -255,6 +276,23 @@ void RpgBuildCellCompact_GetGenerationProgress(const RpgStage *stage, int *gener
     if (generatedCount != NULL) *generatedCount = generated;
     if (totalCount != NULL) *totalCount = total;
     if (isPending != NULL) *isPending = pendingStage != NULL && generated < total;
+}
+
+bool RpgBuildCellCompact_GetGenerationTarget(RpgGridCell *cell)
+{
+    int cursor;
+    if (cell == NULL || pendingStage == NULL) return false;
+    for (cursor = pendingCursor; cursor < RPG_STAGE_ROWS * RPG_STAGE_WORLD_COLUMNS; cursor++) {
+        int mapIndex = cursor / (RPG_STAGE_ROWS * RPG_STAGE_COLUMNS);
+        int cellInMap = cursor % (RPG_STAGE_ROWS * RPG_STAGE_COLUMNS);
+        RpgGridCell candidate = { cellInMap / RPG_STAGE_COLUMNS,
+                                  mapIndex * RPG_STAGE_COLUMNS + cellInMap % RPG_STAGE_COLUMNS };
+        if (!RpgStage_IsMapActive(pendingStage, mapIndex) || mapIndex == startingMap ||
+            generatedCells[candidate.row][candidate.column]) continue;
+        *cell = candidate;
+        return true;
+    }
+    return false;
 }
 
 static bool LoadMetadataCsv(const RpgBuildCellStorageBackend *backend)

@@ -156,7 +156,8 @@ void RpgAttachments_DrawBlockSocketRecesses(const RpgAttachments *attachments, i
                                             const struct RpgStageBackground *background,
                                             Rectangle mapBounds, float brightness);
 void RpgAttachments_DrawSocketLightsMap(const RpgAttachments *attachments, const RpgStage *stage,
-                                        int mapIndex, const RpgMovingSolidSet *movingSolids);
+                                        int mapIndex, const RpgMovingSolidSet *movingSolids,
+                                        float rightLightAngle, float lightOpacity);
 int RpgAttachments_FindTouchedSaveFlag(const RpgAttachments *attachments, Vector2 playerPosition);
 int RpgAttachments_FindTouchedSaveFlagWorld(const RpgAttachments *attachments, const RpgStage *stage,
                                             Vector2 playerPosition);

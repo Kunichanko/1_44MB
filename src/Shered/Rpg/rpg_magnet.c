@@ -16,6 +16,19 @@ static const float RPG_BLOCK_SOCKET_SETTLE_SPEED = 80.0f;
 static const int magnetDirectionRows[RPG_MAGNET_DIRECTION_COUNT] = { -1, 1, 0, 0 };
 static const int magnetDirectionColumns[RPG_MAGNET_DIRECTION_COUNT] = { 0, 0, -1, 1 };
 
+/* A rectangular magnet emits from its exterior only.  Cell-only magnets from
+ * an old stage remain compatible and behave as one-cell rectangles. */
+static bool IsMagnetOuterEdgeDirection(const RpgStage *stage, int row, int column,
+                                       int directionRow, int directionColumn)
+{
+    const RpgMagnetObject *magnet = RpgStage_GetMagnetAtCellConst(stage, row, column);
+    if (magnet == NULL) return true;
+    if (directionRow < 0) return row == magnet->rootRow;
+    if (directionRow > 0) return row == magnet->rootRow + magnet->height - 1;
+    if (directionColumn < 0) return column == magnet->rootColumn;
+    return column == magnet->rootColumn + magnet->width - 1;
+}
+
 RpgMagnetRuntime RpgMagnetRuntime_Default(void)
 {
     return (RpgMagnetRuntime){ 0 };
@@ -33,16 +46,21 @@ static Vector2 GetPushBlockCenter(const RpgMagnetMetal *block)
 }
 
 /* This is deliberately shared by G acquisition and carried-block release.
-   A block must be reachable in the normal interaction radius and within one
-   tile vertically; carrying cannot persist through a floor or ceiling. */
+   A block must be reachable in the normal interaction radius and within 8px
+   vertically; carrying cannot persist through a floor or ceiling. */
 static bool IsWithinPushBlockInteractionRange(const RpgCharacter *player,
                                               const RpgMagnetMetal *block,
                                               float maximumDistance)
 {
     Vector2 center = GetPushBlockCenter(block);
-    return fabsf(center.y - player->position.y) <=
+    /* Carry interaction uses the tile's stable logical centre, not the
+       sprite-derived collision rectangle.  This keeps its vertical reach
+       consistent across player sprite frames. */
+    Vector2 playerCenter = { player->position.x,
+                             player->position.y - RPG_STAGE_TILE_SIZE * 0.5f };
+    return fabsf(center.y - playerCenter.y) <=
                (float)RPG_PUSH_BLOCK_INTERACTION_VERTICAL_RANGE &&
-           Vector2Distance(player->position, center) <= maximumDistance;
+           Vector2Distance(playerCenter, center) <= maximumDistance;
 }
 
 void RpgMagnets_ConsumeCommunication(RpgMagnetRuntime *runtime, RpgStage *stage,
@@ -54,17 +72,20 @@ void RpgMagnets_ConsumeCommunication(RpgMagnetRuntime *runtime, RpgStage *stage,
 
     /* Communication is area-scoped, like the other signal consumers.  It is
        intentionally unrelated to receiver-owned electrical wire paths. */
-    for (int row = 0; row < RPG_STAGE_ROWS; row++) {
-        for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
-            int *blockType = &stage->blocks[row][column];
-            Vector2 center;
-            if (!RpgBlockInventory_IsMagnetBlock(*blockType)) continue;
-            center = RpgStage_GetWorldPositionForCell(stage, row, column);
-            if (RpgStage_GetMapAtWorldPosition(stage, center) != communication->sourceMapIndex)
-                continue;
-            *blockType = communication->isActive ? RPG_BLOCK_EFFECT_MAGNET_ON :
-                                                    RPG_BLOCK_EFFECT_MAGNET_OFF;
-        }
+    for (int index = 0; index < stage->magnetCount; index++) {
+        RpgMagnetObject *magnet = &stage->magnets[index];
+        /* A Zipper-held composite keeps its geometry record so it can be
+           spat back out, but it has no world cells and must not reactivate
+           itself when a communication packet arrives. */
+        if (stage->blocks[magnet->rootRow][magnet->rootColumn] == RPG_BLOCK_BUILD_MISSING)
+            continue;
+        Vector2 center = RpgStage_GetWorldPositionForCell(stage, magnet->rootRow, magnet->rootColumn);
+        if (RpgStage_GetMapAtWorldPosition(stage, center) != communication->sourceMapIndex) continue;
+        magnet->blockType = communication->isActive ? RPG_BLOCK_EFFECT_MAGNET_ON :
+                                                       RPG_BLOCK_EFFECT_MAGNET_OFF;
+        for (int row = magnet->rootRow; row < magnet->rootRow + magnet->height; row++)
+            for (int column = magnet->rootColumn; column < magnet->rootColumn + magnet->width; column++)
+                stage->blocks[row][column] = magnet->blockType;
     }
 }
 
@@ -263,6 +284,8 @@ static bool FindMagnetTarget(const RpgMagnetRuntime *runtime, const RpgStage *st
             for (int direction = 0; direction < RPG_MAGNET_DIRECTION_COUNT; direction++) {
                 int directionRow = magnetDirectionRows[direction];
                 int directionColumn = magnetDirectionColumns[direction];
+                if (!IsMagnetOuterEdgeDirection(stage, row, column, directionRow, directionColumn))
+                    continue;
                 bool aligned = directionRow != 0 ? fabsf(metalCenter.x - magnetCenter.x) < 0.5f :
                                                     fabsf(metalCenter.y - magnetCenter.y) < 0.5f;
                 float signedDistance = directionRow != 0 ? (metalCenter.y - magnetCenter.y) * directionRow :
@@ -327,30 +350,6 @@ static void UpdateMetal(RpgMagnetRuntime *runtime, const RpgStage *stage, int me
         metal->socketSettleOffset += settleDistance;
         return;
     }
-    /* A rotating conveyor floor is a real moving solid.  Follow its exact
-       previous/current bounds before gravity, just as the player does, rather
-       than trying to infer that motion from a static conveyor tile. */
-    if (wires != NULL) {
-        Rectangle conveyorPreviousBounds;
-        Rectangle conveyorCurrentBounds;
-        if (RpgWires_FindConveyorFloorMotion(wires, GetMetalBounds(metal->position),
-                                             (float)GetTime() - deltaTime, (float)GetTime(),
-                                             &conveyorPreviousBounds, &conveyorCurrentBounds)) {
-            RpgMetalObstacleContext context = { .runtime = runtime, .ignoredIndex = metalIndex };
-            RpgPhysicsBody rider = {
-                .position = metal->position,
-                .verticalSpeed = metal->verticalSpeed,
-                .isGrounded = metal->isGrounded,
-                .localBounds = { 0.0f, 0.0f, RPG_STAGE_TILE_SIZE, RPG_STAGE_TILE_SIZE }
-            };
-            RpgPhysics_ResolveMovingSolidContact(stage, &rider,
-                                                  conveyorPreviousBounds, conveyorCurrentBounds,
-                                                  DoesMetalCollideCallback, &context);
-            metal->position = rider.position;
-            metal->verticalSpeed = rider.verticalSpeed;
-            metal->isGrounded = rider.isGrounded;
-        }
-    }
     Vector2 magnetTarget = { 0 };
     if (FindMagnetTarget(runtime, stage, metalIndex, &magnetTarget)) {
         float dx = magnetTarget.x - metal->position.x;
@@ -378,46 +377,6 @@ static void UpdateMetal(RpgMagnetRuntime *runtime, const RpgStage *stage, int me
         metal->verticalSpeed = body.verticalSpeed;
         metal->isGrounded = body.isGrounded;
     }
-    /* The metal is another moving body, so it uses the same one-way sloped
-       surface query/resolution path as the player rather than a conveyor-side
-       collision special case. */
-    if (wires != NULL) {
-        Rectangle previousBounds = GetMetalBounds(metal->previousPosition);
-        Rectangle currentBounds = GetMetalBounds(metal->position);
-        float landingY;
-        RpgMetalObstacleContext context = { .runtime = runtime, .ignoredIndex = metalIndex };
-        if (RpgWires_FindConveyorPlatformLanding(wires, previousBounds, currentBounds, &landingY)) {
-            metal->position.y += landingY - (currentBounds.y + currentBounds.height);
-            /* Conveyor paddles are one-way floors.  Keep the same landing
-               state as a player body so the following conveyor pass can
-               carry this movable block while it remains on the surface. */
-            metal->verticalSpeed = 0.0f;
-            metal->isGrounded = true;
-            currentBounds = GetMetalBounds(metal->position);
-        }
-        /* Movable blocks use the same directional conveyor-wall query as the
-           player.  A vertical blade is passable along its travel direction
-           and resolves overlap only from its blocking side. */
-        {
-            float wallPushX;
-            if (RpgWires_FindConveyorWallPush(wires, previousBounds, currentBounds, &wallPushX)) {
-                Vector2 previousPosition = metal->position;
-                metal->position.x += wallPushX;
-                if (RpgStage_CheckSolidCollision(stage, GetMetalBounds(metal->position)) ||
-                    DoesMetalCollide(runtime, metalIndex, GetMetalBounds(metal->position)))
-                    metal->position = previousPosition;
-                currentBounds = GetMetalBounds(metal->position);
-            }
-        }
-        {
-            RpgPhysicsSlope slope;
-            if (RpgWires_FindConveyorSlopeBelow(wires, currentBounds, &slope) &&
-                RpgPhysics_SlideBoundsOnSlope(stage, &currentBounds, slope, pixelsPerSecond,
-                                               deltaTime,
-                                               DoesMetalCollideCallback, &context))
-                metal->position = (Vector2){ currentBounds.x, currentBounds.y };
-        }
-    }
 }
 
 static void RefreshMovingSolids(RpgMagnetRuntime *runtime)
@@ -436,6 +395,7 @@ void RpgMagnets_Update(RpgMagnetRuntime *runtime, RpgStage *stage, const RpgWire
                        const RpgPlayerPushState *pushState)
 {
     if (runtime == NULL || stage == NULL || deltaTime <= 0.0f) return;
+    (void)wires;
     /* Holding is a player-side relationship only.  It must not pause the
        block's own gravity, magnet attraction, or moving-solid physics. */
     (void)pushState;
@@ -443,31 +403,7 @@ void RpgMagnets_Update(RpgMagnetRuntime *runtime, RpgStage *stage, const RpgWire
     if (pixelsPerSecond < 1.0f) pixelsPerSecond = 1.0f;
     for (int index = 0; index < runtime->metalCount; index++)
         if (runtime->metals[index].active)
-            UpdateMetal(runtime, stage, index, wires, pixelsPerSecond, deltaTime);
-    RefreshMovingSolids(runtime);
-}
-
-void RpgMagnets_ApplyConveyors(RpgMagnetRuntime *runtime, const RpgStage *stage,
-                               const RpgWires *wires, float deltaTime,
-                               const RpgPlayerPushState *pushState)
-{
-    if (runtime == NULL || stage == NULL || wires == NULL || deltaTime <= 0.0f) return;
-    (void)pushState;
-    for (int index = 0; index < runtime->metalCount; index++) {
-        RpgMagnetMetal *metal = &runtime->metals[index];
-        RpgMetalObstacleContext context = { .runtime = runtime, .ignoredIndex = index };
-        RpgPhysicsSlope slope;
-        Vector2 velocity = RpgWires_GetConveyorVelocityBelow(wires, GetMetalBounds(metal->position));
-        bool hasGround = metal->isGrounded ||
-                         RpgPhysics_HasGroundBelow(stage, metal->position,
-                                                     (Rectangle){ 0.0f, 0.0f, RPG_STAGE_TILE_SIZE,
-                                                                  RPG_STAGE_TILE_SIZE },
-                                                     DoesMetalCollideCallback, &context) ||
-                         RpgWires_FindConveyorSlopeBelow(wires, GetMetalBounds(metal->position), &slope);
-        if (!metal->active || metal->lockedSocketAttachmentIndex >= 0 || !hasGround) continue;
-        if (fabsf(velocity.x) > 0.001f) (void)MoveMetalAxis(runtime, stage, index,
-                                                             velocity.x * deltaTime, false);
-    }
+            UpdateMetal(runtime, stage, index, NULL, pixelsPerSecond, deltaTime);
     RefreshMovingSolids(runtime);
 }
 
@@ -502,6 +438,30 @@ bool RpgMagnets_SetBlockZipperHeld(RpgMagnetRuntime *runtime, int index, bool is
         .bounds = GetMetalBounds(block->position)
     } : (RpgMovingSolid){ 0 };
     return true;
+}
+
+void RpgMagnets_ReleaseBlocksLockedToAttachmentOwner(RpgMagnetRuntime *runtime,
+                                                      const RpgAttachments *attachments,
+                                                      RpgGridCell ownerBlockCell,
+                                                      RpgPlayerPushState *pushState)
+{
+    if (runtime == NULL || attachments == NULL || !runtime->isInitialized) return;
+    for (int index = 0; index < runtime->metalCount; index++) {
+        RpgMagnetMetal *block = &runtime->metals[index];
+        int socketIndex = block->lockedSocketAttachmentIndex;
+        if (!block->active || socketIndex < 0 || socketIndex >= attachments->count) continue;
+        const RpgAttachment *socket = &attachments->entries[socketIndex];
+        if (socket->type != RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET ||
+            !RpgAttachments_IsOwnedByBlock(socket, ownerBlockCell)) continue;
+        block->lockedSocketAttachmentIndex = -1;
+        block->socketSettleOffset = 0.0f;
+        block->requiresSocketDeparture = false;
+        block->verticalSpeed = 0.0f;
+        block->isGrounded = false;
+        block->previousPosition = block->position;
+        if (pushState != NULL && pushState->heldBlockIndex == index)
+            *pushState = RpgPlayerPushState_Default();
+    }
 }
 
 RpgMovingSolidSet RpgMagnets_GetMovingSolidsExcept(const RpgMagnetRuntime *runtime, int excludedIndex,
@@ -686,6 +646,8 @@ void RpgMagnets_DrawFields(const RpgStage *stage, int firstColumn, int columnCou
             for (int direction = 0; direction < RPG_MAGNET_DIRECTION_COUNT; direction++) {
                 int directionRow = magnetDirectionRows[direction];
                 int directionColumn = magnetDirectionColumns[direction];
+                if (!IsMagnetOuterEdgeDirection(stage, row, column, directionRow, directionColumn))
+                    continue;
                 for (int distance = 1;; distance++) {
                     int targetRow = row + directionRow * distance;
                     int targetColumn = column + directionColumn * distance;

@@ -38,12 +38,20 @@ void RpgBuildCellStorage_Update(const RpgBuildCellStorageBackend *backend);
    completed by the incremental preview builder. */
 bool RpgBuildCellStorage_EnsureMap(const RpgStage *stage, int mapIndex,
                                    const RpgBuildCellStorageBackend *backend);
+/* True only when every cell belonging to this active area has already been
+   materialized in the current build session. */
+bool RpgBuildCellStorage_IsMapGenerated(const RpgStage *stage, int mapIndex);
+/* A targeted preview repair invalidates only the affected area, then calls
+   EnsureMap.  This deliberately does not discard other generated areas. */
+void RpgBuildCellStorage_InvalidateMap(int mapIndex);
 bool RpgBuildCellStorage_RewriteGeneratedMetadata(const RpgStage *stage,
                                                    const RpgBuildCellStorageBackend *backend);
 void RpgBuildCellStorage_BeginMetadataBatch(void);
 bool RpgBuildCellStorage_EndMetadataBatch(const RpgBuildCellStorageBackend *backend);
 void RpgBuildCellStorage_GetGenerationProgress(const RpgStage *stage, int *generatedCells,
                                                int *totalCells, bool *isPending);
+/* Returns the next cell that the background preview builder will process. */
+bool RpgBuildCellStorage_GetGenerationTarget(RpgGridCell *cell);
 bool RpgBuildCellStorage_EnsureCell(RpgGridCell cell, int blockType,
                                     const RpgBuildCellStorageBackend *backend);
 bool RpgBuildCellStorage_UsesMetadataForBlock(int blockType);

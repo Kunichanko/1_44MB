@@ -3,6 +3,9 @@
 #include "rpg_stage.h"
 
 #include <stdio.h>
+#include <string.h>
+
+static const char *const defaultKeyDoorFailureText = "This door needs its key file.";
 
 /* Runtimeの共有設定はステージのレイアウトと分離し、常に一つの値を利用する。 */
 static const char *GetGlobalRuntimePath(void)
@@ -22,6 +25,9 @@ static void NormalizeGlobalRuntime(RpgLayout *layout)
         layout->zipperFolderReturnAnimationDelay = 0.0f;
     if (layout->referenceFollowerScale < 0.15f || layout->referenceFollowerScale > 1.0f)
         layout->referenceFollowerScale = 0.50f;
+    if (layout->keyDoorFailureText[0] == '\0')
+        snprintf(layout->keyDoorFailureText, sizeof(layout->keyDoorFailureText), "%s",
+                 defaultKeyDoorFailureText);
 }
 
 static void NormalizeStageVisuals(RpgLayout *layout)
@@ -36,6 +42,10 @@ static void NormalizeStageVisuals(RpgLayout *layout)
         layout->groundSaturation = 0.50f;
     if (layout->groundLightness < 0.0f || layout->groundLightness > 1.0f)
         layout->groundLightness = 0.50f;
+    if (layout->socketRightLightAngle < 0.0f || layout->socketRightLightAngle > 80.0f)
+        layout->socketRightLightAngle = 18.0f;
+    if (layout->socketLightOpacity < 0.05f || layout->socketLightOpacity > 0.95f)
+        layout->socketLightOpacity = 0.45f;
     if (layout->zipperMaxCapacityKB == 0 || layout->zipperMaxCapacityKB > 1048576U)
         layout->zipperMaxCapacityKB = 10U;
 }
@@ -49,9 +59,11 @@ RpgLayout RpgLayout_Default(void)
                           .stage3IntroEnabled = true, .electricCellDelay = 0.15f, .magnetMetalSpeed = 160.0f,
                           .backgroundBrightness = 1.0f, .blockBrightness = 1.0f,
                          .groundHue = 0.50f, .groundSaturation = 0.50f, .groundLightness = 0.50f,
+                         .socketRightLightAngle = 18.0f, .socketLightOpacity = 0.45f,
                           .zipperMaxCapacityKB = 10U,
                          .zipperFolderReturnDuration = 0.45f, .zipperFolderReturnAnimationDelay = 0.0f,
-                         .referenceFollowerScale = 0.50f };
+                         .referenceFollowerScale = 0.50f,
+                         .keyDoorFailureText = "This door needs its key file." };
 }
 
 bool RpgLayout_Load(const char *filePath, RpgLayout *layout)
@@ -78,7 +90,11 @@ bool RpgLayout_Load(const char *filePath, RpgLayout *layout)
     layout->groundHue = 0.50f;
     layout->groundSaturation = 0.50f;
     layout->groundLightness = 0.50f;
+    layout->socketRightLightAngle = 18.0f;
+    layout->socketLightOpacity = 0.45f;
     layout->zipperMaxCapacityKB = 10U;
+    snprintf(layout->keyDoorFailureText, sizeof(layout->keyDoorFailureText), "%s",
+             defaultKeyDoorFailureText);
     char line[RPG_LAYOUT_BACKGROUND_PATH_LENGTH + 16];
     while (fgets(line, sizeof(line), file) != NULL) {
         if (sscanf(line, "background=%511[^\r\n]", layout->backgroundPath) == 1) continue;
@@ -88,6 +104,8 @@ bool RpgLayout_Load(const char *filePath, RpgLayout *layout)
         if (sscanf(line, "ground_hue=%f", &layout->groundHue) == 1) continue;
         if (sscanf(line, "ground_saturation=%f", &layout->groundSaturation) == 1) continue;
         if (sscanf(line, "ground_lightness=%f", &layout->groundLightness) == 1) continue;
+        if (sscanf(line, "socket_light_angle=%f", &layout->socketRightLightAngle) == 1) continue;
+        if (sscanf(line, "socket_light_opacity=%f", &layout->socketLightOpacity) == 1) continue;
         (void)sscanf(line, "zipper_max_capacity_kb=%u", &layout->zipperMaxCapacityKB);
     }
     fclose(file);
@@ -125,20 +143,29 @@ bool RpgLayout_Save(const char *filePath, const RpgLayout *layout)
     fprintf(file, "ground_hue=%.2f\n", layout->groundHue);
     fprintf(file, "ground_saturation=%.2f\n", layout->groundSaturation);
     fprintf(file, "ground_lightness=%.2f\n", layout->groundLightness);
+    fprintf(file, "socket_light_angle=%.2f\n", layout->socketRightLightAngle);
+    fprintf(file, "socket_light_opacity=%.2f\n", layout->socketLightOpacity);
     fprintf(file, "zipper_max_capacity_kb=%u\n", layout->zipperMaxCapacityKB);
     return fclose(file) == 0;
 }
 
 bool RpgLayout_LoadGlobalRuntime(RpgLayout *layout)
 {
+    char line[RPG_LAYOUT_KEY_DOOR_FAILURE_TEXT_LENGTH + 32];
     if (layout == NULL) return false;
+    snprintf(layout->keyDoorFailureText, sizeof(layout->keyDoorFailureText), "%s",
+             defaultKeyDoorFailureText);
     FILE *file = fopen(GetGlobalRuntimePath(), "r");
     // 既存ステージの値を初回だけ共有設定へ移し、以後はステージ別の値を参照しない。
     if (file == NULL) return RpgLayout_SaveGlobalRuntime(layout);
-    int readCount = fscanf(file, "%f %f %f %f %f", &layout->electricCellDelay,
+    int readCount = 0;
+    if (fgets(line, sizeof(line), file) != NULL)
+        readCount = sscanf(line, "%f %f %f %f %f", &layout->electricCellDelay,
                            &layout->zipperFolderReturnDuration,
                            &layout->zipperFolderReturnAnimationDelay, &layout->referenceFollowerScale,
                            &layout->magnetMetalSpeed);
+    while (fgets(line, sizeof(line), file) != NULL)
+        (void)sscanf(line, "key_door_failure_text=%191[^\r\n]", layout->keyDoorFailureText);
     fclose(file);
     if (readCount < 3) return RpgLayout_SaveGlobalRuntime(layout);
     if (readCount < 4) layout->referenceFollowerScale = 0.50f;
@@ -155,6 +182,7 @@ bool RpgLayout_SaveGlobalRuntime(const RpgLayout *layout)
     fprintf(file, "%.3f %.2f %.2f %.2f %.1f\n", layout->electricCellDelay,
             layout->zipperFolderReturnDuration, layout->zipperFolderReturnAnimationDelay,
             layout->referenceFollowerScale, layout->magnetMetalSpeed);
+    fprintf(file, "key_door_failure_text=%s\n", layout->keyDoorFailureText);
     return fclose(file) == 0;
 }
 // 役割: RPG のキャラクター配置と全体レイアウト設定を保存・読み込みする。

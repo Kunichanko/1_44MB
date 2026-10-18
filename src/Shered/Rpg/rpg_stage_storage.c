@@ -66,6 +66,39 @@ static FILE *OpenUtf8File(const char *path, const wchar_t *mode)
 #endif
 }
 
+/* Older reference-object records may hold source names in CP932.  Door keys
+ * are UTF-8 identities, so normalize the persisted source at the boundary. */
+static void NormalizeReferenceObjectSourcePath(const char *source, char *destination,
+                                               size_t destinationSize)
+{
+    if (destination == NULL || destinationSize == 0) return;
+    destination[0] = '\0';
+    if (source == NULL || source[0] == '\0') return;
+#ifdef _WIN32
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, source, -1, NULL, 0) > 0) {
+        snprintf(destination, destinationSize, "%s", source);
+        return;
+    }
+    {
+        wchar_t widePath[RPG_STAGE_REFERENCE_PATH_LENGTH];
+        if (MultiByteToWideChar(932, 0, source, -1, widePath,
+                                RPG_STAGE_REFERENCE_PATH_LENGTH) > 0 &&
+            WideCharToMultiByte(CP_UTF8, 0, widePath, -1, destination,
+                                (int)destinationSize, NULL, NULL) > 0) return;
+    }
+#endif
+    snprintf(destination, destinationSize, "%s", source);
+}
+
+static const char *GetReferenceObjectLeafName(const char *path)
+{
+    const char *slash;
+    if (path == NULL) return "";
+    slash = strrchr(path, '\\');
+    if (slash == NULL) slash = strrchr(path, '/');
+    return slash == NULL ? path : slash + 1;
+}
+
 static bool IsSafeFolderName(const char *name)
 {
     if (name == NULL || name[0] == '\0' || strlen(name) >= 120) return false;
@@ -349,7 +382,7 @@ static bool LoadLegacyStageDataFromDirectory(const char *directory, RpgStageData
     data->stage3Event = RpgStage3Event_Default();
     RpgAreaEntryEvents_Initialize(&data->areaEntryEvents);
     data->npcInspectData = RpgInspect_Default("Inspect", "Nothing unusual here.");
-    data->items = RpgItems_Default(); data->wires = RpgWires_Default();
+    data->wires = RpgWires_Default();
     data->attachments = RpgAttachments_Default(); data->receivers = RpgReceivers_Default();
     RpgReceivers_Bind(&data->receivers, &data->attachments);
     data->signalBlocks = RpgSignalBlocks_Default(); data->mapEvents = RpgMapEvents_Default();
@@ -369,7 +402,6 @@ static bool LoadLegacyStageDataFromDirectory(const char *directory, RpgStageData
             data->areaEntryEvents.entries[legacyAreaIndex] = legacyAreaEvent;
     }
     LOAD_DIRECTORY_FILE("rpg_inspect.cfg", RpgInspect_Load, &data->npcInspectData);
-    LOAD_DIRECTORY_FILE("rpg_items.cfg", RpgItems_Load, &data->items);
     /* A v9 attachment file owns every static attachment path.  The split
        files remain readable only so an older stage can migrate on save. */
     {
@@ -409,7 +441,6 @@ static bool SaveLegacyStageDataToDirectory(const char *directory, const RpgStage
            (GetDirectoryFilePath(directory, "rpg_area_entry_events.cfg", path, (int)sizeof(path)) &&
             RpgAreaEntryEvents_Save(path, &data->stage, &data->areaEntryEvents)) &&
            SAVE_DIRECTORY_FILE("rpg_inspect.cfg", RpgInspect_Save, &data->npcInspectData) &&
-           SAVE_DIRECTORY_FILE("rpg_items.cfg", RpgItems_Save, &data->items) &&
            SAVE_DIRECTORY_FILE("rpg_wires.cfg", RpgWires_Save, &data->wires) &&
            SAVE_DIRECTORY_FILE("rpg_receivers.cfg", RpgReceivers_Save, &data->receivers) &&
            SAVE_DIRECTORY_FILE("rpg_attachments.cfg", RpgAttachments_Save, &data->attachments) &&
@@ -437,7 +468,6 @@ static void InitializeStageData(RpgStageData *data)
     data->stage3Event = RpgStage3Event_Default();
     RpgAreaEntryEvents_Initialize(&data->areaEntryEvents);
     data->npcInspectData = RpgInspect_Default("Inspect", "Nothing unusual here.");
-    data->items = RpgItems_Default();
     data->attachments = RpgAttachments_Default();
     data->receivers = RpgReceivers_Default();
     RpgReceivers_Bind(&data->receivers, &data->attachments);
@@ -456,12 +486,17 @@ static bool SaveReferenceObjects(const char *path, const RpgReferenceObjects *ob
     fputs("rpg_reference_objects_v2\n", file);
     for (int index = 0; index < objects->count; index++) {
         const RpgReferenceObject *object = &objects->entries[index];
-        /* path is the working build copy. sourcePath is the stable editor
-           selection relative to assets/Files. Windows file names cannot
-           contain '|', so it is a safe compact record separator. */
+        const char *stablePath = object->sourcePath;
+        /* sourcePath is the stable editor selection relative to assets/Files.
+           A FILE's path is a disposable Play-copy location, so persisting it
+           here would let a previous Play leak into the next one. Windows
+           file names cannot contain '|', so it is a safe compact record
+           separator. */
+        if (object->objectKind == RPG_REFERENCE_OBJECT_FOLDER && stablePath[0] == '\0')
+            stablePath = GetReferenceObjectLeafName(object->path);
         fprintf(file, "object %d %d %.3f %.3f %s|%s\n", object->id, (int)object->objectKind,
-                object->position.x, object->position.y, object->path[0] != '\0' ? object->path : "-",
-                object->sourcePath[0] != '\0' ? object->sourcePath : "-");
+                object->position.x, object->position.y,
+                "-", stablePath[0] != '\0' ? stablePath : "-");
     }
     return fclose(file) == 0;
 }
@@ -489,11 +524,33 @@ static bool LoadReferenceObjects(const char *path, RpgReferenceObjects *objects)
             fieldCount = sscanf(line, "object %d %d %f %f %259[^\n]", &id, &kind, &x, &y, objectPath);
         if (fieldCount >= 5 && kind >= RPG_REFERENCE_OBJECT_FILE && kind <= RPG_REFERENCE_OBJECT_FOLDER &&
             RpgReferenceObjects_Add(objects, (RpgReferenceObjectKind)kind, (Vector2){ x, y },
-                                    strcmp(objectPath, "-") == 0 ? "" : objectPath, id)) {
+                                    /* Runtime paths are deliberately disposable.  A
+                                       FOLDER's persisted source is its visible name;
+                                       old records fall back to their former path. */
+                                    kind == RPG_REFERENCE_OBJECT_FILE ? "" :
+                                    (fieldCount >= 6 && strcmp(sourcePath, "-") != 0 ? sourcePath :
+                                     (strcmp(objectPath, "-") != 0 ? objectPath : "")),
+                                    id)) {
             addedIndex = objects->count - 1;
-            if (fieldCount >= 6 && strcmp(sourcePath, "-") != 0)
-                snprintf(objects->entries[addedIndex].sourcePath,
-                         sizeof(objects->entries[addedIndex].sourcePath), "%s", sourcePath);
+            if (fieldCount >= 6 && strcmp(sourcePath, "-") != 0) {
+                NormalizeReferenceObjectSourcePath(
+                    sourcePath, objects->entries[addedIndex].sourcePath,
+                    sizeof(objects->entries[addedIndex].sourcePath));
+            } else if (kind == RPG_REFERENCE_OBJECT_FILE && strcmp(objectPath, "-") != 0) {
+                /* v1 records only have a disposable build path.  Its leaf is
+                   enough to recover assets/Files without opening the inspector. */
+                NormalizeReferenceObjectSourcePath(
+                    GetReferenceObjectLeafName(objectPath),
+                    objects->entries[addedIndex].sourcePath,
+                    sizeof(objects->entries[addedIndex].sourcePath));
+            } else if (kind == RPG_REFERENCE_OBJECT_FOLDER && strcmp(objectPath, "-") != 0) {
+                /* v2 folder records stored the authored folder path in the
+                   runtime field.  Migrate only its Explorer-visible leaf. */
+                NormalizeReferenceObjectSourcePath(
+                    GetReferenceObjectLeafName(objectPath),
+                    objects->entries[addedIndex].sourcePath,
+                    sizeof(objects->entries[addedIndex].sourcePath));
+            }
         }
     }
     fclose(file);
@@ -671,6 +728,23 @@ static void ExtractAreaData(const RpgStageData *source, int areaId, RpgStageData
         if (door->rootColumn / RPG_STAGE_COLUMNS == areaId && area->stage.keyDoorCount < RPG_KEY_DOOR_MAX_COUNT)
             area->stage.keyDoors[area->stage.keyDoorCount++] = *door;
     }
+    for (int index = 0; index < source->stage.compositeObjectCount; index++) {
+        const RpgCompositeObject *object = &source->stage.compositeObjects[index];
+        if (object->originColumn / RPG_STAGE_COLUMNS == areaId &&
+            area->stage.compositeObjectCount < RPG_COMPOSITE_OBJECT_MAX_COUNT)
+            area->stage.compositeObjects[area->stage.compositeObjectCount++] = *object;
+        if (object->id >= area->stage.nextCompositeObjectId)
+            area->stage.nextCompositeObjectId = object->id + 1;
+    }
+    for (int index = 0; index < source->stage.magnetCount; index++) {
+        const RpgMagnetObject *magnet = &source->stage.magnets[index];
+        if (magnet->rootColumn / RPG_STAGE_COLUMNS == areaId &&
+            area->stage.magnetCount < RPG_MAGNET_OBJECT_MAX_COUNT)
+            area->stage.magnets[area->stage.magnetCount++] = *magnet;
+    }
+    /* Persist the representative cell, even when loading an old record that
+       named one of the door's component cells. */
+    RpgStage_NormalizeKeyDoors(&area->stage);
     for (int index = 0; index < source->stage.imageObjects.count; index++) {
         const RpgImageObject *object = &source->stage.imageObjects.entries[index];
         if (object->column / RPG_STAGE_COLUMNS == areaId && area->stage.imageObjects.count < RPG_IMAGE_OBJECT_MAX_COUNT)
@@ -691,9 +765,6 @@ static void ExtractAreaData(const RpgStageData *source, int areaId, RpgStageData
     for (int index = 0; index < source->signalBlocks.count; index++)
         if (source->signalBlocks.entries[index].column / RPG_STAGE_COLUMNS == areaId && area->signalBlocks.count < RPG_SIGNAL_BLOCK_MAX_COUNT)
             area->signalBlocks.entries[area->signalBlocks.count++] = source->signalBlocks.entries[index];
-    for (int index = 0; index < source->items.count; index++)
-        if (PositionBelongsToArea(&source->stage, source->items.entries[index].position, areaId) && area->items.count < RPG_ITEM_MAX_COUNT)
-            area->items.entries[area->items.count++] = source->items.entries[index];
     for (int index = 0; index < source->stage.referenceObjects.count; index++) {
         const RpgReferenceObject *object = &source->stage.referenceObjects.entries[index];
         if (PositionBelongsToArea(&source->stage, object->position, areaId) &&
@@ -736,9 +807,7 @@ static bool SaveAreaData(const char *directory, const RpgStageData *source, int 
 #undef SAVE_AREA_FILE
     if (result) RemoveLegacyAttachmentStaticFiles(blockAreaPath);
     if (result) {
-        result = GetDirectoryFilePath(movableAreaPath, "rpg_items.cfg", path, (int)sizeof(path)) &&
-                 RpgItems_Save(path, &area->items) &&
-                 GetDirectoryFilePath(movableAreaPath, "rpg_reference_objects.cfg", path, (int)sizeof(path)) &&
+        result = GetDirectoryFilePath(movableAreaPath, "rpg_reference_objects.cfg", path, (int)sizeof(path)) &&
                  SaveReferenceObjects(path, &area->stage.referenceObjects) &&
                  GetDirectoryFilePath(movableAreaPath, "rpg_map_events.cfg", path, (int)sizeof(path)) &&
                  RpgMapEvents_Save(path, &area->mapEvents);
@@ -764,12 +833,24 @@ static void MergeAreaData(RpgStageData *target, const RpgStageData *area, int ar
         if (!AppendAttachmentWithConfigs(&target->attachments, &area->attachments, index)) return;
     APPEND_ALL(target->wires, area->wires, RPG_WIRE_MAX_COUNT);
     APPEND_ALL(target->signalBlocks, area->signalBlocks, RPG_SIGNAL_BLOCK_MAX_COUNT);
-    APPEND_ALL(target->items, area->items, RPG_ITEM_MAX_COUNT);
     APPEND_ALL(target->mapEvents, area->mapEvents, RPG_MAP_EVENT_MAX_COUNT);
     APPEND_ALL(target->stage.imageObjects, area->stage.imageObjects, RPG_IMAGE_OBJECT_MAX_COUNT);
 #undef APPEND_ALL
     for (int index = 0; index < area->stage.keyDoorCount && target->stage.keyDoorCount < RPG_KEY_DOOR_MAX_COUNT; index++)
         target->stage.keyDoors[target->stage.keyDoorCount++] = area->stage.keyDoors[index];
+    for (int index = 0; index < area->stage.compositeObjectCount &&
+         target->stage.compositeObjectCount < RPG_COMPOSITE_OBJECT_MAX_COUNT; index++) {
+        RpgCompositeObject object = area->stage.compositeObjects[index];
+        bool duplicate = false;
+        for (int existing = 0; existing < target->stage.compositeObjectCount; existing++)
+            if (target->stage.compositeObjects[existing].id == object.id) { duplicate = true; break; }
+        if (!duplicate) target->stage.compositeObjects[target->stage.compositeObjectCount++] = object;
+        if (object.id >= target->stage.nextCompositeObjectId)
+            target->stage.nextCompositeObjectId = object.id + 1;
+    }
+    for (int index = 0; index < area->stage.magnetCount &&
+         target->stage.magnetCount < RPG_MAGNET_OBJECT_MAX_COUNT; index++)
+        target->stage.magnets[target->stage.magnetCount++] = area->stage.magnets[index];
     if (target->stage.imageObjects.nextId < area->stage.imageObjects.nextId)
         target->stage.imageObjects.nextId = area->stage.imageObjects.nextId;
     for (int index = 0; index < area->stage.referenceObjects.count; index++) {
@@ -822,7 +903,7 @@ static bool LoadAreaData(const char *directory, RpgStageData *target, int areaId
         !GetLegacyAreaDirectoryPath(directory, areaId, legacyAreaPath, (int)sizeof(legacyAreaPath)) ||
         (area = (RpgStageData *)calloc(1, sizeof(*area))) == NULL) return false;
     hasBlockArea = GetDirectoryFilePath(blockAreaPath, "rpg_area_stage.cfg", path, (int)sizeof(path)) && FileExists(path);
-    hasMovableArea = GetDirectoryFilePath(movableAreaPath, "rpg_items.cfg", path, (int)sizeof(path)) && FileExists(path);
+    hasMovableArea = GetDirectoryFilePath(movableAreaPath, "rpg_reference_objects.cfg", path, (int)sizeof(path)) && FileExists(path);
     usesLegacyBlockArea = !hasBlockArea;
     if (!hasBlockArea) snprintf(blockAreaPath, sizeof(blockAreaPath), "%s", legacyAreaPath);
     if (!hasMovableArea) snprintf(movableAreaPath, sizeof(movableAreaPath), "%s", legacyAreaPath);
@@ -834,8 +915,6 @@ static bool LoadAreaData(const char *directory, RpgStageData *target, int areaId
 #define LOAD_AREA_FILE(name, function, targetValue) do { \
     if (GetDirectoryFilePath(blockAreaPath, (name), path, (int)sizeof(path)) && FileExists(path)) function(path, (targetValue)); \
 } while (0)
-    if (GetDirectoryFilePath(movableAreaPath, "rpg_items.cfg", path, (int)sizeof(path)) && FileExists(path))
-        (void)RpgItems_Load(path, &area->items);
     if (GetDirectoryFilePath(movableAreaPath, "rpg_reference_objects.cfg", path, (int)sizeof(path)) && FileExists(path))
         (void)LoadReferenceObjects(path, &area->stage.referenceObjects);
     {
@@ -899,6 +978,41 @@ static void RemoveLegacyAreaFiles(const char *directory)
 }
 
 static bool SaveStageDataToDirectory(const char *directory, const RpgStageData *data);
+
+/* A movable Folder has one visible grid position.  Older editor builds could
+   append a second movable record for an already occupied Folder cell.  Keep
+   the last record because it is also the record that the editor draws and
+   selects first.  This is a static-data repair only; runtime FILE/FOLDER
+   motion is not involved. */
+static bool NormalizeDuplicateReferenceFolders(RpgReferenceObjects *objects)
+{
+    int writeIndex = 0;
+    bool changed = false;
+    if (objects == NULL) return false;
+    for (int index = 0; index < objects->count; index++) {
+        const RpgReferenceObject *object = &objects->entries[index];
+        bool replacedByLaterFolder = false;
+        if (object->objectKind == RPG_REFERENCE_OBJECT_FOLDER) {
+            for (int later = index + 1; later < objects->count; later++) {
+                const RpgReferenceObject *candidate = &objects->entries[later];
+                if (candidate->objectKind == RPG_REFERENCE_OBJECT_FOLDER &&
+                    candidate->position.x == object->position.x &&
+                    candidate->position.y == object->position.y) {
+                    replacedByLaterFolder = true;
+                    break;
+                }
+            }
+        }
+        if (replacedByLaterFolder) {
+            changed = true;
+            continue;
+        }
+        if (writeIndex != index) objects->entries[writeIndex] = objects->entries[index];
+        writeIndex++;
+    }
+    if (changed) objects->count = writeIndex;
+    return changed;
+}
 
 static bool LoadStageDataFromDirectory(const char *directory, RpgStageData *data)
 {
@@ -967,13 +1081,22 @@ static bool LoadStageDataFromDirectory(const char *directory, RpgStageData *data
 #undef LOAD_GLOBAL_FILE
     for (int areaId = 0; areaId < RPG_STAGE_MAP_COUNT; areaId++)
         if (data->stage.mapActive[areaId] && !LoadAreaData(directory, data, areaId)) return false;
+    /* Area merge may bring in pre-v2 records with only a transient runtime
+       path. Establish the authored identity once at the storage boundary so
+       game, editor preview and Continue share the same input. */
+    RpgReferenceObjects_EnsureSourcePaths(&data->stage.referenceObjects);
+    bool repairedDuplicateFolders = NormalizeDuplicateReferenceFolders(&data->stage.referenceObjects);
+    RpgStage_NormalizeMagnets(&data->stage);
+    RpgStage_NormalizeCompositeObjects(&data->stage);
+    RpgStage_NormalizeKeyDoors(&data->stage);
     RpgAttachments_MigrateLegacyButtons(&data->attachments, &data->stage);
     RpgAttachments_MaterializeBlockCells(&data->attachments, &data->stage);
     RpgWires_RemoveBroken(&data->wires, &data->stage);
     RpgReceivers_RemoveBroken(&data->receivers, &data->stage);
     RpgAttachments_RemoveBroken(&data->attachments, &data->stage);
     RpgSignalBlocks_RemoveBroken(&data->signalBlocks, &data->stage);
-    if (legacyAreaLayout && RpgStageStorage_GetDomain() == RPG_STAGE_STORAGE_SETTINGS)
+    if ((legacyAreaLayout || repairedDuplicateFolders) &&
+        RpgStageStorage_GetDomain() == RPG_STAGE_STORAGE_SETTINGS)
         return SaveStageDataToDirectory(directory, data);
     return true;
 }
@@ -1073,19 +1196,47 @@ bool RpgStageStorage_RenameBuildFolder(int stageNumber, const char *oldPath, con
 {
 #ifdef _WIN32
     char buildPath[RPG_STAGE_PATH_LENGTH], destination[RPG_STAGE_PATH_LENGTH];
+    char resolvedOldPath[RPG_STAGE_PATH_LENGTH], legacyBuildPath[RPG_STAGE_PATH_LENGTH];
     wchar_t oldWide[RPG_STAGE_PATH_LENGTH], newWide[RPG_STAGE_PATH_LENGTH];
     if (oldPath == NULL || oldPath[0] == '\0' || !IsSafeFolderName(name) ||
         !RpgStageStorage_EnsureStageDirectory(stageNumber) ||
         !RpgStageStorage_GetFilePath(stageNumber, "blocks\\folder_defs", buildPath, (int)sizeof(buildPath)) ||
         !CreateDirectoryPath(buildPath) ||
         snprintf(destination, sizeof(destination), "%s\\%s", buildPath, name) <= 0) return false;
+    if (strchr(oldPath, '\\') == NULL && strchr(oldPath, '/') == NULL && strchr(oldPath, ':') == NULL) {
+        if (snprintf(resolvedOldPath, sizeof(resolvedOldPath), "%s\\%s", buildPath, oldPath) <= 0) return false;
+    } else snprintf(resolvedOldPath, sizeof(resolvedOldPath), "%s", oldPath);
     /* 同名の既存フォルダを誤って上書きしない。作成済みなら元と同一パスだけを許可する。 */
-    if (strcmp(oldPath, destination) == 0) {
+    if (strcmp(resolvedOldPath, destination) == 0) {
         if (newPath != NULL && newPathSize > 0) snprintf(newPath, (size_t)newPathSize, "%s", destination);
         return true;
     }
-    if (MultiByteToWideChar(CP_UTF8, 0, oldPath, -1, oldWide, RPG_STAGE_PATH_LENGTH) <= 0 ||
+    if (MultiByteToWideChar(CP_UTF8, 0, resolvedOldPath, -1, oldWide, RPG_STAGE_PATH_LENGTH) <= 0 ||
         MultiByteToWideChar(CP_UTF8, 0, destination, -1, newWide, RPG_STAGE_PATH_LENGTH) <= 0) return false;
+    /* Stage folders created before the current blocks/folder_defs layout
+       still live directly under StageN/folder_defs.  A serialized reference
+       object stores only its display name, so probe that legacy location
+       before declaring a rename failure.  The move itself upgrades it into
+       the current root. */
+    if (GetFileAttributesW(oldWide) == INVALID_FILE_ATTRIBUTES &&
+        strchr(oldPath, '\\') == NULL && strchr(oldPath, '/') == NULL && strchr(oldPath, ':') == NULL &&
+        RpgStageStorage_GetFilePath(stageNumber, "folder_defs", legacyBuildPath,
+                                    (int)sizeof(legacyBuildPath)) &&
+        snprintf(resolvedOldPath, sizeof(resolvedOldPath), "%s\\%s", legacyBuildPath, oldPath) > 0 &&
+        MultiByteToWideChar(CP_UTF8, 0, resolvedOldPath, -1, oldWide, RPG_STAGE_PATH_LENGTH) <= 0) return false;
+    if (GetFileAttributesW(oldWide) == INVALID_FILE_ATTRIBUTES) {
+        /* A movable Folder's static record can outlive its optional physical
+           content directory (for example, an older stage or a Folder that
+           was created before folder_defs was materialized).  Renaming its
+           visible name must not be blocked by that missing, empty container.
+           Materialize the new directory instead; existing source contents
+           still use the normal MoveFileW path below and are never discarded. */
+        if (GetFileAttributesW(newWide) != INVALID_FILE_ATTRIBUTES ||
+            !CreateDirectoryPath(destination)) return false;
+        if (newPath != NULL && newPathSize > 0)
+            snprintf(newPath, (size_t)newPathSize, "%s", destination);
+        return true;
+    }
     /* CreateBuildFolderが作った空フォルダを消してから、MoveFileで名前を変更する。 */
     if (GetFileAttributesW(newWide) != INVALID_FILE_ATTRIBUTES) return false;
     if (MoveFileW(oldWide, newWide) == 0) return false;
@@ -1153,8 +1304,115 @@ bool RpgStageStorage_CopyReferenceFileToBuild(int stageNumber, int row, int colu
 #endif
 }
 
+/* A movable FILE's saved identity is relative text (for example
+   "memo.txt"), not an absolute path.  Keep the selected bytes in a stable,
+   object-ID-specific static location as well.  This is intentionally
+   separate from the disposable Play copy and from the old cell-addressed
+   reference_files cache. */
+bool RpgStageStorage_CopyReferenceFileToStaticSource(int stageNumber, int objectId,
+                                                     const char *sourcePath)
+{
+#ifdef _WIN32
+    char root[RPG_STAGE_PATH_LENGTH];
+    char directory[RPG_STAGE_PATH_LENGTH];
+    char destination[RPG_STAGE_PATH_LENGTH];
+    char temporary[RPG_STAGE_PATH_LENGTH];
+    const char *fileName;
+    wchar_t wideSource[RPG_STAGE_PATH_LENGTH];
+    wchar_t wideDestination[RPG_STAGE_PATH_LENGTH];
+    wchar_t wideTemporary[RPG_STAGE_PATH_LENGTH];
+    DWORD attributes;
+
+    if (stageNumber <= 0 || objectId <= 0 || sourcePath == NULL || sourcePath[0] == '\0' ||
+        !RpgStageStorage_EnsureStageDirectory(stageNumber) ||
+        !RpgStageStorage_GetFilePath(stageNumber, "movables\\reference_sources", root, (int)sizeof(root)) ||
+        !CreateDirectoryPath(root) ||
+        MultiByteToWideChar(CP_UTF8, 0, sourcePath, -1, wideSource, RPG_STAGE_PATH_LENGTH) <= 0)
+        return false;
+    attributes = GetFileAttributesW(wideSource);
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) return false;
+
+    fileName = strrchr(sourcePath, '\\');
+    if (fileName == NULL) fileName = strrchr(sourcePath, '/');
+    fileName = fileName == NULL ? sourcePath : fileName + 1;
+    if (fileName[0] == '\0' ||
+        snprintf(directory, sizeof(directory), "%s\\reference_%04d", root, objectId) <= 0 ||
+        snprintf(destination, sizeof(destination), "%s\\%s", directory, fileName) <= 0 ||
+        snprintf(temporary, sizeof(temporary), "%s\\.reference_%04d.tmp", root, objectId) <= 0 ||
+        MultiByteToWideChar(CP_UTF8, 0, destination, -1, wideDestination, RPG_STAGE_PATH_LENGTH) <= 0 ||
+        MultiByteToWideChar(CP_UTF8, 0, temporary, -1, wideTemporary, RPG_STAGE_PATH_LENGTH) <= 0)
+        return false;
+
+    DeleteFileW(wideTemporary);
+    if (CopyFileW(wideSource, wideTemporary, FALSE) == 0) return false;
+    RemoveDirectoryTree(directory);
+    if (!CreateDirectoryPath(directory) ||
+        MoveFileExW(wideTemporary, wideDestination, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == 0) {
+        DeleteFileW(wideTemporary);
+        return false;
+    }
+    return true;
+#else
+    (void)stageNumber; (void)objectId; (void)sourcePath;
+    return false;
+#endif
+}
+
 /* Play停止時はマップ状態だけ戻るため、格納済みFileの元コピーが消える場合がある。
    File選択元であるassets/Filesから、不足した実行用コピーだけをPlay開始前に復元する。 */
+/* Older stages already have a saved sourcePath but predate the per-object
+   static snapshot.  Create that snapshot while loading editor-owned static
+   data, before the stage is published or Play builds its disposable copy.
+   This is deliberately not part of runtime-state repair: it touches only the
+   authoring tree and never depends on the file picker being opened. */
+static bool HasStaticReferenceSource(int stageNumber, int objectId, const char *sourcePath)
+{
+#ifdef _WIN32
+    char relative[RPG_STAGE_PATH_LENGTH];
+    char snapshot[RPG_STAGE_PATH_LENGTH];
+    const char *name;
+    wchar_t wideSnapshot[RPG_STAGE_PATH_LENGTH];
+    if (stageNumber <= 0 || objectId <= 0 || sourcePath == NULL || sourcePath[0] == '\0') return false;
+    name = strrchr(sourcePath, '\\');
+    if (name == NULL) name = strrchr(sourcePath, '/');
+    name = name == NULL ? sourcePath : name + 1;
+    return name[0] != '\0' &&
+           snprintf(relative, sizeof(relative), "movables\\reference_sources\\reference_%04d\\%s",
+                    objectId, name) > 0 &&
+           RpgStageStorage_GetFilePath(stageNumber, relative, snapshot, (int)sizeof(snapshot)) &&
+           MultiByteToWideChar(CP_UTF8, 0, snapshot, -1, wideSnapshot, RPG_STAGE_PATH_LENGTH) > 0 &&
+           GetFileAttributesW(wideSnapshot) != INVALID_FILE_ATTRIBUTES;
+#else
+    (void)stageNumber; (void)objectId; (void)sourcePath;
+    return false;
+#endif
+}
+
+static void PreserveLoadedReferenceSources(int stageNumber, RpgReferenceObjects *objects)
+{
+#ifdef _WIN32
+    if (stageNumber <= 0 || objects == NULL ||
+        RpgStageStorage_GetDomain() != RPG_STAGE_STORAGE_SETTINGS) return;
+    RpgReferenceObjects_EnsureSourcePaths(objects);
+    for (int index = 0; index < objects->count; index++) {
+        RpgReferenceObject *object = &objects->entries[index];
+        char source[RPG_STAGE_PATH_LENGTH];
+        wchar_t wideSource[RPG_STAGE_PATH_LENGTH];
+        if (object->objectKind != RPG_REFERENCE_OBJECT_FILE || object->id <= 0 ||
+            object->sourcePath[0] == '\0' ||
+            HasStaticReferenceSource(stageNumber, object->id, object->sourcePath) ||
+            snprintf(source, sizeof(source), "%s../assets/Files/%s",
+                     GetApplicationDirectory(), object->sourcePath) <= 0 ||
+            MultiByteToWideChar(CP_UTF8, 0, source, -1, wideSource,
+                                RPG_STAGE_PATH_LENGTH) <= 0 ||
+            GetFileAttributesW(wideSource) == INVALID_FILE_ATTRIBUTES) continue;
+        (void)RpgStageStorage_CopyReferenceFileToStaticSource(stageNumber, object->id, source);
+    }
+#else
+    (void)stageNumber; (void)objects;
+#endif
+}
+
 bool RpgStageStorage_RepairReferenceFileCopies(int stageNumber, RpgStage *stage)
 {
 #ifdef _WIN32
@@ -1391,6 +1649,10 @@ bool RpgStageStorage_LoadStage(int stageNumber, RpgStageData *data)
         (void)ExtractStaticPackage(stageNumber);
     if (!GetStageDirectoryPath(stageNumber, path, (int)sizeof(path))) return false;
     if (!LoadStageDataFromDirectory(path, data)) return false;
+    /* Migrate the selected source for every existing movable FILE before the
+       static tree is published.  A Play session must not require opening the
+       object's file picker simply to obtain its runtime copy. */
+    PreserveLoadedReferenceSources(stageNumber, &data->stage.referenceObjects);
     /* The editor reads Settings as the static source of truth.  Re-publish the
        saved source after a migration (and whenever an older package is opened)
        so the game path cannot retain the retired monolithic format. */
@@ -1405,7 +1667,7 @@ bool RpgStageStorage_LoadStage(int stageNumber, RpgStageData *data)
     data->stage3Event = RpgStage3Event_Default();
     RpgAreaEntryEvents_Initialize(&data->areaEntryEvents);
     data->npcInspectData = RpgInspect_Default("Inspect", "Nothing unusual here.");
-    data->items = RpgItems_Default(); data->wires = RpgWires_Default();
+    data->wires = RpgWires_Default();
     data->receivers = RpgReceivers_Default(); data->attachments = RpgAttachments_Default();
     data->signalBlocks = RpgSignalBlocks_Default(); data->mapEvents = RpgMapEvents_Default();
 #define LOAD_STAGE_FILE(name, function, target) do { if (LoadFilePath(stageNumber, (name), path, (int)sizeof(path))) function(path, (target)); } while (0)
@@ -1424,7 +1686,6 @@ bool RpgStageStorage_LoadStage(int stageNumber, RpgStageData *data)
             data->areaEntryEvents.entries[legacyAreaIndex] = legacyAreaEvent;
     }
     LOAD_STAGE_FILE("rpg_inspect.cfg", RpgInspect_Load, &data->npcInspectData);
-    LOAD_STAGE_FILE("rpg_items.cfg", RpgItems_Load, &data->items);
     if (GetDirectoryFilePath(directory, "rpg_block_paths.cfg", path, (int)sizeof(path)) && FileExists(path))
         (void)RpgWires_Load(path, &data->wires);
     else
@@ -1463,7 +1724,6 @@ bool RpgStageStorage_SaveStage(int stageNumber, const RpgStageData *data)
            (RpgStageStorage_GetFilePath(stageNumber, "rpg_area_entry_events.cfg", path, (int)sizeof(path)) &&
             RpgAreaEntryEvents_Save(path, &data->stage, &data->areaEntryEvents)) &&
            SAVE_STAGE_FILE("rpg_inspect.cfg", RpgInspect_Save, &data->npcInspectData) &&
-           SAVE_STAGE_FILE("rpg_items.cfg", RpgItems_Save, &data->items) &&
            SAVE_STAGE_FILE("rpg_block_paths.cfg", RpgWires_Save, &data->wires) &&
            SAVE_STAGE_FILE("rpg_receivers.cfg", RpgReceivers_Save, &data->receivers) &&
            SAVE_STAGE_FILE("rpg_attachments.cfg", RpgAttachments_Save, &data->attachments) &&

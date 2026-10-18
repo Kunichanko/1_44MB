@@ -18,6 +18,25 @@ static bool HasObstacle(const RpgStage *stage, Rectangle bounds,
            (obstacleTest != NULL && obstacleTest(obstacleContext, bounds));
 }
 
+/* This is an input/grounded-state tolerance, not a collision snap distance.
+   A body may still fall normally through this small gap. */
+enum { RPG_PHYSICS_GROUNDED_TOLERANCE = 8 };
+
+static bool HasGroundBelowWithinDistance(const RpgStage *stage, Vector2 position,
+                                         Rectangle localBounds, float distance,
+                                         RpgPhysicsObstacleTest obstacleTest,
+                                         void *obstacleContext)
+{
+    Rectangle currentBounds;
+    Rectangle probeBounds;
+    if (stage == NULL || distance < 0.0f) return false;
+    currentBounds = GetWorldBounds(position, localBounds);
+    position.y += distance;
+    probeBounds = GetWorldBounds(position, localBounds);
+    return HasObstacle(stage, probeBounds, obstacleTest, obstacleContext) ||
+           RpgStage_FindOneWayPlatformLanding(stage, currentBounds, probeBounds, NULL);
+}
+
 static bool GetSlopeSurfaceY(RpgPhysicsSlope slope, float x, float *surfaceY)
 {
     float minimumX = fminf(slope.start.x, slope.end.x);
@@ -106,12 +125,8 @@ bool RpgPhysics_MoveHorizontalWithStep(const RpgStage *stage, RpgPhysicsBody *bo
 bool RpgPhysics_HasGroundBelow(const RpgStage *stage, Vector2 position, Rectangle localBounds,
                                RpgPhysicsObstacleTest obstacleTest, void *obstacleContext)
 {
-    if (stage == NULL) return false;
-    Rectangle currentBounds = GetWorldBounds(position, localBounds);
-    position.y += 1.0f;
-    Rectangle probeBounds = GetWorldBounds(position, localBounds);
-    return HasObstacle(stage, probeBounds, obstacleTest, obstacleContext) ||
-           RpgStage_FindOneWayPlatformLanding(stage, currentBounds, probeBounds, NULL);
+    return HasGroundBelowWithinDistance(stage, position, localBounds, 1.0f,
+                                        obstacleTest, obstacleContext);
 }
 
 void RpgPhysics_UpdateBody(const RpgStage *stage, RpgPhysicsBody *body,
@@ -130,10 +145,12 @@ void RpgPhysics_UpdateBody(const RpgStage *stage, RpgPhysicsBody *body,
         body->isGrounded = body->verticalSpeed > 0.0f;
         body->verticalSpeed = 0.0f;
     } else if (body->verticalSpeed >= 0.0f &&
-               RpgPhysics_HasGroundBelow(stage, body->position, body->localBounds,
-                                         obstacleTest, obstacleContext)) {
+               HasGroundBelowWithinDistance(stage, body->position, body->localBounds,
+                                            (float)RPG_PHYSICS_GROUNDED_TOLERANCE,
+                                            obstacleTest, obstacleContext)) {
         body->isGrounded = true;
-        body->verticalSpeed = 0.0f;
+        /* Do not erase fall speed here: this only grants a short grounded
+           grace range while the body continues to descend naturally. */
     } else body->isGrounded = false;
 }
 

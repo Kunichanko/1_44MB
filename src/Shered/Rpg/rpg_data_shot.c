@@ -47,7 +47,13 @@ static Vector2 RpgDataShots_WorldPositionToStorage(const RpgStage *stage, Vector
                       storageRow * RPG_STAGE_TILE_SIZE + (worldPosition.y - worldCell.y) };
 }
 
-RpgDataShots RpgDataShots_Default(void) { return (RpgDataShots){ .nextFolderSerial = 1 }; }
+RpgDataShots RpgDataShots_Default(void)
+{
+    RpgDataShots shots = { .nextFolderSerial = 1 };
+    for (int index = 0; index < RPG_DATA_SHOT_MAX_COUNT; index++)
+        shots.entries[index].folderMonitorHandle = -1;
+    return shots;
+}
 
 void RpgDataShot_SetFileProperties(RpgDataShot *shot, const RpgShooterConfig *shooter,
                                    int fileCount, unsigned long long totalBytes)
@@ -130,7 +136,7 @@ static int RpgDataShots_FindWireFromReceiver(const RpgWires *wires, RpgGridCell 
     if (wires == NULL) return -1;
     for (int wireIndex = 0; wireIndex < wires->count; wireIndex++) {
         const RpgWire *wire = &wires->entries[wireIndex];
-        if (!RpgWires_IsConveyor(wire) && wire->hasReceiverSource && wire->receiverCell.row == receiverCell.row &&
+        if (wire->kind == RPG_WIRE_KIND_ELECTRIC && wire->hasReceiverSource && wire->receiverCell.row == receiverCell.row &&
             wire->receiverCell.column == receiverCell.column && wire->receiverSide == receiverSide)
             return wireIndex;
     }
@@ -143,7 +149,7 @@ static bool RpgDataShots_UpdateElectric(RpgDataShot *shot, const RpgWires *wires
     if (wires == NULL || shot->electricWireIndex < 0 || shot->electricWireIndex >= wires->count)
         return false;
     const RpgWire *wire = &wires->entries[shot->electricWireIndex];
-    if (RpgWires_IsConveyor(wire) || wire->path.cellCount <= 0 || shot->electricCellIndex < 0 ||
+    if (wire->kind != RPG_WIRE_KIND_ELECTRIC || wire->path.cellCount <= 0 || shot->electricCellIndex < 0 ||
         shot->electricCellIndex >= wire->path.cellCount) return false;
     if (cellDelay < 0.01f) cellDelay = 0.01f;
     shot->electricDelayElapsed += deltaTime;
@@ -167,7 +173,8 @@ static void RpgDataShots_Spawn(RpgDataShots *shots, const RpgAttachments *attach
         shots->entries[index] = (RpgDataShot){ .active = true, .isPreview = isPreview,
             .folderSerial = shots->nextFolderSerial++, .attachmentIndex = attachmentIndex,
             .position = RpgDataShots_GetCellCenter(shooter->path.cells[0]),
-            .metadataCell = { -1, -1 }, .electricLastAppliedCellIndex = -1 };
+            .metadataCell = { -1, -1 }, .electricLastAppliedCellIndex = -1,
+            .folderMonitorHandle = -1 };
         RpgDataShot_SetFileProperties(&shots->entries[index], shooter,
             isPreview ? shooter->previewFileCount : 0,
             isPreview ? shooter->previewTotalBytes : 0);
@@ -248,8 +255,13 @@ void RpgDataShots_Update(RpgDataShots *shots, RpgAttachments *attachments,
                      shot->electricLastAppliedCellIndex != shot->electricCellIndex) {
                 int row = (int)(shot->position.y / RPG_STAGE_TILE_SIZE);
                 int column = (int)(shot->position.x / RPG_STAGE_TILE_SIZE);
-                // 導線上の電気化データ弾がドアのマスへ入った瞬間、ドア全体を開状態にする。
-                RpgStage_SetDoorOpenAtCell(stage, row, column, true);
+                /* Key doors are opened only by their matching file entering
+                   the door's object folder.  Electric data shots keep the
+                   existing behaviour for ordinary doors, but must not bypass
+                   the key-door ownership and folder-monitor path. */
+                if (!RpgBlockInventory_IsKeyDoorBlock(RpgStage_GetBlockTypeAtPosition(
+                        stage, shot->position)))
+                    RpgStage_SetDoorOpenAtCell(stage, row, column, true);
                 shot->electricLastAppliedCellIndex = shot->electricCellIndex;
             }
             continue;

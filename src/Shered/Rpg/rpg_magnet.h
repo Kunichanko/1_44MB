@@ -10,9 +10,9 @@
 
 enum { RPG_MAGNET_MAX_METALS = RPG_STAGE_ROWS * RPG_STAGE_WORLD_COLUMNS };
 enum { RPG_PUSH_BLOCK_INTERACTION_RANGE = 72 };
-/* G can reach horizontally within its normal range, but only across half a
-   tile of vertical separation. */
-enum { RPG_PUSH_BLOCK_INTERACTION_VERTICAL_RANGE = RPG_STAGE_TILE_SIZE / 2 };
+/* G can reach horizontally within its normal range, but player and block
+   centers may differ vertically by no more than 8px. */
+enum { RPG_PUSH_BLOCK_INTERACTION_VERTICAL_RANGE = 8 };
 
 typedef struct RpgMagnetMetal {
     Vector2 position;
@@ -78,9 +78,6 @@ void RpgMagnets_UpdateBlockSocketSignals(const RpgMagnetRuntime *runtime, RpgSta
 void RpgMagnets_Update(RpgMagnetRuntime *runtime, RpgStage *stage, const RpgWires *wires,
                        float pixelsPerSecond, float deltaTime,
                        const RpgPlayerPushState *pushState);
-void RpgMagnets_ApplyConveyors(RpgMagnetRuntime *runtime, const RpgStage *stage,
-                               const RpgWires *wires, float deltaTime,
-                               const RpgPlayerPushState *pushState);
 RpgMovingSolidSet RpgMagnets_GetMovingSolids(const RpgMagnetRuntime *runtime);
 RpgMovingSolidSet RpgMagnets_GetMovingSolidsExcept(const RpgMagnetRuntime *runtime, int excludedIndex,
                                                     RpgMovingSolid *storage, int storageCapacity);
@@ -105,5 +102,11 @@ void RpgMagnets_DrawMetals(const RpgMagnetRuntime *runtime, int firstColumn, int
 void RpgMagnets_DrawFields(const RpgStage *stage, int firstColumn, int columnCount);
 int RpgMagnets_FindBlockHit(const RpgMagnetRuntime *runtime, Rectangle bounds);
 bool RpgMagnets_SetBlockZipperHeld(RpgMagnetRuntime *runtime, int index, bool isHeld);
+/* Removing a block owner also removes any sockets mounted on it.  Release
+   runtime blocks seated in those sockets so they resume ordinary physics. */
+void RpgMagnets_ReleaseBlocksLockedToAttachmentOwner(RpgMagnetRuntime *runtime,
+                                                      const RpgAttachments *attachments,
+                                                      RpgGridCell ownerBlockCell,
+                                                      RpgPlayerPushState *pushState);
 
 #endif

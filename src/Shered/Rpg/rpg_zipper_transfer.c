@@ -12,6 +12,10 @@ static void SetBlockMissingState(RpgStage *stage, const RpgZipperHeldObject *tar
     const RpgEffectShape *shape;
     if (stage == NULL || target == NULL || cell.row < 0 || cell.row >= RPG_STAGE_ROWS ||
         cell.column < 0 || cell.column >= RPG_STAGE_WORLD_COLUMNS) return;
+    /* A composite has one object-folder and one transfer.  This handles both
+       fixed shapes (doors) and resizable magnets before the legacy shape path
+       below is considered. */
+    if (RpgStage_SetCompositeMissingAtCell(stage, cell.row, cell.column, missing)) return;
     shape = RpgBlockInventory_GetEffectShape(target->blockType);
     if (shape == NULL || shape->rootType != target->blockType) {
         if (missing) {
@@ -38,6 +42,26 @@ static void SetBlockMissingState(RpgStage *stage, const RpgZipperHeldObject *tar
     }
 }
 
+static void SetCompositeOwnerHeld(RpgZipperTransferContext *context, RpgGridCell cell, bool held)
+{
+    RpgGridCell cells[RPG_STAGE_ROWS * RPG_STAGE_COLUMNS];
+    int count = 0;
+    if (context == NULL || context->stage == NULL) return;
+    if (!RpgStage_GetCompositeCellsAtCell(context->stage, cell.row, cell.column, cells,
+                                           RPG_STAGE_ROWS * RPG_STAGE_COLUMNS, &count)) {
+        cells[0] = cell;
+        count = 1;
+    }
+    for (int index = 0; index < count; index++) {
+        if (context->magnetRuntime != NULL)
+            RpgMagnets_ReleaseBlocksLockedToAttachmentOwner(context->magnetRuntime,
+                                                             context->attachments, cells[index],
+                                                             context->playerPushState);
+        RpgAttachments_SetOwnerBlockZipperHeld(context->attachments, cells[index], held);
+        RpgReceivers_SetOwnerBlockZipperHeld(context->receivers, cells[index], held);
+    }
+}
+
 static bool EatMovable(RpgZipperTransferContext *context, const RpgZipperHeldObject *target)
 {
     switch (target->movableKind) {
@@ -61,10 +85,14 @@ static bool EatMovable(RpgZipperTransferContext *context, const RpgZipperHeldObj
             return true;
         }
     case RPG_ZIPPER_MOVABLE_REFERENCE_FILE:
+    case RPG_ZIPPER_MOVABLE_REFERENCE_FOLDER:
         if (context->referenceObjects == NULL || target->referenceObjectIndex < 0 ||
             target->referenceObjectIndex >= context->referenceObjects->count ||
-            target->referenceObject.objectKind != RPG_REFERENCE_OBJECT_FILE) return false;
-        if (!RpgObjectFolder_MoveReferenceFileToZipper(&target->referenceObject)) return false;
+            (target->movableKind == RPG_ZIPPER_MOVABLE_REFERENCE_FILE &&
+             target->referenceObject.objectKind != RPG_REFERENCE_OBJECT_FILE) ||
+            (target->movableKind == RPG_ZIPPER_MOVABLE_REFERENCE_FOLDER &&
+             target->referenceObject.objectKind != RPG_REFERENCE_OBJECT_FOLDER)) return false;
+        if (!RpgObjectFolder_MoveReferenceObjectToZipper(&target->referenceObject)) return false;
         return RpgReferenceObjects_RemoveTarget(context->stage, context->referenceObjects,
                                                 (RpgReferenceTarget){ .kind = RPG_REFERENCE_TARGET_DROP,
                                                                       .row = -1, .column = -1,
@@ -89,7 +117,8 @@ static bool BeginSpitMovable(RpgZipperTransferContext *context, const RpgZipperH
                    context->magnetRuntime->metals[target->dynamicBlockIndex].blockType,
                    context->magnetRuntime->metals[target->dynamicBlockIndex].position);
     case RPG_ZIPPER_MOVABLE_REFERENCE_FILE:
-        return RpgObjectFolder_BeginReturnReferenceFileFromZipper(&target->referenceObject);
+    case RPG_ZIPPER_MOVABLE_REFERENCE_FOLDER:
+        return RpgObjectFolder_BeginReturnReferenceObjectFromZipper(&target->referenceObject);
     default:
         return false;
     }
@@ -115,8 +144,9 @@ static bool CompleteSpitMovable(RpgZipperTransferContext *context, const RpgZipp
             return RpgMagnets_SetBlockZipperHeld(context->magnetRuntime, target->dynamicBlockIndex, false);
         }
     case RPG_ZIPPER_MOVABLE_REFERENCE_FILE:
+    case RPG_ZIPPER_MOVABLE_REFERENCE_FOLDER:
         if (context->referenceObjects == NULL ||
-            !RpgObjectFolder_ReturnReferenceFileFromZipper(&target->referenceObject) ||
+            !RpgObjectFolder_ReturnReferenceObjectFromZipper(&target->referenceObject) ||
             !RpgReferenceObjects_Add(context->referenceObjects, target->referenceObject.objectKind,
                                      target->referenceObject.position, target->referenceObject.path,
                                      target->referenceObject.id)) return false;
@@ -135,9 +165,11 @@ bool RpgZipperTransfer_Eat(RpgZipperTransferContext *context, const RpgZipperHel
                 &(RpgObjectFolder){ .cell = target->blockCell }, target->blockType,
                 context->attachments, context->receivers, context->wires))
             return false;
+        /* A socket is metadata of this parent.  Once the parent enters
+           Zipper, a block seated in that socket must no longer remain frozen
+           against an attachment which is no longer present in the world. */
+        SetCompositeOwnerHeld(context, target->blockCell, true);
         SetBlockMissingState(context->stage, target, true);
-        RpgAttachments_SetOwnerBlockZipperHeld(context->attachments, target->blockCell, true);
-        RpgReceivers_SetOwnerBlockZipperHeld(context->receivers, target->blockCell, true);
         return true;
     }
     return target->kind == RPG_ZIPPER_HELD_OBJECT_MOVABLE && EatMovable(context, target);
@@ -160,8 +192,7 @@ bool RpgZipperTransfer_CompleteSpit(RpgZipperTransferContext *context, const Rpg
                                                                target->blockType);
         if (returned) {
             SetBlockMissingState(context->stage, target, false);
-            RpgAttachments_SetOwnerBlockZipperHeld(context->attachments, target->blockCell, false);
-            RpgReceivers_SetOwnerBlockZipperHeld(context->receivers, target->blockCell, false);
+            SetCompositeOwnerHeld(context, target->blockCell, false);
         }
         return returned;
     }
@@ -190,6 +221,7 @@ Vector2 RpgZipperTransfer_GetReturnDestination(const RpgZipperTransferContext *c
         }
         break;
     case RPG_ZIPPER_MOVABLE_REFERENCE_FILE:
+    case RPG_ZIPPER_MOVABLE_REFERENCE_FOLDER:
         return target->referenceObject.position;
     default:
         break;

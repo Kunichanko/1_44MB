@@ -3,6 +3,7 @@
 #define RPG_STAGE_H
 
 #include "raylib.h"
+#include "rpg_grid_path.h"
 
 struct RpgAttachments;
 #include "rpg_block_inventory.h"
@@ -18,7 +19,7 @@ enum { RPG_STAGE_TILE_SIZE = 32, RPG_STAGE_COLUMNS = 20, RPG_STAGE_ROWS = 12,
        RPG_STAGE_GROUND_START_ROW = RPG_STAGE_ROWS - 2,
        RPG_STAGE_GROUND_TOP = RPG_STAGE_GROUND_START_ROW * RPG_STAGE_TILE_SIZE,
        RPG_STAGE_REFERENCE_PATH_LENGTH = 260, RPG_KEY_DOOR_MAX_COUNT = 32,
-       RPG_KEY_DOOR_FAILURE_TEXT_LENGTH = 192 };
+       RPG_MAGNET_OBJECT_MAX_COUNT = 64, RPG_COMPOSITE_OBJECT_MAX_COUNT = 128 };
 
 typedef enum RpgAreaDirection {
     RPG_AREA_LEFT,
@@ -31,8 +32,30 @@ typedef struct RpgKeyDoor {
     int rootRow;
     int rootColumn;
     char keyPath[RPG_STAGE_REFERENCE_PATH_LENGTH];
-    char failureText[RPG_KEY_DOOR_FAILURE_TEXT_LENGTH];
 } RpgKeyDoor;
+
+/* A composite has a stable identity independent from every tile that happens
+ * to make up its current geometry.  `origin*` is only placement data used by
+ * fixed effect-shape layouts; it is never a filesystem owner. */
+typedef struct RpgCompositeObject {
+    int id;
+    int originRow;
+    int originColumn;
+    int blockType;
+} RpgCompositeObject;
+
+/* A magnet owns one rectangular group of terrain component cells.  The cells
+ * remain materialized in `blocks` for ordinary collision and build handling,
+ * but selection, movement, deletion, rendering and communication use this
+ * single record. */
+typedef struct RpgMagnetObject {
+    int id;
+    int rootRow;
+    int rootColumn;
+    int width;
+    int height;
+    int blockType;
+} RpgMagnetObject;
 
 typedef enum RpgReferenceObjectKind {
     RPG_REFERENCE_OBJECT_FILE = 0,
@@ -89,6 +112,14 @@ typedef struct RpgStage {
     RpgReferenceObjects referenceObjects;
     int keyDoorCount;
     RpgKeyDoor keyDoors[RPG_KEY_DOOR_MAX_COUNT];
+    int compositeObjectCount;
+    int nextCompositeObjectId;
+    RpgCompositeObject compositeObjects[RPG_COMPOSITE_OBJECT_MAX_COUNT];
+    /* Runtime lookup cache.  It is derived from compositeObjects/magnets and
+       is deliberately not part of the saved stage format. */
+    int compositeObjectIds[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS];
+    int magnetCount;
+    RpgMagnetObject magnets[RPG_MAGNET_OBJECT_MAX_COUNT];
     /* PNG画像はFolderやFILE.pngと別の、見た目専用オブジェクトとして管理する。 */
     RpgImageObjects imageObjects;
 } RpgStage;
@@ -126,9 +157,35 @@ bool RpgStage_SetBlockTypeAtPosition(RpgStage *stage, Vector2 position, int bloc
 int RpgStage_GetBlockTypeAtPosition(const RpgStage *stage, Vector2 position);
 // 指定マスを含むドア全体を開閉状態へ切り替える。ドア以外では何もしない。
 bool RpgStage_SetDoorOpenAtCell(RpgStage *stage, int row, int column, bool isOpen);
+/* Key-door records always belong to an effect shape's representative cell.
+   Stale records from older per-cell saves are normalized here. */
+void RpgStage_NormalizeKeyDoors(RpgStage *stage);
 RpgKeyDoor *RpgStage_EnsureKeyDoor(RpgStage *stage, int row, int column);
 RpgKeyDoor *RpgStage_GetKeyDoorAtCell(RpgStage *stage, int row, int column);
 const RpgKeyDoor *RpgStage_GetKeyDoorAtCellConst(const RpgStage *stage, int row, int column);
+/* Multi-cell magnet ownership.  `NormalizeMagnets` imports old cell-only
+ * magnets into maximal filled rectangles once, while all new edits use the
+ * explicit records below. */
+void RpgStage_NormalizeMagnets(RpgStage *stage);
+/* Assign/retain stable object IDs for fixed multi-cell effect shapes. */
+void RpgStage_NormalizeCompositeObjects(RpgStage *stage);
+/* Returns a stable object ID for any composite component, or zero for a
+ * single-cell block.  The ID is the sole folder/eat/spit identity. */
+int RpgStage_GetCompositeObjectIdAtCell(const RpgStage *stage, int row, int column);
+/* Collect all component cells of the one composite containing `row,column`.
+ * Returns false for a one-cell block or an insufficient output buffer. */
+bool RpgStage_GetCompositeCellsAtCell(const RpgStage *stage, int row, int column,
+                                      RpgGridCell *cells, int cellCapacity, int *cellCount);
+/* Set/restore all tiles of one composite atomically. */
+bool RpgStage_SetCompositeMissingAtCell(RpgStage *stage, int row, int column, bool missing);
+const RpgMagnetObject *RpgStage_GetMagnetAtCellConst(const RpgStage *stage, int row, int column);
+RpgMagnetObject *RpgStage_GetMagnetAtCell(RpgStage *stage, int row, int column);
+bool RpgStage_AddMagnet(RpgStage *stage, int row, int column, int width, int height, int blockType);
+bool RpgStage_RemoveMagnetAtCell(RpgStage *stage, int row, int column);
+bool RpgStage_MoveMagnetAtCell(RpgStage *stage, int row, int column, int destinationRow,
+                               int destinationColumn);
+bool RpgStage_ResizeMagnetAtCell(RpgStage *stage, int row, int column, int oppositeRow,
+                                 int oppositeColumn);
 bool RpgStage_SetReferencePathAtCell(RpgStage *stage, int row, int column, const char *path);
 const char *RpgStage_GetReferencePathAtCell(const RpgStage *stage, int row, int column);
 #if 0 /* obsolete pre-movable reference-object declaration */
@@ -153,6 +210,15 @@ typedef struct RpgReferenceTarget { RpgReferenceTargetKind kind; int row; int co
 RpgReferenceObjects RpgReferenceObjects_Default(void);
 bool RpgReferenceObjects_Add(RpgReferenceObjects *objects, RpgReferenceObjectKind objectKind,
                              Vector2 position, const char *path, int id);
+/* sourcePath is the stable author-selected identity.  Old records may only
+   have a disposable build path, so derive a normalized filename identity
+   before runtime systems (notably key doors) use them. */
+void RpgReferenceObjects_EnsureSourcePaths(RpgReferenceObjects *objects);
+/* Compare a movable FILE with an authored file identity (for example a key
+   door's keyPath). Both stored source identities and disposable runtime
+   paths are accepted, but only normalized file names participate. */
+bool RpgReferenceObjects_FileMatchesPath(const RpgReferenceObject *object,
+                                         const char *authoredPath);
 bool RpgReferenceObjects_AddDrop(RpgReferenceObjects *objects, Vector2 position, const char *path);
 void RpgReferenceObjects_Update(RpgReferenceObjects *objects, float deltaTime);
 void RpgReferenceObjects_UpdateFollowers(RpgReferenceObjects *objects, Vector2 playerPosition,
@@ -174,6 +240,12 @@ bool RpgReferenceObjects_FindTarget(const RpgStage *stage, const RpgReferenceObj
                                     Vector2 position, RpgReferenceTarget *target);
 const char *RpgReferenceObjects_GetTargetPath(const RpgStage *stage, const RpgReferenceObjects *objects,
                                                RpgReferenceTarget target);
+/* A movable FILE's runtime path is rebuilt for every Play session.  UI labels
+   must instead prefer its stable author-selected sourcePath so a missing or
+   delayed build copy never changes the visible name to a generic fallback. */
+const char *RpgReferenceObjects_GetTargetDisplayPath(const RpgStage *stage,
+                                                     const RpgReferenceObjects *objects,
+                                                     RpgReferenceTarget target);
 bool RpgReferenceObjects_RemoveTarget(RpgStage *stage, RpgReferenceObjects *objects,
                                       RpgReferenceTarget target);
 bool RpgStage_IsSolidBlock(int blockType);
@@ -191,6 +263,9 @@ bool RpgStage_FindOneWayPlatformLanding(const RpgStage *stage, Rectangle previou
 /* 複数マス特殊ブロックの任意の構成マスから、ドラッグと共通の代表（先頭）マスを求める。 */
 bool RpgStage_FindEffectRootCell(const RpgStage *stage, int row, int column, int *rootRow,
                                  int *rootColumn, const RpgEffectShape **shapeResult);
+/* Static stage data may store only a composite block's representative cell.
+   Recreate its empty component cells before systems query the shape. */
+void RpgStage_MaterializeCompositeBlocks(RpgStage *stage);
 bool RpgStage_CheckSolidCircleCollision(const RpgStage *stage, Vector2 center, float radius);
 bool RpgStage_FindSolidCircleCollisionCenter(const RpgStage *stage, Vector2 center, float radius,
                                              Vector2 *collisionCenter);

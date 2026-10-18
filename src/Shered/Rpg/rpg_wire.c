@@ -268,31 +268,6 @@ bool RpgWires_Save(const char *filePath, const RpgWires *wires)
     return fclose(file) == 0;
 }
 
-bool RpgWires_AddAdjacentConveyor(RpgWires *wires, const RpgStage *stage, int row, int column)
-{
-    static const int columnOffsets[] = { 1, -1, 0, 0 };
-    static const int rowOffsets[] = { 0, 0, 1, -1 };
-    if (wires == NULL || stage == NULL || wires->count >= RPG_WIRE_MAX_COUNT ||
-        !RpgWires_IsBlockCell(stage, row, column)) return false;
-    for (int direction = 0; direction < 4; direction++) {
-        int adjacentRow = row + rowOffsets[direction];
-        int adjacentColumn = column + columnOffsets[direction];
-        if (!RpgWires_IsBlockCell(stage, adjacentRow, adjacentColumn)) continue;
-        wires->entries[wires->count++] = (RpgWire){
-            .ownerCell = { row, column },
-            .path = RpgGridPath_Create((RpgWireCell){ row, column },
-                                       (RpgWireCell){ adjacentRow, adjacentColumn }),
-            .kind = RPG_WIRE_KIND_CONVEYOR,
-            .conveyorSpeed = 96.0f,
-            .conveyorDirection = 1,
-            .conveyorHasFloor = true,
-            .conveyorSlideAngleDegrees = 15.0f
-        };
-        return true;
-    }
-    return false;
-}
-
 bool RpgWires_AddFromReceiver(RpgWires *wires, const RpgStage *stage, RpgWireCell cell,
                               RpgGridSide side)
 {
@@ -346,7 +321,9 @@ void RpgWires_RemoveBroken(RpgWires *wires, const RpgStage *stage)
         const RpgWire *wire = &wires->entries[wireIndex];
         /* There is no independent electric-wire object any more.  A legacy
            path without a receiver owner is intentionally removed. */
-        bool isBroken = wire->kind == RPG_WIRE_KIND_ELECTRIC && !wire->hasReceiverSource;
+        /* Conveyor routes were removed.  Old records are intentionally
+           dropped here rather than becoming an ordinary electric path. */
+        bool isBroken = wire->kind != RPG_WIRE_KIND_ELECTRIC || !wire->hasReceiverSource;
         if (!isBroken && !RpgWires_IsBlockCell(stage, wire->ownerCell.row, wire->ownerCell.column))
             isBroken = true;
         for (int cellIndex = 0; cellIndex < wire->path.cellCount; cellIndex++) {
@@ -449,16 +426,7 @@ static Vector2 RpgWires_GetReceiverWireStart(Vector2 anchor, Vector2 destination
     return (Vector2){ anchor.x + dx / length * 8.0f, anchor.y + dy / length * 8.0f };
 }
 
-bool RpgWires_IsConveyor(const RpgWire *wire)
-{
-    return wire != NULL && wire->kind == RPG_WIRE_KIND_CONVEYOR;
-}
-
-RpgGridCell RpgWires_GetOwnerCell(const RpgWire *wire)
-{
-    return wire != NULL ? wire->ownerCell : (RpgGridCell){ -1, -1 };
-}
-
+#if 0 /* Removed conveyor renderer and moving-floor physics. */
 static bool RpgWires_AreAdjacent(RpgWireCell first, RpgWireCell second)
 {
     return abs(first.row - second.row) + abs(first.column - second.column) == 1;
@@ -1078,6 +1046,7 @@ bool RpgWires_FindConveyorWallPush(const RpgWires *wires, Rectangle previousBoun
     if (found && pushX != NULL) *pushX = bestPush;
     return found;
 }
+#endif
 
 static void RpgWires_DrawWithOffset(const RpgWires *wires, const RpgStage *stage,
                                     int firstColumn, int columnCount)
@@ -1085,10 +1054,7 @@ static void RpgWires_DrawWithOffset(const RpgWires *wires, const RpgStage *stage
     int lastColumn = firstColumn + columnCount;
     for (int wireIndex = 0; wireIndex < wires->count; wireIndex++) {
         const RpgWire *wire = &wires->entries[wireIndex];
-        if (RpgWires_IsConveyor(wire)) {
-            RpgWires_DrawConveyor(wire, firstColumn, lastColumn);
-            continue;
-        }
+        if (wire->kind != RPG_WIRE_KIND_ELECTRIC) continue;
         for (int cellIndex = 0; cellIndex < wire->path.cellCount - 1; cellIndex++) {
             RpgWireCell first = wire->path.cells[cellIndex];
             RpgWireCell second = wire->path.cells[cellIndex + 1];

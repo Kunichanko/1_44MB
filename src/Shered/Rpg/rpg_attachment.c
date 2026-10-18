@@ -357,6 +357,9 @@ void RpgAttachments_ImportWires(RpgAttachments *attachments, const RpgWires *wir
     attachments->routeCapacity = wires->count;
     for (int index = 0; index < wires->count; index++) {
         const RpgWire *wire = &wires->entries[index];
+        /* Conveyor routes were retired.  Keep only receiver-owned electric
+           paths when importing legacy wire storage. */
+        if (wire->kind != RPG_WIRE_KIND_ELECTRIC) continue;
         RpgAttachmentRoute *route = &attachments->routes[attachments->routeCount++];
         route->id = index + 1;
         route->kind = wire->kind;
@@ -379,6 +382,7 @@ void RpgAttachments_BuildRuntimeWires(const RpgAttachments *attachments, RpgWire
     if (attachments == NULL) return;
     for (int index = 0; index < attachments->routeCount && wires->count < RPG_WIRE_MAX_COUNT; index++) {
         const RpgAttachmentRoute *route = &attachments->routes[index];
+        if (route->kind != RPG_WIRE_KIND_ELECTRIC) continue;
         RpgWire wire = { .ownerCell = route->ownerCell, .path = route->cells, .kind = route->kind,
                          .conveyorSpeed = route->conveyorSpeed,
                          .conveyorDirection = route->conveyorDirection,
@@ -885,7 +889,12 @@ bool RpgAttachments_LoadStatic(const char *filePath, RpgAttachments *attachments
         if (routeCount > 0 && !(loadedAttachments.routes = calloc((size_t)routeCount, sizeof(*loadedAttachments.routes)))) { fclose(file); RpgAttachments_Destroy(&loadedAttachments); return false; }
         loadedAttachments.routeCapacity = routeCount;
         for (int i = 0; i < routeCount; i++) if (!RpgAttachments_ReadRouteRecord(file, &loadedAttachments.routes[i])) { fclose(file); RpgAttachments_Destroy(&loadedAttachments); return false; }
-        loadedAttachments.routeCount = routeCount;
+        /* Retire any old conveyor route while preserving the remaining
+           receiver paths and their stable order. */
+        loadedAttachments.routeCount = 0;
+        for (int i = 0; i < routeCount; i++)
+            if (loadedAttachments.routes[i].kind == RPG_WIRE_KIND_ELECTRIC)
+                loadedAttachments.routes[loadedAttachments.routeCount++] = loadedAttachments.routes[i];
         if (fclose(file) != 0) { RpgAttachments_Destroy(&loadedAttachments); return false; }
         RpgAttachments_RefreshEditorFacades(&loadedAttachments);
         RpgAttachments_Destroy(attachments); *attachments = loadedAttachments;
@@ -1319,7 +1328,8 @@ static float RpgAttachments_RaycastSocketLight(void *rawContext, Vector2 localOr
 }
 
 void RpgAttachments_DrawSocketLightsMap(const RpgAttachments *attachments, const RpgStage *stage,
-                                        int mapIndex, const RpgMovingSolidSet *movingSolids)
+                                        int mapIndex, const RpgMovingSolidSet *movingSolids,
+                                        float rightLightAngle, float lightOpacity)
 {
     int firstColumn;
     int lastColumn;
@@ -1328,12 +1338,11 @@ void RpgAttachments_DrawSocketLightsMap(const RpgAttachments *attachments, const
     lastColumn = firstColumn + RPG_STAGE_COLUMNS;
     for (int index = 0; index < attachments->count; index++) {
         const RpgAttachment *attachment = &attachments->entries[index];
-        const RpgSocketConfig *socket = RpgAttachments_FindSocketConst(attachments, attachment->folderId);
         float left;
         float bottom;
         RpgLightSourceSegment source;
         RpgSocketLightOcclusionContext occlusion;
-        if (RpgAttachments_IsRuntimeUnavailable(attachment) || attachment->type != RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET || socket == NULL ||
+        if (RpgAttachments_IsRuntimeUnavailable(attachment) || attachment->type != RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET ||
             attachment->side != RPG_GRID_SIDE_TOP || attachment->cell.row < 0 ||
             attachment->cell.row >= RPG_STAGE_ROWS || attachment->cell.column < firstColumn ||
             attachment->cell.column >= lastColumn) continue;
@@ -1349,9 +1358,9 @@ void RpgAttachments_DrawSocketLightsMap(const RpgAttachments *attachments, const
         };
         source = (RpgLightSourceSegment){
             .first = { left, bottom }, .second = { left + RPG_STAGE_TILE_SIZE, bottom },
-            .firstDirectionDegrees = -socket->rightLightAngle,
-            .secondDirectionDegrees = socket->rightLightAngle,
-            .rayLength = RPG_STAGE_TILE_SIZE, .opacity = socket->lightOpacity,
+            .firstDirectionDegrees = -rightLightAngle,
+            .secondDirectionDegrees = rightLightAngle,
+            .rayLength = RPG_STAGE_TILE_SIZE, .opacity = lightOpacity,
             .color = { 70, 197, 255, 255 }
         };
         RpgLightSource_DrawSegmentFanOccluded(&source, RpgAttachments_RaycastSocketLight, &occlusion);

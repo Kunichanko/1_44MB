@@ -36,7 +36,6 @@
 #include "rpg_viewport.h"
 #include "rpg_game_window.h"
 #include "rpg_inspect.h"
-#include "rpg_item.h"
 #include "rpg_map_event.h"
 #include "rpg_object_folder.h"
 #include "rpg_receiver.h"
@@ -458,7 +457,6 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
                           bool isMoveSpriteVisible, float moveSpriteX, RpgInspectMoveTarget moveSpriteTarget,
                           bool npcInspectCompleted, bool zipperInspectCompleted,
                           bool isZipperPointerHovered, bool isZipperPointerSelected,
-                          const RpgItems *items,
                           const RpgReferenceObjects *referenceDrops,
                           const RpgWires *wires,
                           const RpgReceivers *receivers,
@@ -523,7 +521,6 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
     if (isReferenceDragActive && draggedReferenceTarget.kind == RPG_REFERENCE_TARGET_CELL)
         RpgStage_DrawReferenceObject(fileTexture, GetReferenceTargetBounds(referenceDrops, draggedReferenceTarget),
                                      Fade(WHITE, 0.28f));
-    RpgItems_Draw(items);
     RpgMapEvents_Draw(events);
     RpgStage_DrawEffects(stage);
     RpgWires_Draw(wires, stage);
@@ -676,7 +673,6 @@ int main(void)
     stage = stageData.stage;
     // 保存済みの日本語ファイル名を描画より先にフォントへ登録し、? 表示を防ぐ。
     RegisterReferenceFileNames(&stage);
-    RpgItems items = stageData.items;
     RpgReferenceObjects referenceDrops = stage.referenceObjects;
     RpgWires wires = stageData.wires;
     RpgAttachments attachments = RpgAttachments_Default();
@@ -691,7 +687,6 @@ int main(void)
     // 前回が異常終了しても、プレイ中だけ使う実フォルダとInboxを残さない。
     RpgObjectFolders_ClearSessionStorage();
     RpgMapEvents events = stageData.mapEvents;
-    for (int index = 0; index < items.count; index++) GameFont_AddText(items.entries[index].name);
     RpgDialogue dialogue = stageData.dialogue;
     for (int lineIndex = 0; lineIndex < dialogue.lineCount; lineIndex++) {
         GameFont_AddText(dialogue.lines[lineIndex]);
@@ -800,7 +795,7 @@ int main(void)
                                     RPG_STAGE_WORLD_HEIGHT / 2.0f },
                         .zoom = RPG_SCREEN_WIDTH / (float)(RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE) };
     RpgRuntimeContext runtime = {
-        .layout=&layout, .stageBackground=&stageBackground, .stage=&stage, .items=&items, .referenceDrops=&referenceDrops, .wires=&wires, .receivers=&receivers, .attachments=&attachments, .signalBlocks=&signalBlocks, .dataShots=&dataShots, .buttonEvent=&buttonEvent, .socketCommunicationEvent=&socketCommunicationEvent, .events=&events, .dialogue=&dialogue, .stage3Event=&stage3Event, .areaEntryEvents=&areaEntryEvents, .zipper=&zipper, .inspect=&inspect, .player=&player, .npc=&npc, .magnetRuntime=&magnetRuntime,
+        .layout=&layout, .stageBackground=&stageBackground, .stage=&stage, .referenceDrops=&referenceDrops, .wires=&wires, .receivers=&receivers, .attachments=&attachments, .signalBlocks=&signalBlocks, .dataShots=&dataShots, .buttonEvent=&buttonEvent, .socketCommunicationEvent=&socketCommunicationEvent, .events=&events, .dialogue=&dialogue, .stage3Event=&stage3Event, .areaEntryEvents=&areaEntryEvents, .zipper=&zipper, .inspect=&inspect, .player=&player, .npc=&npc, .magnetRuntime=&magnetRuntime,
         .dialogueIndex=&dialogueIndex, .stage3IntroIndex=&stage3IntroIndex, .inspectFunctionIndex=&inspectFunctionIndex, .inspectLineIndex=&inspectLineIndex, .inspectTarget=&inspectTarget, .isInspectMoveRunning=&isInspectMoveRunning, .inspectMoveElapsed=&inspectMoveElapsed, .inspectMoveStartX=&inspectMoveStartX, .inspectMoveStartY=&inspectMoveStartY, .activeInspectMove=&activeInspectMove, .inspectMoveTransitionElapsed=&inspectMoveTransitionElapsed, .activeWaitFunctionIndex=&activeWaitFunctionIndex, .inspectWaitElapsed=&inspectWaitElapsed, .stage3IntroShown=&stage3IntroShown, .areaEntryShown=areaEntryShown, .activeEntryEvent=&activeEntryEvent, .zipperFollowsPlayer=&zipperFollowsPlayer, .isZipperLaunched=&isZipperLaunched, .zipperLaunchVelocity=&zipperLaunchVelocity, .attachedDataShotIndex=&attachedDataShotIndex, .attachedAttachmentIndex=&attachedAttachmentIndex, .attachedDataShotOffset=&attachedDataShotOffset, .attachedDynamicBlockIndex=&attachedDynamicBlockIndex, .attachedReferenceObjectIndex=&attachedReferenceObjectIndex,
         .zipperPointerSelected=&zipperPointerSelected, .isZipperPointerFeedbackSuppressed=&isZipperPointerFeedbackSuppressed, .lastZipperPointerClickTime=&lastZipperPointerClickTime, .selectedReferencePointerTarget=&selectedReferencePointerTarget, .isReferencePointerFeedbackSuppressed=&isReferencePointerFeedbackSuppressed, .isReferencePointerPressed=&isReferencePointerPressed, .pressedReferenceTarget=&pressedReferenceTarget, .referencePressPosition=&referencePressPosition, .isReferenceDragActive=&isReferenceDragActive, .draggedReferenceTarget=&draggedReferenceTarget, .referenceDragPosition=&referenceDragPosition, .lastReferencePointerClickTime=&lastReferencePointerClickTime, .zipperAnimationElapsed=&zipperAnimationElapsed, .npcInspectCompleted=&npcInspectCompleted, .zipperInspectCompleted=&zipperInspectCompleted, .isZipperControllable=&isZipperControllable, .wasDataButtonPressed=&wasDataButtonPressed, .previousMap=&previousMap, .worldCoordinatesInitialized=&runtimeWorldCoordinatesInitialized, .cameraFollowsPlayer=&cameraFollowsPlayer, .itemMessage=itemMessage, .itemMessageSize=(int)sizeof(itemMessage), .itemMessageTimer=&itemMessageTimer, .referenceText=referenceText, .referenceTextSize=(int)sizeof(referenceText), .referenceFileName=referenceFileName, .referenceFileNameSize=(int)sizeof(referenceFileName), .isReferenceTextOpen=&isReferenceTextOpen, .camera=&camera, .zipperTexture=zipperTexture, .fileTexture=fileTexture, .scene=&scene
     };
@@ -859,7 +854,6 @@ int main(void)
                                              layout.groundLightness);
                 stage = stageData.stage;
                 RegisterReferenceFileNames(&stage);
-                items = stageData.items;
                 referenceDrops = stage.referenceObjects;
                 wires = stageData.wires;
                 if (!RpgAttachments_Clone(&attachments, &stageData.attachments)) {
@@ -960,6 +954,19 @@ int main(void)
                         if (!RpgStageStorage_SaveRuntimeState(currentStageNumber, &runtimeState))
                             buildReady = false;
                     }
+                    /* Begin/Resume builds assign each movable FILE its
+                       disposable runtime-copy path.  referenceDrops was
+                       intentionally copied before the build so the static
+                       stage stays untouched, but that also used to leave
+                       this runtime list with empty paths.  The empty path
+                       falls back to \"FILE.txt\" in the interaction UI.
+                       Refresh the runtime list only after the build has
+                       completed; sourcePath remains the authoring identity
+                       and no static data is written here. */
+                    if (buildReady)
+                        referenceDrops = stage.referenceObjects;
+                    /* Saved falling drops are runtime-only additions.  Load
+                       them after refreshing the placed-object paths above. */
                     if (buildReady && shouldContinue && resumedRuntimeBuild)
                         RpgObjectFolders_LoadReferenceDrops(&referenceDrops);
                     /* Flag Continue establishes the follower before the build
@@ -977,7 +984,6 @@ int main(void)
                     RpgObjectFolder_PrepareZipperAnimationCommand();
                 }
                 GameFont_BeginTextBatch();
-                for (int index = 0; index < items.count; index++) GameFont_AddText(items.entries[index].name);
                 for (int lineIndex = 0; lineIndex < dialogue.lineCount; lineIndex++) {
                     GameFont_AddText(dialogue.lines[lineIndex]);
                     GameFont_AddText(dialogue.speakers[lineIndex]);
@@ -1159,13 +1165,6 @@ int main(void)
         }
         if (itemMessageTimer > 0.0f) itemMessageTimer -= GetFrameTime();
         RpgReferenceObjects_Update(&referenceDrops, GetFrameTime());
-        for (int index = 0; index < items.count; index++) if (!items.entries[index].collected &&
-            fabsf(player.position.x - items.entries[index].position.x) <= 28.0f) {
-            items.entries[index].collected = true;
-            snprintf(itemMessage, sizeof(itemMessage), "%s を手に入れた", items.entries[index].name);
-            GameFont_AddText(itemMessage);
-            itemMessageTimer = 2.5f;
-        }
         for (int index = 0; index < events.count && inspectTarget < 0 && dialogueIndex < 0 && stage3IntroIndex < 0 && !isReferenceTextOpen; index++) if (!events.entries[index].triggered &&
             Vector2Distance(player.position, events.entries[index].position) <= 36.0f) {
             events.entries[index].triggered = true;
@@ -1378,7 +1377,7 @@ int main(void)
                      inspectTarget, inspectFunctionIndex, inspectLineIndex, false, 0.0f, RPG_INSPECT_MOVE_PLAYER,
                      npcInspectCompleted, zipperInspectCompleted,
                      isZipperPointerHovered && !isZipperPointerFeedbackSuppressed, zipperPointerSelected,
-                     &items, &referenceDrops, &wires, &receivers, &attachments, &dataShots, &events,
+                     &referenceDrops, &wires, &receivers, &attachments, &dataShots, &events,
                      itemMessage, itemMessageTimer, nearbyReferenceTarget,
                      referenceFileName, referenceText, isReferenceTextOpen,
                      hoveredReferencePointerTarget, selectedReferencePointerTarget,

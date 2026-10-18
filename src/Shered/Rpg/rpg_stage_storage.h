@@ -6,7 +6,6 @@
 #include "rpg_attachment.h"
 #include "rpg_dialogue.h"
 #include "rpg_inspect.h"
-#include "rpg_item.h"
 #include "rpg_layout.h"
 #include "rpg_map_event.h"
 #include "rpg_receiver.h"
@@ -35,7 +34,6 @@ typedef struct RpgStageData {
     RpgStage3Event stage3Event;
     RpgAreaEntryEvents areaEntryEvents;
     RpgInspect npcInspectData;
-    RpgItems items;
     RpgWires wires;
     RpgReceivers receivers;
     RpgAttachments attachments;
@@ -89,6 +87,12 @@ bool RpgStageStorage_RenameBuildFolder(int stageNumber, const char *oldPath, con
 /* Fileオブジェクト用に、選択元をStageN/build/reference_filesへコピーして実行時パスを返す。 */
 bool RpgStageStorage_CopyReferenceFileToBuild(int stageNumber, int row, int column,
                                               const char *sourcePath, char *copiedPath, int copiedPathSize);
+/* Keep the author-selected bytes under the static Stage tree, keyed by the
+   movable object's stable ID.  Runtime builds always copy from this snapshot
+   when present, so re-opening the editor never depends on a one-frame picker
+   path or on an unrelated preview cache. */
+bool RpgStageStorage_CopyReferenceFileToStaticSource(int stageNumber, int objectId,
+                                                     const char *sourcePath);
 bool RpgStageStorage_RepairReferenceFileCopies(int stageNumber, RpgStage *stage);
 /* 同じステージのreference_files配下にある、以前のFileオブジェクト用コピーだけを削除する。 */
 void RpgStageStorage_RemoveReferenceFileCopy(int stageNumber, const char *copiedPath);

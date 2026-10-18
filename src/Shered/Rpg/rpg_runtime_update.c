@@ -38,20 +38,6 @@ void RpgRuntime_UpdateWorld(RpgRuntimeUpdateContext *context, float deltaTime)
     if (standingBlockType == RPG_BLOCK_EFFECT_SLOW) player->moveSpeed *= 0.55f;
     RpgStage_SetSpatialReferenceMap(context->stage, context->currentMapIndex);
     if (context->acceptsPlayerInput) {
-        /* A conveyor blade reports its previous/current outer-boundary bounds
-           and reuses the generic moving-solid rider resolver before the normal
-           player physics pass. */
-        {
-            Rectangle conveyorPreviousBounds;
-            Rectangle conveyorCurrentBounds;
-            if (RpgWires_FindConveyorFloorMotion(context->wires,
-                    RpgCharacter_GetCollisionBounds(player), (float)GetTime() - deltaTime,
-                    (float)GetTime(), &conveyorPreviousBounds, &conveyorCurrentBounds)) {
-                RpgMovingSolid conveyorSolid = { conveyorPreviousBounds, conveyorCurrentBounds };
-                RpgMovingSolidSet conveyorSolids = { &conveyorSolid, 1 };
-                RpgCharacter_ResolveMovingSolidContacts(player, context->stage, &conveyorSolids);
-            }
-        }
         previousPosition = player->position;
         /* The stored map slots start at x=0, while the connected stage may extend
            into negative grid coordinates.  Permit one tile beyond both storage ends
@@ -64,50 +50,6 @@ void RpgRuntime_UpdateWorld(RpgRuntimeUpdateContext *context, float deltaTime)
                                                                      &movingSolids, minimumX, maximumX,
                                                                      !isHoldingPushBlock || player->isGrounded,
                                                                      !isHoldingPushBlock);
-        /* Conveyor fins are raised one-way floors: only a descending body that
-           crosses their top edge lands on them, while jumping upward passes through. */
-        {
-            RpgCharacter previousPlayer = *player;
-            float platformLandingY;
-            float wallPushX;
-            previousPlayer.position = previousPosition;
-            if (RpgWires_FindConveyorPlatformLanding(context->wires,
-                    RpgCharacter_GetCollisionBounds(&previousPlayer),
-                    RpgCharacter_GetCollisionBounds(player), &platformLandingY)) {
-                Rectangle playerBounds = RpgCharacter_GetCollisionBounds(player);
-                player->position.y += platformLandingY - (playerBounds.y + playerBounds.height);
-                player->verticalSpeed = 0.0f;
-                player->isGrounded = true;
-            }
-            if (RpgWires_FindConveyorWallPush(context->wires,
-                    RpgCharacter_GetCollisionBounds(&previousPlayer),
-                    RpgCharacter_GetCollisionBounds(player), &wallPushX)) {
-                float previousX = player->position.x;
-                player->position.x += wallPushX;
-                if (RpgStage_CheckSolidCollision(context->stage,
-                                                 RpgCharacter_GetCollisionBounds(player)))
-                    player->position.x = previousX;
-            }
-            {
-                RpgPhysicsSlope slope;
-                Rectangle bodyBounds = RpgCharacter_GetCollisionBounds(player);
-                if (RpgWires_FindConveyorSlopeBelow(context->wires, bodyBounds, &slope) &&
-                    RpgPhysics_SlideBoundsOnSlope(context->stage, &bodyBounds, slope, 1200.0f,
-                                                   deltaTime,
-                                                   NULL, NULL)) {
-                    player->position.x += bodyBounds.x - RpgCharacter_GetCollisionBounds(player).x;
-                    player->position.y += bodyBounds.y - RpgCharacter_GetCollisionBounds(player).y;
-                    player->verticalSpeed = 0.0f;
-                    player->isGrounded = true;
-                }
-            }
-        }
-        if (player->isGrounded) {
-            Vector2 conveyorVelocity = RpgWires_GetConveyorVelocityBelow(
-                context->wires, RpgCharacter_GetFootBounds(player));
-            RpgCharacter_ApplySurfaceMotion(player, context->stage, &movingSolids,
-                                             conveyorVelocity.x * deltaTime);
-        }
         if (isHoldingPushBlock) {
             (void)RpgMagnets_MoveHeldPushBlock(context->magnetRuntime, context->stage,
                                                 context->playerPushState, player,
@@ -149,8 +91,6 @@ void RpgRuntime_UpdateWorld(RpgRuntimeUpdateContext *context, float deltaTime)
     RpgMagnets_Update(context->magnetRuntime, context->stage, context->wires,
                       context->layout->magnetMetalSpeed, deltaTime,
                       context->playerPushState);
-    RpgMagnets_ApplyConveyors(context->magnetRuntime, context->stage, context->wires, deltaTime,
-                               context->playerPushState);
     /* Magnets, gravity and conveyors can also complete a socket alignment.
        Recheck after their movement so a block never loses its socket property
        merely because it was moving rather than being carried by the player. */

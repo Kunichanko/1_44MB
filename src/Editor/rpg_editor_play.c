@@ -26,6 +26,10 @@ void RpgEditorPlay_Begin(RpgEditorPlayRuntime *runtime, int mapIndex, const RpgL
     runtime->npc = *npc;
     runtime->runtimeNpcInspect = *npcInspect;
     runtime->stage = *stage;
+    /* Legacy movable FILE records can contain only the generated build path.
+       Give this runtime copy the same stable source identity as a newly
+       selected file before it is copied to the follower list. */
+    RpgReferenceObjects_EnsureSourcePaths(&runtime->stage.referenceObjects);
     runtime->dialogue = *dialogue;
     runtime->stage3Event = *stage3Event;
     runtime->areaEntryEvents = *areaEntryEvents;

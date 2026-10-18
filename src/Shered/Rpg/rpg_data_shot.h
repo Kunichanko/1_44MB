@@ -30,6 +30,11 @@ typedef struct RpgDataShot {
     unsigned long long totalBytes;
     // 発射直後のフォルダ内容を記録し、後から追加されたファイルだけを強調・ドロップ対象にする。
     bool folderStatsInitialized;
+    /* Connected by rpg_object_folder_monitor while this runtime object owns a
+       folder.  The monitor reports only a change; this object decides how to
+       reload its own properties. */
+    int folderMonitorHandle;
+    bool folderMonitorDirty;
     unsigned long long folderWriteStamp;
     int baselinePathCount;
     unsigned long long baselinePathHashes[RPG_DATA_SHOT_BASELINE_FILE_MAX];

@@ -1,6 +1,8 @@
 #ifndef RPG_STAGE_AUTHORITY_H
 #define RPG_STAGE_AUTHORITY_H
 
+#include <stdbool.h>
+
 /*
  * Stage data has exactly one authoring owner: the editor's static Settings
  * tree.  Play may only modify its own build/Stage runtime tree.  This small

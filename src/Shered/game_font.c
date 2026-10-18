@@ -104,6 +104,11 @@ static void GameFont_DrawBackend(const void *context, const char *text,
                                  Vector2 position, float fontSize, Color color)
 {
     (void)context;
+    /* Static UI labels and runtime text do not all pass through a single
+       pre-registration list.  Register an unseen UTF-8 glyph before its
+       first draw so raylib never substitutes it with '?'.  This reload is
+       only performed when the atlas actually gains a codepoint. */
+    if (isGameFontLoaded && text != NULL) (void)GameFont_AddText(text);
     if (isGameFontLoaded) {
         DrawTextEx(gameFont, text, position, fontSize, 1.0f, color);
         return;
@@ -115,6 +120,9 @@ static void GameFont_DrawBackend(const void *context, const char *text,
 static Vector2 GameFont_MeasureBackend(const void *context, const char *text, float fontSize)
 {
     (void)context;
+    /* Keep measuring and drawing on the exact same atlas.  In particular,
+       inspector labels are often measured before their first visible draw. */
+    if (isGameFontLoaded && text != NULL) (void)GameFont_AddText(text);
     if (isGameFontLoaded) return MeasureTextEx(gameFont, text, fontSize, 1.0f);
     return (Vector2){ (float)MeasureText(text, (int)fontSize), fontSize };
 }

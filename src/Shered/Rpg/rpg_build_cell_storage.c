@@ -84,6 +84,21 @@ bool RpgBuildCellStorage_EnsureMap(const RpgStage *stage, int mapIndex,
            RpgBuildCellCompact_EnsureMap(stage, mapIndex, backend);
 }
 
+bool RpgBuildCellStorage_IsMapGenerated(const RpgStage *stage, int mapIndex)
+{
+    return currentMode == RPG_BUILD_CELL_STORAGE_FOLDERS ?
+           RpgBuildCellFolders_IsMapGenerated(stage, mapIndex) :
+           RpgBuildCellCompact_IsMapGenerated(stage, mapIndex);
+}
+
+void RpgBuildCellStorage_InvalidateMap(int mapIndex)
+{
+    if (currentMode == RPG_BUILD_CELL_STORAGE_FOLDERS)
+        RpgBuildCellFolders_InvalidateMap(mapIndex);
+    else
+        RpgBuildCellCompact_InvalidateMap(mapIndex);
+}
+
 bool RpgBuildCellStorage_RewriteGeneratedMetadata(const RpgStage *stage,
                                                    const RpgBuildCellStorageBackend *backend)
 {
@@ -108,6 +123,13 @@ void RpgBuildCellStorage_GetGenerationProgress(const RpgStage *stage, int *gener
     if (currentMode == RPG_BUILD_CELL_STORAGE_FOLDERS)
         RpgBuildCellFolders_GetGenerationProgress(stage, generatedCells, totalCells, isPending);
     else RpgBuildCellCompact_GetGenerationProgress(stage, generatedCells, totalCells, isPending);
+}
+
+bool RpgBuildCellStorage_GetGenerationTarget(RpgGridCell *cell)
+{
+    return currentMode == RPG_BUILD_CELL_STORAGE_FOLDERS ?
+           RpgBuildCellFolders_GetGenerationTarget(cell) :
+           RpgBuildCellCompact_GetGenerationTarget(cell);
 }
 
 bool RpgBuildCellStorage_EnsureCell(RpgGridCell cell, int blockType,

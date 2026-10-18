@@ -63,14 +63,17 @@ enum {
     RPG_BLOCK_ATTACHMENT_SAVE_FLAG = 202,
     /* A top-mounted one-cell socket that locks a fully seated movable block. */
     RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET = 203,
-    RPG_BLOCK_PROPERTY_ITEM = 100,
+    /* Retired star-item slot.  Kept reserved so old stage data cannot become
+       another block type when loaded. */
+    RPG_BLOCK_PROPERTY_LEGACY_ITEM = 100,
     /* Reserved: the standalone wire palette entry was removed.  Do not reuse
        this value; existing stage files may still contain it. */
     RPG_BLOCK_PROPERTY_WIRE = 101,
     RPG_BLOCK_PROPERTY_RECEIVER = 102,
     /* 通常イベントはブロックモードのパレットから、マスに沿って配置する。 */
     RPG_BLOCK_PROPERTY_MAP_EVENT = 103,
-    /* Applies a directional conveyor path to ordinary blocks. */
+    /* Retired conveyor palette value.  Do not reuse; old palette files may
+       still contain it and are sanitized on load. */
     RPG_BLOCK_PROPERTY_CONVEYOR = 104,
     /* ビルド出力から対応フォルダが失われたマスを表す、実行時専用の壁。 */
     RPG_BLOCK_BUILD_MISSING = 300
@@ -140,7 +143,6 @@ bool RpgBlockInventory_IsAttachment(int blockType);
    owner: it gets one block folder and follows normal missing-cell handling. */
 bool RpgBlockInventory_IsAttachmentBlock(int blockType);
 bool RpgBlockInventory_IsMapEventProperty(int blockType);
-bool RpgBlockInventory_IsConveyorProperty(int blockType);
 bool RpgBlockInventory_IsOneWayPlatform(int blockType);
 bool RpgBlockInventory_IsMagnetBlock(int blockType);
 bool RpgBlockInventory_IsMagnetActive(int blockType);

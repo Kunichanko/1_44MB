@@ -19,7 +19,8 @@ typedef enum RpgZipperMovableKind {
     RPG_ZIPPER_MOVABLE_NONE = 0,
     RPG_ZIPPER_MOVABLE_DATA_SHOT,
     RPG_ZIPPER_MOVABLE_DYNAMIC_BLOCK,
-    RPG_ZIPPER_MOVABLE_REFERENCE_FILE
+    RPG_ZIPPER_MOVABLE_REFERENCE_FILE,
+    RPG_ZIPPER_MOVABLE_REFERENCE_FOLDER
 } RpgZipperMovableKind;
 
 /* ZipperがInboxへ保持しているフォルダ。現在くっついている対象とは独立して管理する。 */

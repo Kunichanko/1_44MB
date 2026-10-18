@@ -15,9 +15,8 @@ static const RpgBlockInventory defaultInventories[] = {
     { "Effect", { RPG_BLOCK_DOOR_CLOSED_TOP, RPG_BLOCK_KEY_DOOR_CLOSED_TOP,
                     RPG_BLOCK_SIGNAL_SHRINK_ROOT_HORIZONTAL, RPG_BLOCK_EFFECT_MAGNET_OFF }, 4, false, false,
       RPG_BLOCK_INVENTORY_BORDER_RED },
-    /* Paths are owned by their representative block, never placed alone. */
-    { "Item Property", { RPG_BLOCK_PROPERTY_ITEM, RPG_BLOCK_PROPERTY_MAP_EVENT,
-                           RPG_BLOCK_PROPERTY_CONVEYOR }, 3, true, false,
+    /* Paths are owned by their source attachment, never placed alone. */
+    { "Path Property", { RPG_BLOCK_PROPERTY_MAP_EVENT }, 1, true, false,
       RPG_BLOCK_INVENTORY_BORDER_BLUE },
     { "Attachment Edge", { RPG_BLOCK_ATTACHMENT_DATA_BUTTON,
                              RPG_BLOCK_PROPERTY_RECEIVER }, 2, false, true,
@@ -37,8 +36,7 @@ static RpgBlockInventory inventories[RPG_BLOCK_INVENTORY_MAX_PALETTES] = {
     { "Effect", { RPG_BLOCK_DOOR_CLOSED_TOP, RPG_BLOCK_KEY_DOOR_CLOSED_TOP,
                     RPG_BLOCK_SIGNAL_SHRINK_ROOT_HORIZONTAL, RPG_BLOCK_EFFECT_MAGNET_OFF }, 4, false, false,
       RPG_BLOCK_INVENTORY_BORDER_RED },
-    { "Item Property", { RPG_BLOCK_PROPERTY_ITEM, RPG_BLOCK_PROPERTY_MAP_EVENT,
-                           RPG_BLOCK_PROPERTY_CONVEYOR }, 3, true, false,
+    { "Path Property", { RPG_BLOCK_PROPERTY_MAP_EVENT }, 1, true, false,
       RPG_BLOCK_INVENTORY_BORDER_BLUE },
     { "Attachment Edge", { RPG_BLOCK_ATTACHMENT_DATA_BUTTON,
                              RPG_BLOCK_PROPERTY_RECEIVER }, 2, false, true,
@@ -197,7 +195,11 @@ static void SetPaletteBlocks(int index, const char *text)
         char *end = NULL;
         long value = strtol(text, &end, 10);
         if (end == text) break;
-        inventory->blockTypes[inventory->count++] = (int)value;
+        /* Drop retired palette entries while retaining every other
+           user-customised slot. */
+        if ((int)value != RPG_BLOCK_PROPERTY_LEGACY_ITEM &&
+            (int)value != RPG_BLOCK_PROPERTY_CONVEYOR)
+            inventory->blockTypes[inventory->count++] = (int)value;
         text = *end == ',' ? end + 1 : end;
     }
 }
@@ -348,11 +350,6 @@ bool RpgBlockInventory_IsMapEventProperty(int blockType)
     return blockType == RPG_BLOCK_PROPERTY_MAP_EVENT;
 }
 
-bool RpgBlockInventory_IsConveyorProperty(int blockType)
-{
-    return blockType == RPG_BLOCK_PROPERTY_CONVEYOR;
-}
-
 bool RpgBlockInventory_IsOneWayPlatform(int blockType)
 {
     return blockType == RPG_BLOCK_ONE_WAY_PLATFORM;
@@ -400,9 +397,9 @@ RpgBlockStructureKind RpgBlockInventory_GetStructureKind(int blockType)
     if (RpgBlockInventory_IsAttachment(blockType)) return RPG_BLOCK_STRUCTURE_ATTACHMENT;
     if (RpgBlockInventory_IsReferenceObject(blockType) || blockType == RPG_BLOCK_IMAGE_OBJECT)
         return RPG_BLOCK_STRUCTURE_REFERENCE;
-    if (blockType == RPG_BLOCK_PROPERTY_ITEM || blockType == RPG_BLOCK_PROPERTY_WIRE ||
-        blockType == RPG_BLOCK_PROPERTY_RECEIVER || RpgBlockInventory_IsMapEventProperty(blockType) ||
-        RpgBlockInventory_IsConveyorProperty(blockType)) return RPG_BLOCK_STRUCTURE_PROPERTY;
+    if (blockType == RPG_BLOCK_PROPERTY_LEGACY_ITEM || blockType == RPG_BLOCK_PROPERTY_WIRE ||
+        blockType == RPG_BLOCK_PROPERTY_RECEIVER || RpgBlockInventory_IsMapEventProperty(blockType))
+        return RPG_BLOCK_STRUCTURE_PROPERTY;
     {
         const RpgEffectShape *shape = RpgBlockInventory_GetEffectShape(blockType);
         if (shape != NULL)

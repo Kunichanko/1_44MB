@@ -166,13 +166,18 @@ bool RpgStaticObjectDrop_Expand(RpgStage *stage, int stageNumber, int row, int c
     memset(used, 0, sizeof(used));
     for (int index = 0; index < fileCount; index++) {
         char copied[RPG_STAGE_PATH_LENGTH]; wchar_t wideFile[RPG_STAGE_PATH_LENGTH]; int targetRow, targetColumn;
+        int objectId = stage->referenceObjects.nextId;
         if (!FindAir(stage, row, column, used, &targetRow, &targetColumn) ||
             !RpgStageStorage_CopyReferenceFileToBuild(stageNumber, targetRow, targetColumn, files[index], copied, (int)sizeof(copied)) ||
+            /* Drop consumes the original object file.  Preserve an
+               ID-addressed static source first; otherwise the movable FILE
+               could only be repaired by selecting it in the inspector. */
+            !RpgStageStorage_CopyReferenceFileToStaticSource(stageNumber, objectId, copied) ||
             !ToWide(files[index], wideFile, RPG_STAGE_PATH_LENGTH) || DeleteFileW(wideFile) == 0) return false;
         used[targetRow][targetColumn] = true;
-        (void)RpgReferenceObjects_Add(&stage->referenceObjects, RPG_REFERENCE_OBJECT_FILE,
-                                      RpgStage_GetWorldPositionForCell(stage, targetRow, targetColumn),
-                                      copied, 0);
+        if (!RpgReferenceObjects_Add(&stage->referenceObjects, RPG_REFERENCE_OBJECT_FILE,
+                                     RpgStage_GetWorldPositionForCell(stage, targetRow, targetColumn),
+                                     copied, objectId)) return false;
     }
     { char info[RPG_STAGE_PATH_LENGTH]; wchar_t wideInfo[RPG_STAGE_PATH_LENGTH];
       if (snprintf(info, sizeof(info), "%s\\object_info.txt", folder) > 0 && ToWide(info, wideInfo, RPG_STAGE_PATH_LENGTH)) DeleteFileW(wideInfo); }

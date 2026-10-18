@@ -13,6 +13,10 @@ bool RpgBuildCellCompact_CreatePreview(const RpgStage *stage, int startMapIndex,
 void RpgBuildCellCompact_Update(const RpgBuildCellStorageBackend *backend);
 bool RpgBuildCellCompact_EnsureMap(const RpgStage *stage, int mapIndex,
                                    const RpgBuildCellStorageBackend *backend);
+bool RpgBuildCellCompact_IsMapGenerated(const RpgStage *stage, int mapIndex);
+/* Forget only one area's materialization state.  The shared CSV cache stays
+   alive; the next EnsureMap republishes that area's physical folders. */
+void RpgBuildCellCompact_InvalidateMap(int mapIndex);
 /* Applies a completed preview's ordinary-cell changes in one metadata write.
    It intentionally does not create/remove special cell folders. */
 bool RpgBuildCellCompact_RewriteGeneratedMetadata(const RpgStage *stage,
@@ -24,6 +28,8 @@ void RpgBuildCellCompact_BeginMetadataBatch(void);
 bool RpgBuildCellCompact_EndMetadataBatch(const RpgBuildCellStorageBackend *backend);
 void RpgBuildCellCompact_GetGenerationProgress(const RpgStage *stage, int *generatedCells,
                                                int *totalCells, bool *isPending);
+/* Returns the next cell scheduled for incremental preview generation. */
+bool RpgBuildCellCompact_GetGenerationTarget(RpgGridCell *cell);
 bool RpgBuildCellCompact_UsesMetadataForBlock(int blockType);
 bool RpgBuildCellCompact_ReadAvailability(bool available[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS],
                                           const RpgBuildCellStorageBackend *backend);

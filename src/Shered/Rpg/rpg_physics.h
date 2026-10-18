@@ -28,10 +28,10 @@ typedef struct RpgPhysicsBody {
     Rectangle localBounds;
 } RpgPhysicsBody;
 
-/* A mover may climb a ledge no higher than half a map tile while it is
+/* A mover may climb a ledge no higher than 8px while it is
    grounded.  Keep this in the shared resolver so the player, characters and
    movable blocks all agree on what counts as a traversable step. */
-enum { RPG_PHYSICS_MAX_STEP_HEIGHT = RPG_STAGE_TILE_SIZE / 2 };
+enum { RPG_PHYSICS_MAX_STEP_HEIGHT = 8 };
 
 /* localBounds is relative to position.  Static stage collision, one-way-floor
    landing, and an optional runtime-obstacle test use this exact same path. */

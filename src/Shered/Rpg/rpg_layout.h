@@ -4,7 +4,8 @@
 
 #include "raylib.h"
 
-enum { RPG_LAYOUT_BACKGROUND_PATH_LENGTH = 512 };
+enum { RPG_LAYOUT_BACKGROUND_PATH_LENGTH = 512,
+       RPG_LAYOUT_KEY_DOOR_FAILURE_TEXT_LENGTH = 192 };
 
 typedef struct RpgLayout {
     Vector2 playerPosition;
@@ -20,6 +21,9 @@ typedef struct RpgLayout {
     float groundHue;
     float groundSaturation;
     float groundLightness;
+    /* Shared visual settings for every block socket in this stage. */
+    float socketRightLightAngle;
+    float socketLightOpacity;
     /* ステージ固有の見た目。0.15〜1.00で背景とブロックを個別に暗くできる。 */
     float backgroundBrightness;
     float blockBrightness;
@@ -34,6 +38,8 @@ typedef struct RpgLayout {
     float zipperFolderReturnAnimationDelay;
     /* Gで取得したFile.pngの追従時スケール。全ステージ共有のRuntime設定として保存する。 */
     float referenceFollowerScale;
+    /* Shared text shown whenever any key door rejects an interaction. */
+    char keyDoorFailureText[RPG_LAYOUT_KEY_DOOR_FAILURE_TEXT_LENGTH];
 } RpgLayout;
 
 RpgLayout RpgLayout_Default(void);

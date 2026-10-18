@@ -266,6 +266,9 @@ static bool CreateStageBuild(int stageNumber, RpgStage *stage, const RpgAttachme
 #ifdef _WIN32
     char buildPath[1200];
     RpgStageBuild_Close();
+    /* Keep movable FILE identities independent from old build-copy paths
+       before the build tree is cleared and recreated. */
+    RpgReferenceObjects_EnsureSourcePaths(&stage->referenceObjects);
     /* 参照Fileの復元失敗は、そのFileだけの問題として扱い、Play全体は止めない。 */
     (void)RpgStageStorage_RepairReferenceFileCopies(stageNumber, stage);
     if (!RpgObjectFolders_BeginStageBuild(stageNumber, stage, attachments, receivers, wires, playerStartPosition,
@@ -309,6 +312,7 @@ static bool ResumeStageBuildForKind(int stageNumber, RpgStage *stage, bool isEdi
     char buildPath[1200];
     if (stage == NULL) return false;
     RpgStageBuild_Close();
+    RpgReferenceObjects_EnsureSourcePaths(&stage->referenceObjects);
     /* originalBlocks は静的定義なので、build の欠損状態を反映する前に控える。 */
     memcpy(watcher.originalBlocks, stage->blocks, sizeof(watcher.originalBlocks));
     if (!(isEditorPreview ? RpgObjectFolders_ResumeEditorPreviewBuild(stageNumber, stage, buildPath,

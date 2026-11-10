@@ -1,0 +1,6 @@
+type=1
+cell_row=9
+cell_column=91
+x=2928.0
+y=304.0
+drop_origin=air

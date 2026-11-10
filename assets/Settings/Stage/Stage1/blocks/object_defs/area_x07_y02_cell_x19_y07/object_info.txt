@@ -1,0 +1,5 @@
+type=1
+cell_row=7
+cell_column=339
+x=10864.0
+y=240.0

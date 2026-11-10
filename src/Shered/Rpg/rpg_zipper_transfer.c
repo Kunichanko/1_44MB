@@ -19,11 +19,9 @@ static void SetBlockMissingState(RpgStage *stage, const RpgZipperHeldObject *tar
     shape = RpgBlockInventory_GetEffectShape(target->blockType);
     if (shape == NULL || shape->rootType != target->blockType) {
         if (missing) {
-            stage->missingBlockTypes[cell.row][cell.column] = target->blockType;
-            stage->blocks[cell.row][cell.column] = RPG_BLOCK_BUILD_MISSING;
-        } else if (stage->blocks[cell.row][cell.column] == RPG_BLOCK_BUILD_MISSING) {
-            stage->blocks[cell.row][cell.column] = target->blockType;
-            stage->missingBlockTypes[cell.row][cell.column] = 0;
+            RpgStage_SetCellError(stage, cell.row, cell.column, target->blockType);
+        } else if (RpgStage_IsCellError(stage, cell.row, cell.column)) {
+            RpgStage_SetCellBlock(stage, cell.row, cell.column, target->blockType);
         }
         return;
     }
@@ -33,22 +31,20 @@ static void SetBlockMissingState(RpgStage *stage, const RpgZipperHeldObject *tar
         int column = cell.column + part->offsetX;
         if (row < 0 || row >= RPG_STAGE_ROWS || column < 0 || column >= RPG_STAGE_WORLD_COLUMNS) continue;
         if (missing) {
-            stage->missingBlockTypes[row][column] = part->blockType;
-            stage->blocks[row][column] = RPG_BLOCK_BUILD_MISSING;
-        } else if (stage->blocks[row][column] == RPG_BLOCK_BUILD_MISSING) {
-            stage->blocks[row][column] = part->blockType;
-            stage->missingBlockTypes[row][column] = 0;
+            RpgStage_SetCellError(stage, row, column, part->blockType);
+        } else if (RpgStage_IsCellError(stage, row, column)) {
+            RpgStage_SetCellBlock(stage, row, column, part->blockType);
         }
     }
 }
 
 static void SetCompositeOwnerHeld(RpgZipperTransferContext *context, RpgGridCell cell, bool held)
 {
-    RpgGridCell cells[RPG_STAGE_ROWS * RPG_STAGE_COLUMNS];
+    RpgGridCell cells[RPG_STAGE_ROWS * RPG_STAGE_WORLD_COLUMNS];
     int count = 0;
     if (context == NULL || context->stage == NULL) return;
     if (!RpgStage_GetCompositeCellsAtCell(context->stage, cell.row, cell.column, cells,
-                                           RPG_STAGE_ROWS * RPG_STAGE_COLUMNS, &count)) {
+                                           RPG_STAGE_ROWS * RPG_STAGE_WORLD_COLUMNS, &count)) {
         cells[0] = cell;
         count = 1;
     }
@@ -62,13 +58,20 @@ static void SetCompositeOwnerHeld(RpgZipperTransferContext *context, RpgGridCell
     }
 }
 
+static void MarkBlockMetadataRefresh(RpgZipperTransferContext *context)
+{
+    if (context != NULL && context->didRefreshBlockMetadata != NULL)
+        *context->didRefreshBlockMetadata = true;
+}
+
 static bool EatMovable(RpgZipperTransferContext *context, const RpgZipperHeldObject *target)
 {
     switch (target->movableKind) {
     case RPG_ZIPPER_MOVABLE_DATA_SHOT:
         if (context->dataShots == NULL || target->dataShotIndex < 0 ||
             target->dataShotIndex >= RPG_DATA_SHOT_MAX_COUNT) return false;
-        if (!RpgObjectFolder_MoveDataShotToZipper(&context->dataShots->entries[target->dataShotIndex])) return false;
+        if (!RpgObjectFolder_MoveDataShotToZipper(&context->dataShots->entries[target->dataShotIndex],
+                                                  context->attachments)) return false;
         context->dataShots->entries[target->dataShotIndex].isZipperHeld = true;
         return true;
     case RPG_ZIPPER_MOVABLE_DYNAMIC_BLOCK:
@@ -133,6 +136,7 @@ static bool CompleteSpitMovable(RpgZipperTransferContext *context, const RpgZipp
         if (!RpgObjectFolder_ReturnDataShotFromZipper(&context->dataShots->entries[target->dataShotIndex])) return false;
         (void)RpgObjectFolder_RestoreDataShotFromMetadata(&context->dataShots->entries[target->dataShotIndex]);
         context->dataShots->entries[target->dataShotIndex].isZipperHeld = false;
+        context->dataShots->entries[target->dataShotIndex].folderMonitorDirty = true;
         return true;
     case RPG_ZIPPER_MOVABLE_DYNAMIC_BLOCK:
         if (context->magnetRuntime == NULL || target->dynamicBlockIndex < 0 ||
@@ -157,14 +161,25 @@ static bool CompleteSpitMovable(RpgZipperTransferContext *context, const RpgZipp
     }
 }
 
-bool RpgZipperTransfer_Eat(RpgZipperTransferContext *context, const RpgZipperHeldObject *target)
+bool RpgZipperTransfer_Eat(RpgZipperTransferContext *context, RpgZipperHeldObject *target)
 {
     if (context == NULL || target == NULL) return false;
     if (target->kind == RPG_ZIPPER_HELD_OBJECT_BLOCK) {
+        RpgBlockTransferMetadata metadata;
+        /* A door/stretch block is one object even when the editor's compact
+           preview still has its component folders beside one another.  Make
+           that one object-folder first; the transfer below then has exactly
+           the same path for ordinary and multi-cell blocks. */
+        if (!RpgObjectFolders_EnsureCompositeFolder(context->stage, target->blockCell)) return false;
         if (!RpgObjectFolder_MoveBlockWithAttachmentsToZipper(
                 &(RpgObjectFolder){ .cell = target->blockCell }, target->blockType,
-                context->attachments, context->receivers, context->wires))
+                context->attachments, context->receivers, context->wires, &metadata))
             return false;
+        /* The object folder is the source of truth.  The held record remains
+           a fast queue/cache entry, but only after it has been populated from
+           the verified object_info snapshot that moved into Zipper. */
+        target->blockCell = metadata.cell;
+        target->blockType = metadata.blockType;
         /* A socket is metadata of this parent.  Once the parent enters
            Zipper, a block seated in that socket must no longer remain frozen
            against an attachment which is no longer present in the world. */
@@ -175,22 +190,45 @@ bool RpgZipperTransfer_Eat(RpgZipperTransferContext *context, const RpgZipperHel
     return target->kind == RPG_ZIPPER_HELD_OBJECT_MOVABLE && EatMovable(context, target);
 }
 
-bool RpgZipperTransfer_BeginSpit(RpgZipperTransferContext *context, const RpgZipperHeldObject *target)
+bool RpgZipperTransfer_BeginSpit(RpgZipperTransferContext *context, RpgZipperHeldObject *target)
 {
     if (context == NULL || target == NULL) return false;
-    if (target->kind == RPG_ZIPPER_HELD_OBJECT_BLOCK)
+    if (target->kind == RPG_ZIPPER_HELD_OBJECT_BLOCK) {
+        RpgBlockTransferMetadata metadata;
+        RpgObjectFolder folder = { .cell = target->blockCell };
+        /* The Inbox object_info is authoritative.  The queue entry is only a
+           cache, so a valid metadata mismatch must refresh that cache rather
+           than make spit impossible after a filesystem update. */
+        if (!RpgObjectFolder_ReadBlockTransferMetadata(&folder, target->blockType, true, &metadata)) return false;
+        if (!RpgObjectFolder_BlockTransferMetadataMatches(&metadata, target->blockCell,
+                                                           target->blockType))
+            MarkBlockMetadataRefresh(context);
+        target->blockCell = metadata.cell;
+        target->blockType = metadata.blockType;
         return RpgObjectFolder_BeginReturnBlockFromZipper(&(RpgObjectFolder){ .cell = target->blockCell },
                                                            target->blockType);
+    }
     return target->kind == RPG_ZIPPER_HELD_OBJECT_MOVABLE && BeginSpitMovable(context, target);
 }
 
-bool RpgZipperTransfer_CompleteSpit(RpgZipperTransferContext *context, const RpgZipperHeldObject *target)
+bool RpgZipperTransfer_CompleteSpit(RpgZipperTransferContext *context, RpgZipperHeldObject *target)
 {
     if (context == NULL || target == NULL) return false;
     if (target->kind == RPG_ZIPPER_HELD_OBJECT_BLOCK) {
         bool returned = RpgObjectFolder_ReturnBlockFromZipper(&(RpgObjectFolder){ .cell = target->blockCell },
                                                                target->blockType);
         if (returned) {
+            RpgBlockTransferMetadata metadata;
+            RpgObjectFolder folder = { .cell = target->blockCell };
+            /* Validate after the staging move as well.  If metadata changed
+               during the visual return, it remains the source of truth. */
+            if (!RpgObjectFolder_ReadBlockTransferMetadata(&folder, target->blockType, false, &metadata))
+                return false;
+            if (!RpgObjectFolder_BlockTransferMetadataMatches(&metadata, target->blockCell,
+                                                               target->blockType))
+                MarkBlockMetadataRefresh(context);
+            target->blockCell = metadata.cell;
+            target->blockType = metadata.blockType;
             SetBlockMissingState(context->stage, target, false);
             SetCompositeOwnerHeld(context, target->blockCell, false);
         }

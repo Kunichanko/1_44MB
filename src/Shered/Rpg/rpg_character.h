@@ -20,6 +20,8 @@ typedef struct RpgCharacter {
     bool isGrounded;
     float moveSpeed;
     float scale;
+    /* Maximum jump apex measured in stage/world pixels. */
+    float jumpHeight;
     float animationElapsed;
     bool isMoving;
     /* EXE スプライトの不透明ピクセル範囲を物理判定に使う主人公だけ true。 */

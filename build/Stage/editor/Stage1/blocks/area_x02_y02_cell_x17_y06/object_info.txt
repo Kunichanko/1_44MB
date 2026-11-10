@@ -1,3 +1,5 @@
 type=38
+cell_row=6
+cell_column=177
 x=5680.0
 y=208.0

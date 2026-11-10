@@ -18,7 +18,8 @@ typedef enum RpgPlayerInteractionAction {
     RPG_PLAYER_INTERACTION_ADVANCE_DIALOGUE,
     RPG_PLAYER_INTERACTION_START_NPC_DIALOGUE,
     RPG_PLAYER_INTERACTION_USE_KEY_DOOR,
-    RPG_PLAYER_INTERACTION_OPEN_REFERENCE
+    RPG_PLAYER_INTERACTION_OPEN_REFERENCE,
+    RPG_PLAYER_INTERACTION_OPEN_REFERENCE_FOLDER
 } RpgPlayerInteractionAction;
 
 typedef bool (*RpgPlayerInteractionExecuteFn)(void *userData,
@@ -33,6 +34,7 @@ typedef struct RpgPlayerInteractionInput {
     bool dialogueActive;
     bool canCollectReference;
     bool canStoreReference;
+    bool canOpenReferenceFolder;
     bool canTalkToNpc;
     bool canUseKeyDoor;
     int movableTargetId;

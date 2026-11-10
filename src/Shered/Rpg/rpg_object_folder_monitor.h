@@ -22,6 +22,10 @@ void RpgObjectFolderMonitor_Disconnect(int *handle);
 bool RpgObjectFolderMonitor_Poll(int handle);
 /* Shared runtime tick: dispatches changes for every connected object once. */
 void RpgObjectFolderMonitor_PollAll(void);
+/* Local NotifyLocalChange callbacks deliberately do not advance this native
+ * serial; it is for operation-level diagnostics only. */
+bool RpgObjectFolderMonitor_IsWatching(int handle);
+unsigned int RpgObjectFolderMonitor_GetNativeChangeSerial(int handle);
 /* Notify registered listeners immediately after this process has changed a
  * directory.  This complements (but does not replace) the asynchronous
  * Win32 notification, so object state never has to wait for a later frame. */

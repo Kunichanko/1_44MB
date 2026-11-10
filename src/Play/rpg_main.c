@@ -523,8 +523,9 @@ static void DrawRpgWorld(const RpgCharacter *player, const RpgCharacter *npc,
                                      Fade(WHITE, 0.28f));
     RpgMapEvents_Draw(events);
     RpgStage_DrawEffects(stage);
-    RpgWires_Draw(wires, stage);
-    RpgWires_DrawElectric(wires, dataShots, 0, RPG_STAGE_WORLD_COLUMNS);
+    RpgWires_Draw(wires, stage, receivers);
+    RpgWires_DrawElectric(wires, dataShots, receivers, 0, RPG_STAGE_WORLD_COLUMNS);
+    RpgStage_DrawUnavailableOverlay(stage, false, blockBrightness);
     RpgReceivers_Draw(receivers);
     RpgAttachments_Draw(attachments);
     RpgDataShots_Draw(dataShots);
@@ -732,6 +733,7 @@ int main(void)
     npc.position = (Vector2){ -RPG_STAGE_WORLD_COLUMNS * RPG_STAGE_TILE_SIZE, -RPG_STAGE_TILE_SIZE };
     player.moveSpeed = layout.playerMoveSpeed;
     player.scale = layout.playerScale;
+    player.jumpHeight = layout.playerJumpHeight;
     npc.scale = layout.npcScale;
     int dialogueIndex = -1;
     int stage3IntroIndex = -1;
@@ -880,6 +882,7 @@ int main(void)
                 RpgCharacter_SetUsesPlayerSpriteCollision(&player, true);
                 player.moveSpeed = layout.playerMoveSpeed;
                 player.scale = layout.playerScale;
+                player.jumpHeight = layout.playerJumpHeight;
                 npc = RpgCharacter_Create(layout.npcPosition, PURPLE, DARKBROWN);
                 npc.position = (Vector2){ -RPG_STAGE_WORLD_COLUMNS * RPG_STAGE_TILE_SIZE, -RPG_STAGE_TILE_SIZE };
                 npc.scale = layout.npcScale;
@@ -1118,9 +1121,6 @@ int main(void)
 #endif
         runtimeMovementContext.updatesWorldSystems = true;
         RpgRuntime_UpdateWorld(&runtimeMovementContext, GetFrameTime());
-        RpgObjectFolders_UpdateDataShotLifetimes(&dataShots, &attachments, &referenceDrops);
-        // 電気化で失われた弾本体のフォルダを同フレームで処理し、追加ファイルをドロップする。
-        RpgObjectFolders_UpdateDataShotLifetimes(&dataShots, &attachments, &referenceDrops);
         /* 旧実装は同じ入力を二重処理しないよう無効化し、下の共通ランタイムへ一本化する。 */
 #if 0
         if (RpgObjectFolder_BeginZipperCommandRequest()) {

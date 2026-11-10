@@ -3,6 +3,7 @@
 #include "rpg_stage_storage.h"
 #include "rpg_stage_authority.h"
 #include "rpg_block_inventory.h"
+#include "rpg_composite_normalizer.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -418,6 +419,9 @@ static bool LoadLegacyStageDataFromDirectory(const char *directory, RpgStageData
     LOAD_DIRECTORY_FILE("rpg_signal_blocks.cfg", RpgSignalBlocks_Load, &data->signalBlocks);
     LOAD_DIRECTORY_FILE("rpg_map_events.cfg", RpgMapEvents_Load, &data->mapEvents);
 #undef LOAD_DIRECTORY_FILE
+    /* The monolithic reader can still encounter old standalone magnet
+       records.  Normalize only after every cell source has been read. */
+    RpgCompositeNormalizer_NormalizeOnStageLoad(&data->stage);
     RpgAttachments_MigrateLegacyButtons(&data->attachments, &data->stage);
     RpgAttachments_MaterializeBlockCells(&data->attachments, &data->stage);
     RpgWires_RemoveBroken(&data->wires, &data->stage);
@@ -720,6 +724,7 @@ static void ExtractAreaData(const RpgStageData *source, int areaId, RpgStageData
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int local = 0; local < RPG_STAGE_COLUMNS; local++) {
         int column = firstColumn + local;
         area->stage.blocks[row][column] = source->stage.blocks[row][column];
+        area->stage.cellStates[row][column] = source->stage.cellStates[row][column];
         memcpy(area->stage.referencePaths[row][column], source->stage.referencePaths[row][column],
                RPG_STAGE_REFERENCE_PATH_LENGTH);
     }
@@ -735,12 +740,6 @@ static void ExtractAreaData(const RpgStageData *source, int areaId, RpgStageData
             area->stage.compositeObjects[area->stage.compositeObjectCount++] = *object;
         if (object->id >= area->stage.nextCompositeObjectId)
             area->stage.nextCompositeObjectId = object->id + 1;
-    }
-    for (int index = 0; index < source->stage.magnetCount; index++) {
-        const RpgMagnetObject *magnet = &source->stage.magnets[index];
-        if (magnet->rootColumn / RPG_STAGE_COLUMNS == areaId &&
-            area->stage.magnetCount < RPG_MAGNET_OBJECT_MAX_COUNT)
-            area->stage.magnets[area->stage.magnetCount++] = *magnet;
     }
     /* Persist the representative cell, even when loading an old record that
        named one of the door's component cells. */
@@ -823,6 +822,7 @@ static void MergeAreaData(RpgStageData *target, const RpgStageData *area, int ar
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int local = 0; local < RPG_STAGE_COLUMNS; local++) {
         int column = firstColumn + local;
         target->stage.blocks[row][column] = area->stage.blocks[row][column];
+        target->stage.cellStates[row][column] = area->stage.cellStates[row][column];
         memcpy(target->stage.referencePaths[row][column], area->stage.referencePaths[row][column], RPG_STAGE_REFERENCE_PATH_LENGTH);
     }
 #define APPEND_ALL(targetCollection, sourceCollection, maxCount) do { \
@@ -848,9 +848,6 @@ static void MergeAreaData(RpgStageData *target, const RpgStageData *area, int ar
         if (object.id >= target->stage.nextCompositeObjectId)
             target->stage.nextCompositeObjectId = object.id + 1;
     }
-    for (int index = 0; index < area->stage.magnetCount &&
-         target->stage.magnetCount < RPG_MAGNET_OBJECT_MAX_COUNT; index++)
-        target->stage.magnets[target->stage.magnetCount++] = area->stage.magnets[index];
     if (target->stage.imageObjects.nextId < area->stage.imageObjects.nextId)
         target->stage.imageObjects.nextId = area->stage.imageObjects.nextId;
     for (int index = 0; index < area->stage.referenceObjects.count; index++) {
@@ -860,6 +857,34 @@ static void MergeAreaData(RpgStageData *target, const RpgStageData *area, int ar
             snprintf(target->stage.referenceObjects.entries[target->stage.referenceObjects.count - 1].sourcePath,
                      RPG_STAGE_REFERENCE_PATH_LENGTH, "%s", object->sourcePath);
     }
+}
+
+/* image4 did not serialize an object ID.  With per-area files, each area
+ * therefore restarted at ID 1 and the assembled stage could contain several
+ * different images with the same folder identity.  Make the in-memory stage
+ * valid even for old saves; image5 preserves these IDs on the next save. */
+static bool NormalizeImageObjectIds(RpgImageObjects *objects)
+{
+    unsigned int nextId = 1;
+    bool changed = false;
+    if (objects == NULL) return false;
+    for (int index = 0; index < objects->count; index++) {
+        RpgImageObject *object = &objects->entries[index];
+        bool duplicate = object->id == 0;
+        for (int earlier = 0; !duplicate && earlier < index; earlier++)
+            if (objects->entries[earlier].id == object->id) duplicate = true;
+        if (duplicate) {
+            while (RpgImageObjects_FindById(objects, nextId) >= 0) nextId++;
+            object->id = nextId;
+            changed = true;
+        }
+        if (object->id >= nextId) nextId = object->id + 1;
+    }
+    if (objects->nextId != nextId) {
+        objects->nextId = nextId;
+        changed = true;
+    }
+    return changed;
 }
 
 /* RpgStage_Load converts the retired `reference row column path` records to
@@ -1086,8 +1111,11 @@ static bool LoadStageDataFromDirectory(const char *directory, RpgStageData *data
        game, editor preview and Continue share the same input. */
     RpgReferenceObjects_EnsureSourcePaths(&data->stage.referenceObjects);
     bool repairedDuplicateFolders = NormalizeDuplicateReferenceFolders(&data->stage.referenceObjects);
-    RpgStage_NormalizeMagnets(&data->stage);
-    RpgStage_NormalizeCompositeObjects(&data->stage);
+    bool repairedDuplicateImageIds = NormalizeImageObjectIds(&data->stage.imageObjects);
+    /* This is the common start/load boundary for both the editor and game.
+       All areas are already merged, so a magnet rectangle can be converted
+       once into the same composite record used by every multi-cell object. */
+    RpgCompositeNormalizer_NormalizeOnStageLoad(&data->stage);
     RpgStage_NormalizeKeyDoors(&data->stage);
     RpgAttachments_MigrateLegacyButtons(&data->attachments, &data->stage);
     RpgAttachments_MaterializeBlockCells(&data->attachments, &data->stage);
@@ -1095,7 +1123,7 @@ static bool LoadStageDataFromDirectory(const char *directory, RpgStageData *data
     RpgReceivers_RemoveBroken(&data->receivers, &data->stage);
     RpgAttachments_RemoveBroken(&data->attachments, &data->stage);
     RpgSignalBlocks_RemoveBroken(&data->signalBlocks, &data->stage);
-    if ((legacyAreaLayout || repairedDuplicateFolders) &&
+    if ((legacyAreaLayout || repairedDuplicateFolders || repairedDuplicateImageIds) &&
         RpgStageStorage_GetDomain() == RPG_STAGE_STORAGE_SETTINGS)
         return SaveStageDataToDirectory(directory, data);
     return true;
@@ -1488,7 +1516,15 @@ static void SetCatalogSavedState(RpgStageCatalog *catalog)
     catalog->savedCount = catalog->count;
     catalog->savedCurrentNumber = catalog->currentNumber;
     memcpy(catalog->savedNumbers, catalog->numbers, sizeof(catalog->numbers));
+    memcpy(catalog->savedDisplayNames, catalog->displayNames, sizeof(catalog->displayNames));
     catalog->deletedCount = 0;
+}
+
+static void SetCatalogDefaultDisplayName(RpgStageCatalog *catalog, int index)
+{
+    if (catalog == NULL || index < 0 || index >= RPG_STAGE_CATALOG_MAX_COUNT) return;
+    snprintf(catalog->displayNames[index], sizeof(catalog->displayNames[index]), "Stage %d",
+             catalog->numbers[index]);
 }
 
 bool RpgStageCatalog_Load(RpgStageCatalog *catalog)
@@ -1500,6 +1536,7 @@ bool RpgStageCatalog_Load(RpgStageCatalog *catalog)
     if (!GetCatalogPath(path, (int)sizeof(path)) || (file = fopen(path, "r")) == NULL) {
         catalog->numbers[0] = 1;
         catalog->count = 1;
+        SetCatalogDefaultDisplayName(catalog, 0);
         catalog->currentNumber = 1;
         SetCatalogSavedState(catalog);
         return true;
@@ -1507,11 +1544,26 @@ bool RpgStageCatalog_Load(RpgStageCatalog *catalog)
     while (fgets(line, sizeof(line), file) != NULL) {
         int number;
         if (sscanf(line, "stage %d", &number) == 1 && number > 0 &&
-            catalog->count < RPG_STAGE_CATALOG_MAX_COUNT)
+            catalog->count < RPG_STAGE_CATALOG_MAX_COUNT) {
             catalog->numbers[catalog->count++] = number;
+            SetCatalogDefaultDisplayName(catalog, catalog->count - 1);
+        }
+    }
+    rewind(file);
+    while (fgets(line, sizeof(line), file) != NULL) {
+        int number;
+        char name[RPG_STAGE_NAME_LENGTH] = { 0 };
+        int index;
+        if (sscanf(line, "name %d %31[^\r\n]", &number, name) != 2) continue;
+        index = RpgStageCatalog_FindIndex(catalog, number);
+        if (index >= 0 && name[0] != '\0')
+            snprintf(catalog->displayNames[index], sizeof(catalog->displayNames[index]), "%s", name);
     }
     fclose(file);
-    if (catalog->count == 0) { catalog->numbers[0] = 1; catalog->count = 1; }
+    if (catalog->count == 0) {
+        catalog->numbers[0] = 1; catalog->count = 1;
+        SetCatalogDefaultDisplayName(catalog, 0);
+    }
     /* 選択中のステージはエディターの一時状態であり、保存データからは復元しない。 */
     catalog->currentNumber = catalog->numbers[0];
     SetCatalogSavedState(catalog);
@@ -1546,6 +1598,7 @@ int RpgStageCatalog_Add(RpgStageCatalog *catalog)
     for (int index = 0; index < catalog->count; index++)
         if (catalog->numbers[index] >= number) number = catalog->numbers[index] + 1;
     catalog->numbers[catalog->count++] = number;
+    SetCatalogDefaultDisplayName(catalog, catalog->count - 1);
     catalog->currentNumber = number;
     return number;
 }
@@ -1559,6 +1612,8 @@ bool RpgStageCatalog_DeleteCurrent(RpgStageCatalog *catalog)
         catalog->deletedNumbers[catalog->deletedCount++] = catalog->currentNumber;
     memmove(&catalog->numbers[index], &catalog->numbers[index + 1],
             (size_t)(catalog->count - index - 1) * sizeof(catalog->numbers[0]));
+    memmove(&catalog->displayNames[index], &catalog->displayNames[index + 1],
+            (size_t)(catalog->count - index - 1) * sizeof(catalog->displayNames[0]));
     catalog->count--;
     catalog->currentNumber = catalog->numbers[index < catalog->count ? index : catalog->count - 1];
     return true;
@@ -1571,6 +1626,7 @@ void RpgStageCatalog_Revert(RpgStageCatalog *catalog)
     selectedNumber = catalog->currentNumber;
     catalog->count = catalog->savedCount;
     memcpy(catalog->numbers, catalog->savedNumbers, sizeof(catalog->numbers));
+    memcpy(catalog->displayNames, catalog->savedDisplayNames, sizeof(catalog->displayNames));
     /* Revert は追加・削除だけを戻し、閲覧中のステージは可能な限り維持する。 */
     catalog->currentNumber = RpgStageCatalog_FindIndex(catalog, selectedNumber) >= 0 ?
                              selectedNumber : catalog->numbers[0];
@@ -1581,7 +1637,24 @@ bool RpgStageCatalog_IsDirty(const RpgStageCatalog *catalog)
 {
     return catalog != NULL && (catalog->count != catalog->savedCount ||
         memcmp(catalog->numbers, catalog->savedNumbers,
-               (size_t)catalog->count * sizeof(catalog->numbers[0])) != 0);
+               (size_t)catalog->count * sizeof(catalog->numbers[0])) != 0 ||
+        memcmp(catalog->displayNames, catalog->savedDisplayNames,
+               (size_t)catalog->count * sizeof(catalog->displayNames[0])) != 0);
+}
+
+const char *RpgStageCatalog_GetDisplayName(const RpgStageCatalog *catalog, int stageNumber)
+{
+    int index = RpgStageCatalog_FindIndex(catalog, stageNumber);
+    return index >= 0 && catalog->displayNames[index][0] != '\0' ?
+           catalog->displayNames[index] : "Stage";
+}
+
+bool RpgStageCatalog_SetDisplayName(RpgStageCatalog *catalog, int stageNumber, const char *name)
+{
+    int index = RpgStageCatalog_FindIndex(catalog, stageNumber);
+    if (index < 0 || name == NULL || name[0] == '\0') return false;
+    snprintf(catalog->displayNames[index], sizeof(catalog->displayNames[index]), "%s", name);
+    return true;
 }
 
 bool RpgStageCatalog_Save(RpgStageCatalog *catalog)
@@ -1601,7 +1674,10 @@ bool RpgStageCatalog_Save(RpgStageCatalog *catalog)
     if (file == NULL) return false;
     /* current は永続設定にしない。既存形式との互換のため固定値だけを書き出す。 */
     fprintf(file, "current 1\n");
-    for (int index = 0; index < catalog->count; index++) fprintf(file, "stage %d\n", catalog->numbers[index]);
+    for (int index = 0; index < catalog->count; index++) {
+        fprintf(file, "stage %d\n", catalog->numbers[index]);
+        fprintf(file, "name %d %s\n", catalog->numbers[index], catalog->displayNames[index]);
+    }
     if (fclose(file) != 0) return false;
     for (int index = 0; index < catalog->deletedCount; index++) {
         char folder[RPG_STAGE_PATH_LENGTH];
@@ -1706,14 +1782,31 @@ bool RpgStageStorage_LoadStage(int stageNumber, RpgStageData *data)
 #endif
 }
 
-bool RpgStageStorage_SaveStage(int stageNumber, const RpgStageData *data)
+bool RpgStageStorage_SaveStageDraft(int stageNumber, const RpgStageData *data)
 {
     char folder[RPG_STAGE_PATH_LENGTH];
     if (!RpgStageAuthority_CanWriteStatic() || RpgStageStorage_GetDomain() != RPG_STAGE_STORAGE_SETTINGS ||
         data == NULL || !GetStageDirectoryPath(stageNumber, folder, (int)sizeof(folder)) ||
         !RpgStageStorage_EnsureStageDirectory(stageNumber)) return false;
-    bool saved = SaveStageDataToDirectory(folder, data);
-    return saved && (RpgStageStorage_GetDomain() != RPG_STAGE_STORAGE_SETTINGS || RpgStageStorage_PublishStage(stageNumber));
+    return SaveStageDataToDirectory(folder, data);
+}
+
+bool RpgStageStorage_CreateDefaultStage(int stageNumber)
+{
+    RpgStageData data;
+    if (stageNumber <= 0 || !RpgStageAuthority_CanWriteStatic() ||
+        RpgStageStorage_GetDomain() != RPG_STAGE_STORAGE_SETTINGS) return false;
+    InitializeStageData(&data);
+    return RpgStageStorage_SaveStageDraft(stageNumber, &data);
+}
+
+bool RpgStageStorage_SaveStage(int stageNumber, const RpgStageData *data)
+{
+    /* A deliberate Save is the publication boundary for the standalone game.
+       Do not make every idle editor preview synchronisation rebuild the whole
+       stage package and temporarily stall the editor. */
+    return RpgStageStorage_SaveStageDraft(stageNumber, data) &&
+           RpgStageStorage_PublishStage(stageNumber);
 #if 0 /* legacy monolithic writer retained only to document the pre-v1 format. */
 #define SAVE_STAGE_FILE(name, function, source) \
     (RpgStageStorage_GetFilePath(stageNumber, (name), path, (int)sizeof(path)) && function(path, (source)))

@@ -1,0 +1,5 @@
+type=1
+cell_row=1
+cell_column=28
+x=912.0
+y=48.0

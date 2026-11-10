@@ -3,6 +3,7 @@
 
 #include "rpg_block_inventory.h"
 #include "rpg_data_shot.h"
+#include "rpg_receiver.h"
 #include "raymath.h"
 
 #define RPG_TEXT_ROUTE_RAYLIB_CALLS
@@ -20,8 +21,14 @@ static bool RpgWires_IsCellInStage(int row, int column)
 
 static bool RpgWires_IsBlockCell(const RpgStage *stage, int row, int column)
 {
+    /* Kept as the compatibility validation point for callers.  A wire route
+       may pass through exposed air; only its in-stage bounds are required. */
+    (void)stage;
+    return RpgWires_IsCellInStage(row, column);
+#if 0
     // 導線はブロック上のマス列だけを保存する見た目・接続用データであり、物理衝突には参加しない。
     return RpgWires_IsCellInStage(row, column) && stage->blocks[row][column] != 0;
+#endif
 }
 
 RpgWires RpgWires_Default(void)
@@ -1048,13 +1055,29 @@ bool RpgWires_FindConveyorWallPush(const RpgWires *wires, Rectangle previousBoun
 }
 #endif
 
+bool RpgWires_HasLiveReceiverSource(const RpgWire *wire, const RpgReceivers *receivers)
+{
+    if (wire == NULL || receivers == NULL || !wire->hasReceiverSource) return false;
+    for (int index = 0; index < RpgReceivers_Count(receivers); index++) {
+        RpgReceiver receiver;
+        if (!RpgReceivers_Get(receivers, index, &receiver)) continue;
+        if (receiver.cell.row == wire->receiverCell.row &&
+            receiver.cell.column == wire->receiverCell.column &&
+            receiver.side == wire->receiverSide)
+            return true;
+    }
+    return false;
+}
+
 static void RpgWires_DrawWithOffset(const RpgWires *wires, const RpgStage *stage,
+                                    const RpgReceivers *receivers,
                                     int firstColumn, int columnCount)
 {
     int lastColumn = firstColumn + columnCount;
     for (int wireIndex = 0; wireIndex < wires->count; wireIndex++) {
         const RpgWire *wire = &wires->entries[wireIndex];
-        if (wire->kind != RPG_WIRE_KIND_ELECTRIC) continue;
+        if (wire->kind != RPG_WIRE_KIND_ELECTRIC ||
+            !RpgWires_HasLiveReceiverSource(wire, receivers)) continue;
         for (int cellIndex = 0; cellIndex < wire->path.cellCount - 1; cellIndex++) {
             RpgWireCell first = wire->path.cells[cellIndex];
             RpgWireCell second = wire->path.cells[cellIndex + 1];
@@ -1084,14 +1107,17 @@ static void RpgWires_DrawWithOffset(const RpgWires *wires, const RpgStage *stage
     }
 }
 
-void RpgWires_Draw(const RpgWires *wires, const RpgStage *stage)
+void RpgWires_Draw(const RpgWires *wires, const RpgStage *stage,
+                   const RpgReceivers *receivers)
 {
-    RpgWires_DrawWithOffset(wires, stage, 0, RPG_STAGE_WORLD_COLUMNS);
+    RpgWires_DrawWithOffset(wires, stage, receivers, 0, RPG_STAGE_WORLD_COLUMNS);
 }
 
-void RpgWires_DrawMap(const RpgWires *wires, const RpgStage *stage, int mapIndex)
+void RpgWires_DrawMap(const RpgWires *wires, const RpgStage *stage,
+                      const RpgReceivers *receivers, int mapIndex)
 {
-    RpgWires_DrawWithOffset(wires, stage, mapIndex * RPG_STAGE_COLUMNS, RPG_STAGE_COLUMNS);
+    RpgWires_DrawWithOffset(wires, stage, receivers,
+                            mapIndex * RPG_STAGE_COLUMNS, RPG_STAGE_COLUMNS);
 }
 
 #if 0
@@ -1194,12 +1220,14 @@ static void RpgWires_DrawElectricGlow(Vector2 position)
 }
 
 void RpgWires_DrawElectric(const RpgWires *wires, const RpgDataShots *dataShots,
+                           const RpgReceivers *receivers,
                            int firstColumn, int columnCount)
 {
     if (wires == NULL || dataShots == NULL) return;
     int lastColumn = firstColumn + columnCount;
     for (int wireIndex = 0; wireIndex < wires->count; wireIndex++) {
         const RpgWire *wire = &wires->entries[wireIndex];
+        if (!RpgWires_HasLiveReceiverSource(wire, receivers)) continue;
         for (int cellIndex = 0; cellIndex < wire->path.cellCount; cellIndex++) {
             RpgWireCell cell = wire->path.cells[cellIndex];
             if (cell.column < firstColumn || cell.column >= lastColumn ||

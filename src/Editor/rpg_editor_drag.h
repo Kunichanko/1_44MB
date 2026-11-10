@@ -1,5 +1,4 @@
 // 依存する自プロジェクト内ファイル: なし
-// 役割: エディター内のオブジェクト共通ドラッグの開始・追従・終了状態を提供する。
 #ifndef RPG_EDITOR_DRAG_H
 #define RPG_EDITOR_DRAG_H
 

@@ -163,12 +163,33 @@ int RpgImageObjects_DuplicateRight(RpgImageObjects *objects, int index, int worl
 Rectangle RpgImageObjects_GetLocalBounds(const RpgImageObject *object, int mapIndex,
                                          int mapColumns, int tileSize)
 {
+    return RpgImageObjects_GetLocalBoundsAtWorldOrigin(
+        object, mapIndex, mapColumns,
+        (Vector2){ mapIndex * mapColumns * tileSize, 0.0f }, tileSize);
+}
+
+Rectangle RpgImageObjects_GetLocalBoundsAtWorldOrigin(const RpgImageObject *object,
+                                                       int mapIndex, int mapColumns,
+                                                       Vector2 mapWorldOrigin,
+                                                       int tileSize)
+{
     if (object == NULL) return (Rectangle){ 0 };
     float size = tileSize * Clamp(object->scale, 0.25f, 8.0f);
-    float worldCenterX = RpgImageObjects_GetWorldCenterX(object, tileSize);
-    float centerX = worldCenterX - mapIndex * mapColumns * tileSize;
-    float centerY = RpgImageObjects_GetWorldCenterY(object, tileSize);
-    return (Rectangle){ centerX - size * 0.5f, centerY - size * 0.5f, size, size };
+    float localCenterX;
+    float localCenterY;
+
+    /* row/column images are local to their storage area.  Custom/runtime
+       images alone use connected-world coordinates.  Applying the real map
+       origin to both made ordinary cell PNGs disappear after 2-D map layout. */
+    if (object->hasRuntimePosition || object->hasCustomPosition) {
+        localCenterX = RpgImageObjects_GetWorldCenterX(object, tileSize) - mapWorldOrigin.x;
+        localCenterY = RpgImageObjects_GetWorldCenterY(object, tileSize) - mapWorldOrigin.y;
+    } else {
+        localCenterX = (float)(object->column - mapIndex * mapColumns) * tileSize + tileSize * 0.5f;
+        localCenterY = (float)object->row * tileSize + tileSize * 0.5f;
+    }
+    return (Rectangle){ localCenterX - size * 0.5f,
+                        localCenterY - size * 0.5f, size, size };
 }
 
 float RpgImageObjects_GetWorldCenterX(const RpgImageObject *object, int tileSize)
@@ -257,15 +278,28 @@ void RpgImageObjects_DrawMap(const RpgImageObjects *objects, int mapIndex, int m
 void RpgImageObjects_DrawLayer(const RpgImageObjects *objects, int mapIndex, int mapColumns,
                                int tileSize, Color tint, RpgImageObjectLayer layer)
 {
+    RpgImageObjects_DrawLayerAtWorldOrigin(
+        objects, mapIndex, mapColumns, tileSize,
+        (Vector2){ mapIndex * mapColumns * tileSize, 0.0f }, tint, layer);
+}
+
+void RpgImageObjects_DrawLayerAtWorldOrigin(const RpgImageObjects *objects, int mapIndex,
+                                            int mapColumns, int tileSize,
+                                            Vector2 mapWorldOrigin, Color tint,
+                                            RpgImageObjectLayer layer)
+{
     if (objects == NULL || layer < RPG_IMAGE_OBJECT_LAYER_BACK || layer >= RPG_IMAGE_OBJECT_LAYER_COUNT) return;
     int firstColumn = mapIndex * mapColumns;
     for (int index = 0; index < objects->count; index++) {
         const RpgImageObject *object = &objects->entries[index];
-        int displayColumn = (int)(RpgImageObjects_GetWorldCenterX(object, tileSize) / tileSize);
-        if (object->layer != layer || displayColumn < firstColumn ||
-            displayColumn >= firstColumn + mapColumns) continue;
+        /* The storage column is the owning area slot.  A freely positioned
+           image may be anywhere inside that slot's 2D world area, so using
+           its world X to select the slot loses it after an area swap. */
+        if (object->layer != layer || object->column < firstColumn ||
+            object->column >= firstColumn + mapColumns) continue;
         RpgImageObjects_DrawPreview(object,
-                                    RpgImageObjects_GetLocalBounds(object, mapIndex, mapColumns, tileSize), tint);
+                                    RpgImageObjects_GetLocalBoundsAtWorldOrigin(
+                                        object, mapIndex, mapColumns, mapWorldOrigin, tileSize), tint);
     }
 }
 

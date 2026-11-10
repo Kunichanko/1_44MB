@@ -1,0 +1,5 @@
+type=1
+cell_row=3
+cell_column=256
+x=8208.0
+y=112.0

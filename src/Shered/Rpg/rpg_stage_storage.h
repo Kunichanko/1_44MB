@@ -18,9 +18,11 @@ enum { RPG_STAGE_CATALOG_MAX_COUNT = 32, RPG_STAGE_NAME_LENGTH = 32, RPG_STAGE_P
 
 typedef struct RpgStageCatalog {
     int numbers[RPG_STAGE_CATALOG_MAX_COUNT];
+    char displayNames[RPG_STAGE_CATALOG_MAX_COUNT][RPG_STAGE_NAME_LENGTH];
     int count;
     int currentNumber;
     int savedNumbers[RPG_STAGE_CATALOG_MAX_COUNT];
+    char savedDisplayNames[RPG_STAGE_CATALOG_MAX_COUNT][RPG_STAGE_NAME_LENGTH];
     int savedCount;
     int savedCurrentNumber;
     int deletedNumbers[RPG_STAGE_CATALOG_MAX_COUNT];
@@ -74,9 +76,17 @@ int RpgStageCatalog_FindIndex(const RpgStageCatalog *catalog, int stageNumber);
 bool RpgStageCatalog_Select(RpgStageCatalog *catalog, int stageNumber);
 int RpgStageCatalog_Add(RpgStageCatalog *catalog);
 bool RpgStageCatalog_DeleteCurrent(RpgStageCatalog *catalog);
+const char *RpgStageCatalog_GetDisplayName(const RpgStageCatalog *catalog, int stageNumber);
+bool RpgStageCatalog_SetDisplayName(RpgStageCatalog *catalog, int stageNumber, const char *name);
 void RpgStageCatalog_GetName(int stageNumber, char *name, int size);
 
 bool RpgStageStorage_LoadStage(int stageNumber, RpgStageData *data);
+/* Creates the authored default data for a newly catalogued stage. */
+bool RpgStageStorage_CreateDefaultStage(int stageNumber);
+/* Update editor-authoring files without rebuilding the distributable
+ * stage.package.  Idle preview synchronisation uses this lightweight path;
+ * an explicit editor Save still calls RpgStageStorage_SaveStage() below. */
+bool RpgStageStorage_SaveStageDraft(int stageNumber, const RpgStageData *data);
 bool RpgStageStorage_SaveStage(int stageNumber, const RpgStageData *data);
 bool RpgStageStorage_EnsureStageDirectory(int stageNumber);
 bool RpgStageStorage_GetFilePath(int stageNumber, const char *fileName, char *path, int size);

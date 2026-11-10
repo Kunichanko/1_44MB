@@ -128,6 +128,9 @@ static bool RpgAttachments_EnsureModules(RpgAttachments *attachments, const RpgA
     return true;
 }
 
+static void RpgAttachments_AnchorShooterPath(RpgShooterConfig *shooter,
+                                             const RpgAttachment *attachment);
+
 void RpgAttachments_RefreshEditorFacades(RpgAttachments *attachments)
 {
     if (attachments == NULL) return;
@@ -137,6 +140,7 @@ void RpgAttachments_RefreshEditorFacades(RpgAttachments *attachments)
         RpgFlagConfig *flag = RpgAttachments_FindFlag(attachments, a->folderId);
         RpgSocketConfig *socket = RpgAttachments_FindSocket(attachments, a->folderId);
         if (shooter != NULL) {
+            RpgAttachments_AnchorShooterPath(shooter, a);
             a->dataSize = shooter->dataSize; a->dataSpeed = shooter->dataSpeed;
             a->dataInterval = shooter->dataInterval; a->dataPreviewEnabled = shooter->dataPreviewEnabled;
             a->sizePerFile = shooter->sizePerFile; a->speedPerKilobyte = shooter->speedPerKilobyte;
@@ -179,14 +183,75 @@ static RpgGridCell RpgAttachments_GetShooterFrontCell(const RpgAttachment *attac
 
 static void RpgAttachments_SetDefaultShooterPath(const RpgAttachment *attachment, RpgShooterConfig *config)
 {
+    if (attachment == NULL || config == NULL) return;
     RpgGridCell bodyCell = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
     RpgGridCell frontCell = RpgAttachments_GetShooterFrontCell(attachment);
-    if (attachment == NULL || config == NULL) return;
     config->path.cells[0] = bodyCell;
     config->path.cellCount = 1;
     if (frontCell.row != bodyCell.row || frontCell.column != bodyCell.column) {
         config->path.cells[1] = frontCell;
         config->path.cellCount = 2;
+    }
+}
+
+/* The path belongs to the shooter module, not to the legacy dataPath facade.
+   Move every authored route cell with its owner so a relocated emitter cannot
+   retain a route beginning at its former outer cell.  A route leaving the
+   stage is reset to the same valid default used for a newly placed emitter. */
+static void RpgAttachments_TranslateShooterPath(RpgShooterConfig *shooter,
+                                                const RpgAttachment *from,
+                                                const RpgAttachment *to)
+{
+    RpgGridCell fromOuter;
+    RpgGridCell toOuter;
+    bool isValid = shooter != NULL && from != NULL && to != NULL &&
+                   shooter->path.cellCount >= 1 &&
+                   shooter->path.cellCount <= RPG_GRID_PATH_MAX_CELLS;
+    if (!isValid) {
+        if (shooter != NULL && to != NULL) RpgAttachments_SetDefaultShooterPath(to, shooter);
+        return;
+    }
+    fromOuter = RpgGridPath_GetSideNeighbor(from->cell, from->side);
+    toOuter = RpgGridPath_GetSideNeighbor(to->cell, to->side);
+    const int rowOffset = toOuter.row - fromOuter.row;
+    const int columnOffset = toOuter.column - fromOuter.column;
+    if (rowOffset == 0 && columnOffset == 0) return;
+    for (int index = 0; index < shooter->path.cellCount; index++) {
+        RpgGridCell *cell = &shooter->path.cells[index];
+        cell->row += rowOffset;
+        cell->column += columnOffset;
+        if (!RpgAttachments_IsCellInStage(*cell)) {
+            RpgAttachments_SetDefaultShooterPath(to, shooter);
+            return;
+        }
+    }
+}
+
+/* The first path cell is not freely editable: it is the emitter's occupied
+   cell.  This also repairs routes written before that invariant was enforced
+   without discarding their authored shape or endpoint. */
+static void RpgAttachments_AnchorShooterPath(RpgShooterConfig *shooter,
+                                             const RpgAttachment *attachment)
+{
+    RpgGridCell anchor;
+    if (shooter == NULL || attachment == NULL) return;
+    anchor = RpgGridPath_GetSideNeighbor(attachment->cell, attachment->side);
+    if (!RpgAttachments_IsCellInStage(anchor) || shooter->path.cellCount < 1 ||
+        shooter->path.cellCount > RPG_GRID_PATH_MAX_CELLS) {
+        RpgAttachments_SetDefaultShooterPath(attachment, shooter);
+        return;
+    }
+    const int rowOffset = anchor.row - shooter->path.cells[0].row;
+    const int columnOffset = anchor.column - shooter->path.cells[0].column;
+    if (rowOffset == 0 && columnOffset == 0) return;
+    for (int index = 0; index < shooter->path.cellCount; index++) {
+        RpgGridCell *cell = &shooter->path.cells[index];
+        cell->row += rowOffset;
+        cell->column += columnOffset;
+        if (!RpgAttachments_IsCellInStage(*cell)) {
+            RpgAttachments_SetDefaultShooterPath(attachment, shooter);
+            return;
+        }
     }
 }
 
@@ -317,6 +382,11 @@ bool RpgAttachments_Clone(RpgAttachments *destination, const RpgAttachments *sou
         memcpy(clone.sockets, source->sockets, (size_t)source->socketCount * sizeof(*clone.sockets));
         clone.socketCount = clone.socketCapacity = source->socketCount;
     }
+    /* Module records are the canonical serialized configuration.  Do not
+       overwrite them from the compatibility facade while cloning: a route,
+       flag or socket can be edited through its module without changing every
+       legacy facade member first.  The editor commits facade edits explicitly
+       before it publishes a stage snapshot. */
     RpgAttachments_Destroy(destination);
     *destination = clone;
     RpgAttachments_RefreshEditorFacades(destination);
@@ -542,6 +612,11 @@ bool RpgAttachments_Load(const char *filePath, RpgAttachments *attachments)
         }
     }
     if (fclose(file) != 0) { RpgAttachments_Destroy(&loaded); return false; }
+    /* Pre-v12 records store the old generic facade.  Import it once at the
+       compatibility boundary, then return to the module-authoritative model
+       used by the editor and current serializer. */
+    RpgAttachments_SynchronizeModuleConfigs(&loaded);
+    RpgAttachments_RefreshEditorFacades(&loaded);
     RpgAttachments_Destroy(attachments);
     *attachments = loaded;
     return true;
@@ -974,7 +1049,6 @@ bool RpgAttachments_SaveStatic(const char *filePath, const RpgAttachments *attac
     if (filePath == NULL || attachments == NULL || wires == NULL ||
         (file = fopen(filePath, "w")) == NULL) return false;
     if (!RpgAttachments_Clone(&stored, attachments)) { fclose(file); return false; }
-    RpgAttachments_SynchronizeModuleConfigs(&stored);
     RpgAttachments_ImportWires(&stored, wires);
     if (fprintf(file, "v12 %d %d %d %d %d\n", stored.count, stored.shooterCount,
                 stored.flagCount, stored.socketCount, stored.routeCount) < 0) {
@@ -1031,7 +1105,7 @@ bool RpgAttachments_Add(RpgAttachments *attachments, RpgStage *stage, int type,
         if (RpgAttachments_AreSame(&attachments->entries[index], &attachment)) return false;
     if (!RpgAttachments_Append(attachments, &attachment)) return false;
     if (RpgBlockInventory_IsAttachmentBlock(type))
-        stage->blocks[outerCell.row][outerCell.column] = type;
+        RpgStage_SetCellBlock(stage, outerCell.row, outerCell.column, type);
     return true;
 }
 
@@ -1046,8 +1120,13 @@ bool RpgAttachments_MoveDataPathEndpoint(RpgAttachments *attachments, const RpgS
     RpgShooterConfig *shooter = RpgAttachments_FindShooter(attachments,
         attachments->entries[attachmentIndex].folderId);
     if (shooter == NULL) return false;
-    return RpgGridPath_MoveEndpoint(&shooter->path, false,
-                                    (RpgGridCell){ row, column }, 1);
+    if (!RpgGridPath_MoveEndpoint(&shooter->path, false,
+                                  (RpgGridCell){ row, column }, 1)) return false;
+    /* The inspector-facing record is also the input to the editor snapshot
+       copier.  Keep it in sync with the authoritative shooter module as soon
+       as an endpoint changes, rather than waiting for a later save/load. */
+    RpgAttachments_RefreshEditorFacades(attachments);
+    return true;
 }
 
 bool RpgAttachments_FindDataPathEndpoint(const RpgAttachments *attachments, int row, int column,
@@ -1069,14 +1148,49 @@ bool RpgAttachments_Remove(RpgAttachments *attachments, RpgStage *stage, RpgAtta
 {
     for (int index = 0; index < attachments->count; index++) {
         if (!RpgAttachments_AreSame(&attachments->entries[index], &attachment)) continue;
+        const int attachmentId = attachments->entries[index].folderId;
         RpgGridCell outerCell;
         if (stage != NULL && RpgBlockInventory_IsAttachmentBlock(attachments->entries[index].type) &&
             RpgAttachments_GetOccupiedCell(&attachments->entries[index], &outerCell) &&
             stage->blocks[outerCell.row][outerCell.column] == attachments->entries[index].type)
-            stage->blocks[outerCell.row][outerCell.column] = 0;
+            RpgStage_SetCellBlock(stage, outerCell.row, outerCell.column, 0);
         for (int next = index; next < attachments->count - 1; next++)
             attachments->entries[next] = attachments->entries[next + 1];
         attachments->count--;
+        /* The type-specific modules are the persisted authority.  Do not
+           leave an orphan shooter/flag/socket or its owned route behind when
+           its mount is deleted: an orphan used to be serialized and could
+           make a later preview comparison report a change with no owner
+           folder to repair. */
+        for (int next = 0; next < attachments->shooterCount;) {
+            if (attachments->shooters[next].attachmentId != attachmentId) { next++; continue; }
+            if (next + 1 < attachments->shooterCount)
+                memmove(&attachments->shooters[next], &attachments->shooters[next + 1],
+                        (size_t)(attachments->shooterCount - next - 1) * sizeof(attachments->shooters[0]));
+            attachments->shooterCount--;
+        }
+        for (int next = 0; next < attachments->flagCount;) {
+            if (attachments->flags[next].attachmentId != attachmentId) { next++; continue; }
+            if (next + 1 < attachments->flagCount)
+                memmove(&attachments->flags[next], &attachments->flags[next + 1],
+                        (size_t)(attachments->flagCount - next - 1) * sizeof(attachments->flags[0]));
+            attachments->flagCount--;
+        }
+        for (int next = 0; next < attachments->socketCount;) {
+            if (attachments->sockets[next].attachmentId != attachmentId) { next++; continue; }
+            if (next + 1 < attachments->socketCount)
+                memmove(&attachments->sockets[next], &attachments->sockets[next + 1],
+                        (size_t)(attachments->socketCount - next - 1) * sizeof(attachments->sockets[0]));
+            attachments->socketCount--;
+        }
+        for (int next = 0; next < attachments->routeCount;) {
+            if (attachments->routes[next].ownerAttachmentId != attachmentId) { next++; continue; }
+            if (next + 1 < attachments->routeCount)
+                memmove(&attachments->routes[next], &attachments->routes[next + 1],
+                        (size_t)(attachments->routeCount - next - 1) * sizeof(attachments->routes[0]));
+            attachments->routeCount--;
+        }
+        RpgAttachments_RefreshEditorFacades(attachments);
         return true;
     }
     return false;
@@ -1093,18 +1207,27 @@ bool RpgAttachments_Replace(RpgAttachments *attachments, RpgStage *stage, int in
     if (RpgBlockInventory_IsAttachmentBlock(old.type) &&
         RpgAttachments_GetOccupiedCell(&old, &oldOuter) &&
         stage->blocks[oldOuter.row][oldOuter.column] == old.type)
-        stage->blocks[oldOuter.row][oldOuter.column] = 0;
+        RpgStage_SetCellBlock(stage, oldOuter.row, oldOuter.column, 0);
     if (RpgBlockInventory_IsAttachmentBlock(replacement.type)) {
         if (!RpgAttachments_GetOccupiedCell(&replacement, &newOuter) ||
             stage->blocks[newOuter.row][newOuter.column] != 0) {
             if (RpgBlockInventory_IsAttachmentBlock(old.type) &&
                 RpgAttachments_GetOccupiedCell(&old, &oldOuter))
-                stage->blocks[oldOuter.row][oldOuter.column] = old.type;
+                RpgStage_SetCellBlock(stage, oldOuter.row, oldOuter.column, old.type);
             return false;
         }
-        stage->blocks[newOuter.row][newOuter.column] = replacement.type;
+        RpgStage_SetCellBlock(stage, newOuter.row, newOuter.column, replacement.type);
     }
     attachments->entries[index] = replacement;
+    if (old.type == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER &&
+        replacement.type == RPG_BLOCK_ATTACHMENT_RADIO_EMITTER) {
+        RpgShooterConfig *shooter = RpgAttachments_FindShooter(attachments, old.folderId);
+        RpgAttachments_TranslateShooterPath(shooter, &old, &replacement);
+    }
+    /* Replacement may move an attachment after a legacy preview facade has
+       been prepared.  Rebuild that facade from the authoritative module so
+       later drawing, snapshots and saves cannot restore the old route. */
+    RpgAttachments_RefreshEditorFacades(attachments);
     return true;
 }
 
@@ -1140,14 +1263,14 @@ void RpgAttachments_MaterializeBlockCells(RpgAttachments *attachments, RpgStage 
            happens to occupy the same cell. */
         if (!RpgBlockInventory_IsAttachmentBlock(attachment->type)) {
             if (stage->blocks[outerCell.row][outerCell.column] == attachment->type)
-                stage->blocks[outerCell.row][outerCell.column] = 0;
+                RpgStage_SetCellBlock(stage, outerCell.row, outerCell.column, 0);
             continue;
         }
         /* Existing stage data stored these only in rpg_attachments.cfg.  A
            conflicting terrain cell wins; RemoveBroken will discard the stale
            attachment rather than overwriting user-authored terrain. */
         if (stage->blocks[outerCell.row][outerCell.column] == 0)
-            stage->blocks[outerCell.row][outerCell.column] = attachment->type;
+            RpgStage_SetCellBlock(stage, outerCell.row, outerCell.column, attachment->type);
     }
 }
 
@@ -1172,7 +1295,7 @@ void RpgAttachments_MigrateLegacyButtons(RpgAttachments *attachments, RpgStage *
     // 旧来の単独ボタンを、同じ位置の隣にあるブロックへ取り付ける形式へ変換する。
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
         if (stage->blocks[row][column] != RPG_BLOCK_EFFECT_BUTTON) continue;
-        stage->blocks[row][column] = 0;
+        RpgStage_SetCellBlock(stage, row, column, 0);
         const RpgGridCell bases[] = {
             { row + 1, column }, { row, column - 1 }, { row - 1, column }, { row, column + 1 }
         };
@@ -1529,15 +1652,33 @@ bool RpgAttachments_FindSnap(const RpgAttachments *attachments, const RpgStage *
 {
     float nearestDistance = RPG_STAGE_TILE_SIZE;
     bool found = false;
+    RpgGridCell ignoredOccupiedCell = { -1, -1 };
+    bool hasIgnoredOccupiedCell = false;
+    /* A block-backed attachment (currently the shooter) occupies its outer
+       cell while attached.  During a drag that source cell must not become a
+       snap target or a wall which rejects an otherwise valid candidate: the
+       attachment will vacate it when Replace() commits the move. */
+    if (attachments != NULL && ignoredAttachmentIndex >= 0 &&
+        ignoredAttachmentIndex < attachments->count)
+        hasIgnoredOccupiedCell = RpgAttachments_GetOccupiedCell(
+            &attachments->entries[ignoredAttachmentIndex], &ignoredOccupiedCell);
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
+        if (hasIgnoredOccupiedCell && row == ignoredOccupiedCell.row &&
+            column == ignoredOccupiedCell.column)
+            continue;
         if (stage->blocks[row][column] == 0) continue;
         for (int side = RPG_GRID_SIDE_TOP; side <= RPG_GRID_SIDE_LEFT; side++) {
             if (type == RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET && side != RPG_GRID_SIDE_TOP) continue;
             RpgAttachment candidate = { .type = type, .cell = { row, column },
                                         .side = (RpgGridSide)side };
-            if (RpgAttachments_RequiresEmptyOuterCell(type) &&
-                !RpgAttachments_HasOuterEmptyCell(stage, candidate.cell, candidate.side)) continue;
             RpgGridCell outerCell = RpgGridPath_GetSideNeighbor(candidate.cell, candidate.side);
+            bool outerCellIsIgnoredSource = hasIgnoredOccupiedCell &&
+                                            outerCell.row == ignoredOccupiedCell.row &&
+                                            outerCell.column == ignoredOccupiedCell.column;
+            if (RpgAttachments_RequiresEmptyOuterCell(type) &&
+                (!RpgAttachments_IsCellInStage(outerCell) ||
+                 (stage->blocks[outerCell.row][outerCell.column] != 0 &&
+                  !outerCellIsIgnoredSource))) continue;
             if (RpgBlockInventory_IsAttachmentBlock(type)) {
                 bool occupied = false;
                 for (int attachmentIndex = 0; attachments != NULL && attachmentIndex < attachments->count; attachmentIndex++) {
@@ -1579,12 +1720,11 @@ void RpgAttachments_RemoveBroken(RpgAttachments *attachments, RpgStage *stage)
             index++;
             continue;
         }
-        if (isBlockAttachment && RpgAttachments_GetOccupiedCell(attachment, &outerCell) &&
-            stage->blocks[outerCell.row][outerCell.column] == attachment->type)
-            stage->blocks[outerCell.row][outerCell.column] = 0;
-        for (int next = index; next < attachments->count - 1; next++)
-            attachments->entries[next] = attachments->entries[next + 1];
-        attachments->count--;
+        /* Use the common removal path so every per-kind module and every
+           receiver-owned route is removed with its attachment.  The previous
+           raw array erase left route records alive after a Drop red-error. */
+        RpgAttachment removed = *attachment;
+        (void)RpgAttachments_Remove(attachments, stage, removed);
     }
 }
 
@@ -1730,8 +1870,9 @@ void RpgAttachments_DrawDataPaths(const RpgAttachments *attachments, int mapInde
     int firstColumn = mapIndex * RPG_STAGE_COLUMNS;
     int lastColumn = firstColumn + RPG_STAGE_COLUMNS;
     for (int index = 0; index < attachments->count; index++) {
-        if (RpgAttachments_IsRuntimeUnavailable(&attachments->entries[index]) ||
-            attachments->entries[index].type != RPG_BLOCK_ATTACHMENT_RADIO_EMITTER) continue;
+        /* A trajectory is authored route information.  Unlike the emitter
+           itself, it remains visible while its parent is in Zipper. */
+        if (attachments->entries[index].type != RPG_BLOCK_ATTACHMENT_RADIO_EMITTER) continue;
         const RpgShooterConfig *shooter = RpgAttachments_FindShooterConst(attachments,
             attachments->entries[index].folderId);
         if (shooter == NULL) continue;

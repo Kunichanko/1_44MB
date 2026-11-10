@@ -1,0 +1,5 @@
+type=1
+cell_row=8
+cell_column=60
+x=1936.0
+y=272.0

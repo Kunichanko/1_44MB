@@ -1,0 +1,5 @@
+type=1
+cell_row=2
+cell_column=141
+x=4528.0
+y=80.0

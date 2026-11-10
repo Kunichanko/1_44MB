@@ -13,7 +13,8 @@ static const RpgBlockInventory defaultInventories[] = {
       RPG_BLOCK_INVENTORY_BORDER_WHITE },
     /* 既存ステージとの互換性を保つため定義は残し、選択パレットだけを必要な効果へ絞る。 */
     { "Effect", { RPG_BLOCK_DOOR_CLOSED_TOP, RPG_BLOCK_KEY_DOOR_CLOSED_TOP,
-                    RPG_BLOCK_SIGNAL_SHRINK_ROOT_HORIZONTAL, RPG_BLOCK_EFFECT_MAGNET_OFF }, 4, false, false,
+                    RPG_BLOCK_SIGNAL_SHRINK_ROOT_HORIZONTAL, RPG_BLOCK_EFFECT_MAGNET_OFF,
+                    RPG_BLOCK_PROPERTY_STATIC_ERROR }, 5, false, false,
       RPG_BLOCK_INVENTORY_BORDER_RED },
     /* Paths are owned by their source attachment, never placed alone. */
     { "Path Property", { RPG_BLOCK_PROPERTY_MAP_EVENT }, 1, true, false,
@@ -34,7 +35,8 @@ static RpgBlockInventory inventories[RPG_BLOCK_INVENTORY_MAX_PALETTES] = {
                    RPG_BLOCK_SOCKET_SIGNAL_SOLID, RPG_BLOCK_SOCKET_SIGNAL_ONE_WAY }, 8, false, false,
       RPG_BLOCK_INVENTORY_BORDER_WHITE },
     { "Effect", { RPG_BLOCK_DOOR_CLOSED_TOP, RPG_BLOCK_KEY_DOOR_CLOSED_TOP,
-                    RPG_BLOCK_SIGNAL_SHRINK_ROOT_HORIZONTAL, RPG_BLOCK_EFFECT_MAGNET_OFF }, 4, false, false,
+                    RPG_BLOCK_SIGNAL_SHRINK_ROOT_HORIZONTAL, RPG_BLOCK_EFFECT_MAGNET_OFF,
+                    RPG_BLOCK_PROPERTY_STATIC_ERROR }, 5, false, false,
       RPG_BLOCK_INVENTORY_BORDER_RED },
     { "Path Property", { RPG_BLOCK_PROPERTY_MAP_EVENT }, 1, true, false,
       RPG_BLOCK_INVENTORY_BORDER_BLUE },
@@ -204,6 +206,27 @@ static void SetPaletteBlocks(int index, const char *text)
     }
 }
 
+/* The red missing-cell marker is an editor tool rather than a serialised
+ * terrain type.  Keep one reachable after loading older user palettes. */
+static void EnsureStaticErrorPaletteEntry(void)
+{
+    for (int paletteIndex = 0; paletteIndex < inventoryCount; paletteIndex++) {
+        RpgBlockInventory *inventory = &inventories[paletteIndex];
+        for (int slot = 0; slot < inventory->count; slot++)
+            if (inventory->blockTypes[slot] == RPG_BLOCK_PROPERTY_STATIC_ERROR) return;
+    }
+    if (inventoryCount > 1 && inventories[1].count < RPG_BLOCK_INVENTORY_MAX_SLOTS) {
+        inventories[1].blockTypes[inventories[1].count++] = RPG_BLOCK_PROPERTY_STATIC_ERROR;
+        return;
+    }
+    for (int paletteIndex = 0; paletteIndex < inventoryCount; paletteIndex++)
+        if (inventories[paletteIndex].count < RPG_BLOCK_INVENTORY_MAX_SLOTS) {
+            inventories[paletteIndex].blockTypes[inventories[paletteIndex].count++] =
+                RPG_BLOCK_PROPERTY_STATIC_ERROR;
+            return;
+        }
+}
+
 bool RpgBlockInventory_LoadPreferences(const char *path)
 {
     FILE *file;
@@ -235,6 +258,7 @@ bool RpgBlockInventory_LoadPreferences(const char *path)
         }
     }
     fclose(file);
+    EnsureStaticErrorPaletteEntry();
     return true;
 }
 
@@ -350,6 +374,11 @@ bool RpgBlockInventory_IsMapEventProperty(int blockType)
     return blockType == RPG_BLOCK_PROPERTY_MAP_EVENT;
 }
 
+bool RpgBlockInventory_IsStaticErrorMarker(int blockType)
+{
+    return blockType == RPG_BLOCK_PROPERTY_STATIC_ERROR;
+}
+
 bool RpgBlockInventory_IsOneWayPlatform(int blockType)
 {
     return blockType == RPG_BLOCK_ONE_WAY_PLATFORM;
@@ -386,12 +415,23 @@ bool RpgBlockInventory_IsSocketSignalOneWayBlock(int blockType)
     return blockType == RPG_BLOCK_SOCKET_SIGNAL_ONE_WAY;
 }
 
+bool RpgBlockInventory_IsKnownBlockType(int blockType)
+{
+    return blockType == 0 ||
+           RpgBlockInventory_GetStructureKind(blockType) != RPG_BLOCK_STRUCTURE_NONE;
+}
+
 RpgBlockStructureKind RpgBlockInventory_GetStructureKind(int blockType)
 {
     if ((blockType >= 1 && blockType <= 10) ||
         blockType == RPG_BLOCK_HOLE_VERTICAL || blockType == RPG_BLOCK_HOLE_HORIZONTAL ||
         RpgBlockInventory_IsOneWayPlatform(blockType) || RpgBlockInventory_IsMetalBlock(blockType) ||
         RpgBlockInventory_IsPushBlock(blockType) || RpgBlockInventory_IsSocketSignalBlock(blockType))
+        return RPG_BLOCK_STRUCTURE_NORMAL_CELL;
+    /* A red error occupies one regular grid cell in the editor.  Its saved
+       representation is still an empty CSV field, which is handled by the
+       stage cell setter rather than by a separate placement path. */
+    if (RpgBlockInventory_IsStaticErrorMarker(blockType))
         return RPG_BLOCK_STRUCTURE_NORMAL_CELL;
     if (RpgBlockInventory_IsAttachmentBlock(blockType)) return RPG_BLOCK_STRUCTURE_NORMAL_CELL;
     if (RpgBlockInventory_IsAttachment(blockType)) return RPG_BLOCK_STRUCTURE_ATTACHMENT;
@@ -400,6 +440,11 @@ RpgBlockStructureKind RpgBlockInventory_GetStructureKind(int blockType)
     if (blockType == RPG_BLOCK_PROPERTY_LEGACY_ITEM || blockType == RPG_BLOCK_PROPERTY_WIRE ||
         blockType == RPG_BLOCK_PROPERTY_RECEIVER || RpgBlockInventory_IsMapEventProperty(blockType))
         return RPG_BLOCK_STRUCTURE_PROPERTY;
+    /* A newly placed magnet starts as 1x1, but it is still a resizable
+       composite from that first cell.  Do not route it through the legacy
+       one-cell effect path. */
+    if (RpgBlockInventory_IsMagnetBlock(blockType))
+        return RPG_BLOCK_STRUCTURE_COMPOSITE;
     {
         const RpgEffectShape *shape = RpgBlockInventory_GetEffectShape(blockType);
         if (shape != NULL)

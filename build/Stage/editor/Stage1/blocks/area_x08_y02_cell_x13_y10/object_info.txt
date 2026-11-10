@@ -1,0 +1,5 @@
+type=41
+cell_row=10
+cell_column=73
+x=2352.0
+y=336.0

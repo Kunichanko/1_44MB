@@ -21,10 +21,18 @@ bool RpgStageBuild_CreateEditorPreview(int stageNumber, RpgStage *stage,
 bool RpgStageBuild_Resume(int stageNumber, RpgStage *stage);
 /* Reconnect a pre-generated editor preview without clearing/regenerating it. */
 bool RpgStageBuild_ResumeEditorPreview(int stageNumber, RpgStage *stage);
+/* Fast counterpart used only for a clean, completely generated editor cache. */
+bool RpgStageBuild_ResumePreparedEditorPreview(int stageNumber, RpgStage *stage);
 /* Play requires a complete stage filesystem.  Editor idle/stop caches may
    deliberately contain only one area until this is called. */
 bool RpgStageBuild_EnsureAllAreasGenerated(RpgStage *stage);
 bool RpgStageBuild_RefreshEditorPreviewCompactCells(const RpgStage *stage);
+/* A targeted editor-preview writer changes its own disposable build files.
+   Temporarily discard the watcher request around that write so
+   ReadDirectoryChangesW does not feed those known internal changes back as
+   an external area mutation.  This is deliberately editor-preview-only. */
+void RpgStageBuild_BeginInternalPreviewWrite(void);
+void RpgStageBuild_EndInternalPreviewWrite(void);
 /* Stop-side counterpart of preview resume: repair only runtime mutations made
    during editor Play, keeping the unchanged preview cache in place. */
 bool RpgStageBuild_RepairEditorPreview(const RpgStage *stage,

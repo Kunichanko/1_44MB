@@ -1,0 +1,5 @@
+type=49
+cell_row=6
+cell_column=336
+x=10768.0
+y=208.0

@@ -11,7 +11,11 @@
 #include <stdio.h>
 #include <string.h>
 
+enum { RPG_BUILD_GENERATION_WORK_MIN = 1, RPG_BUILD_GENERATION_WORK_MAX = 64,
+       RPG_BUILD_GENERATION_WORK_DEFAULT = 8 };
+
 static RpgBuildCellStorageMode currentMode = RPG_BUILD_CELL_STORAGE_COMPACT;
+static int generationWorkPerUpdate = RPG_BUILD_GENERATION_WORK_DEFAULT;
 
 static bool GetConfigPath(char *path, size_t pathSize)
 {
@@ -20,11 +24,15 @@ static bool GetConfigPath(char *path, size_t pathSize)
 
 RpgBuildCellStorageMode RpgBuildCellStorage_LoadMode(void)
 {
-    char path[1200]; FILE *file; int mode;
+    char path[1200]; FILE *file; int mode, work = RPG_BUILD_GENERATION_WORK_DEFAULT;
     currentMode = RPG_BUILD_CELL_STORAGE_COMPACT;
+    generationWorkPerUpdate = RPG_BUILD_GENERATION_WORK_DEFAULT;
     if (!GetConfigPath(path, sizeof(path)) || (file = fopen(path, "rb")) == NULL) return currentMode;
-    (void)fscanf(file, "%d", &mode);
+    (void)fscanf(file, "%d %d", &mode, &work);
     fclose(file);
+    if (work < RPG_BUILD_GENERATION_WORK_MIN) work = RPG_BUILD_GENERATION_WORK_MIN;
+    if (work > RPG_BUILD_GENERATION_WORK_MAX) work = RPG_BUILD_GENERATION_WORK_MAX;
+    generationWorkPerUpdate = work;
     /* 全マスを個別フォルダ化する旧方式は残すが、進行度保存では使用しない。 */
     return currentMode;
 }
@@ -36,7 +44,7 @@ bool RpgBuildCellStorage_SaveMode(RpgBuildCellStorageMode mode)
         !GetConfigPath(path, sizeof(path))) return false;
     file = fopen(path, "wb");
     if (file == NULL) return false;
-    fprintf(file, "%d\n", (int)mode);
+    fprintf(file, "%d %d\n", (int)mode, generationWorkPerUpdate);
     if (fclose(file) != 0) return false;
     currentMode = mode;
     return true;
@@ -53,6 +61,24 @@ RpgBuildCellStorageMode RpgBuildCellStorage_GetMode(void) { return currentMode; 
 const char *RpgBuildCellStorage_GetModeName(RpgBuildCellStorageMode mode)
 {
     return mode == RPG_BUILD_CELL_STORAGE_FOLDERS ? "All folders" : "Compact cells";
+}
+
+int RpgBuildCellStorage_GetGenerationWorkPerUpdate(void)
+{
+    return generationWorkPerUpdate;
+}
+
+void RpgBuildCellStorage_SetGenerationWorkPerUpdate(int count)
+{
+    if (count < RPG_BUILD_GENERATION_WORK_MIN) count = RPG_BUILD_GENERATION_WORK_MIN;
+    if (count > RPG_BUILD_GENERATION_WORK_MAX) count = RPG_BUILD_GENERATION_WORK_MAX;
+    generationWorkPerUpdate = count;
+}
+
+bool RpgBuildCellStorage_SaveGenerationWorkPerUpdate(int count)
+{
+    RpgBuildCellStorage_SetGenerationWorkPerUpdate(count);
+    return RpgBuildCellStorage_SaveMode(currentMode);
 }
 
 bool RpgBuildCellStorage_Create(const RpgStage *stage, int startMapIndex,
@@ -72,8 +98,45 @@ bool RpgBuildCellStorage_CreatePreview(const RpgStage *stage, int startMapIndex,
 
 void RpgBuildCellStorage_Update(const RpgBuildCellStorageBackend *backend)
 {
-    if (currentMode == RPG_BUILD_CELL_STORAGE_FOLDERS) RpgBuildCellFolders_Update(backend);
-    else RpgBuildCellCompact_Update(backend);
+    if (currentMode == RPG_BUILD_CELL_STORAGE_FOLDERS)
+        RpgBuildCellFolders_Update(backend, generationWorkPerUpdate);
+    else RpgBuildCellCompact_Update(backend, generationWorkPerUpdate);
+}
+
+bool RpgBuildCellStorage_QueueMap(const RpgStage *stage, int mapIndex,
+                                  const RpgBuildCellStorageBackend *backend)
+{
+    /* Compact storage is the active mode.  Preserve legacy fallback behavior
+       without allowing it to alter the compact editor path. */
+    return currentMode == RPG_BUILD_CELL_STORAGE_FOLDERS ?
+           RpgBuildCellFolders_EnsureMap(stage, mapIndex, backend) :
+           RpgBuildCellCompact_QueueMap(stage, mapIndex);
+}
+
+bool RpgBuildCellStorage_QueueCell(const RpgStage *stage, RpgGridCell cell,
+                                   const RpgBuildCellStorageBackend *backend)
+{
+    /* Folder storage has no incremental single-cell writer.  It is retained
+       solely as a compatibility mode, so use its established immediate path.
+       Compact storage—the normal editor mode—keeps the work asynchronous. */
+    return currentMode == RPG_BUILD_CELL_STORAGE_FOLDERS ?
+           RpgBuildCellFolders_EnsureCell(cell,
+                                          stage == NULL ? 0 : stage->blocks[cell.row][cell.column],
+                                          backend) :
+           RpgBuildCellCompact_QueueCell(stage, cell);
+}
+
+bool RpgBuildCellStorage_QueueCellUpdate(const RpgStage *stage, RpgGridCell cell,
+                                         int previousBlockType,
+                                         const RpgBuildCellStorageBackend *backend)
+{
+    if (stage == NULL || cell.row < 0 || cell.row >= RPG_STAGE_ROWS ||
+        cell.column < 0 || cell.column >= RPG_STAGE_WORLD_COLUMNS) return false;
+    /* Legacy all-folder storage has no deferred replacement primitive. */
+    if (currentMode == RPG_BUILD_CELL_STORAGE_FOLDERS) {
+        return RpgBuildCellFolders_EnsureCell(cell, stage->blocks[cell.row][cell.column], backend);
+    }
+    return RpgBuildCellCompact_QueueCellUpdate(stage, cell, previousBlockType);
 }
 
 bool RpgBuildCellStorage_EnsureMap(const RpgStage *stage, int mapIndex,
@@ -125,6 +188,35 @@ void RpgBuildCellStorage_GetGenerationProgress(const RpgStage *stage, int *gener
     else RpgBuildCellCompact_GetGenerationProgress(stage, generatedCells, totalCells, isPending);
 }
 
+bool RpgBuildCellStorage_GetQueuedCellUpdateProgress(int *completedCells, int *totalCells)
+{
+    if (completedCells != NULL) *completedCells = 0;
+    if (totalCells != NULL) *totalCells = 0;
+    return currentMode == RPG_BUILD_CELL_STORAGE_COMPACT &&
+           RpgBuildCellCompact_GetQueuedCellUpdateProgress(completedCells, totalCells);
+}
+
+void RpgBuildCellStorage_ClearQueuedCellUpdateProgress(void)
+{
+    if (currentMode == RPG_BUILD_CELL_STORAGE_COMPACT)
+        RpgBuildCellCompact_ClearQueuedCellUpdateProgress();
+}
+
+bool RpgBuildCellStorage_IsGenerationPending(void)
+{
+    return currentMode == RPG_BUILD_CELL_STORAGE_FOLDERS ?
+           RpgBuildCellFolders_IsGenerationPending() :
+           RpgBuildCellCompact_IsGenerationPending();
+}
+
+void RpgBuildCellStorage_CancelGeneration(void)
+{
+    if (currentMode == RPG_BUILD_CELL_STORAGE_FOLDERS)
+        RpgBuildCellFolders_CancelGeneration();
+    else
+        RpgBuildCellCompact_CancelGeneration();
+}
+
 bool RpgBuildCellStorage_GetGenerationTarget(RpgGridCell *cell)
 {
     return currentMode == RPG_BUILD_CELL_STORAGE_FOLDERS ?
@@ -166,7 +258,8 @@ bool RpgBuildCellStorage_ApplyProgressState(RpgStage *stage,
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0;
          column < RPG_STAGE_WORLD_COLUMNS; column++) {
         if (RpgBuildCellCompact_UsesMetadataForBlock(stage->blocks[row][column]) &&
-            !available[row][column]) stage->blocks[row][column] = RPG_BLOCK_BUILD_MISSING;
+            !available[row][column])
+            RpgStage_SetCellError(stage, row, column, stage->blocks[row][column]);
     }
     return true;
 }

@@ -137,7 +137,7 @@ void RpgCharacter_UnloadPlayerSprites(void)
 RpgCharacter RpgCharacter_Create(Vector2 position, Color shirtColor, Color hairColor)
 {
     return (RpgCharacter){ .position = position, .isGrounded = true, .moveSpeed = 180.0f,
-                           .scale = 1.0f, .facingDirection = 1,
+                           .scale = 1.0f, .jumpHeight = 88.16667f, .facingDirection = 1,
                            .shirtColor = shirtColor, .hairColor = hairColor };
 }
 
@@ -318,7 +318,10 @@ void RpgCharacter_UpdatePlayerWithStageAndMovingSolidsControlled(RpgCharacter *c
     }
 
     if (allowJumpInput && character->isGrounded && IsKeyPressed(KEY_W)) {
-        character->verticalSpeed = -460.0f;
+        float jumpHeight = Clamp(character->jumpHeight, 1.0f,
+                                 (float)(RPG_STAGE_TILE_SIZE * 12));
+        /* v² = 2gh: use the configured apex without changing gravity. */
+        character->verticalSpeed = -sqrtf(2.0f * 1200.0f * jumpHeight);
         character->isGrounded = false;
     }
     bounds = RpgCharacter_GetCollisionBounds(character);
@@ -424,7 +427,9 @@ void RpgCharacter_UpdatePlayer(RpgCharacter *character, float deltaTime, float g
     character->position.x = Clamp(character->position.x + direction * character->moveSpeed * deltaTime,
                                   minimumX, maximumX);
     if (character->isGrounded && IsKeyPressed(KEY_W)) {
-        character->verticalSpeed = -460.0f;
+        float jumpHeight = Clamp(character->jumpHeight, 1.0f,
+                                 (float)(RPG_STAGE_TILE_SIZE * 12));
+        character->verticalSpeed = -sqrtf(2.0f * 1200.0f * jumpHeight);
         character->isGrounded = false;
     }
     character->verticalSpeed += 1200.0f * deltaTime;

@@ -1,10 +1,10 @@
-// 依存する自プロジェクト内ファイル: rpg_editor_play.h
 // 役割: エディター内プレイの開始・停止に必要な編集状態の複製と復元を実装する。
 #include "rpg_editor_play.h"
 #include "rpg_stage_authority.h"
 
 #include <stddef.h>
 
+// runtimeを初期化し、ステージ権限をエディターランタイムに切り替える
 void RpgEditorPlay_Begin(RpgEditorPlayRuntime *runtime, int mapIndex, const RpgLayout *layout,
                          const RpgCharacter *player, const RpgCharacter *npc,
                          const RpgInspect *npcInspect,

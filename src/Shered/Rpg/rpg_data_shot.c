@@ -1,5 +1,6 @@
 // 依存する自プロジェクト内ファイル: rpg_data_shot.h
 #include "rpg_data_shot.h"
+#include "rpg_object_folder.h"
 #include "rpg_gimic_sprites.h"
 
 #include "raymath.h"
@@ -76,9 +77,34 @@ void RpgDataShot_SetFileProperties(RpgDataShot *shot, const RpgShooterConfig *sh
     if (shot->speed > 480.0f) shot->speed = 480.0f;
 }
 
+void RpgDataShots_ApplyShooterPayloadCache(RpgDataShots *shots,
+                                           const RpgAttachments *attachments,
+                                           int attachmentId)
+{
+    if (shots == NULL || attachments == NULL || attachmentId <= 0) return;
+    const RpgShooterConfig *shooter = RpgAttachments_FindShooterConst(attachments, attachmentId);
+    if (shooter == NULL || !shooter->runtimePayloadReady) return;
+    int fileCount = shooter->runtimePayloadFileCount;
+    unsigned long long totalBytes = shooter->runtimePayloadTotalBytes;
+    if (fileCount < 1) fileCount = shooter->previewFileCount > 0 ? shooter->previewFileCount : 1;
+    if (totalBytes == 0) totalBytes = shooter->previewTotalBytes > 0 ? shooter->previewTotalBytes :
+                         (unsigned long long)fileCount * RPG_DATA_SPEED_BASE_BYTES;
+    for (int index = 0; index < RPG_DATA_SHOT_MAX_COUNT; index++) {
+        RpgDataShot *shot = &shots->entries[index];
+        if (!shot->active || shot->isPreview || shot->hasAddedFiles ||
+            shot->attachmentIndex < 0 || shot->attachmentIndex >= attachments->count ||
+            attachments->entries[shot->attachmentIndex].folderId != attachmentId) continue;
+        shot->payloadFileCount = fileCount;
+        shot->payloadTotalBytes = totalBytes;
+        RpgDataShot_SetFileProperties(shot, shooter, shot->payloadFileCount,
+                                      shot->payloadTotalBytes);
+    }
+}
+
 static bool RpgDataShots_FindWallImpactAlongSegment(const RpgStage *stage, Vector2 start, Vector2 end,
                                                     const RpgMovingSolidSet *movingSolids,
-                                                    float radius, Vector2 *impactPosition)
+                                                    float radius, const RpgGridCell *sourceCell,
+                                                    Vector2 *impactPosition)
 {
     // 高速な弾でも壁を飛び越えないよう、移動線分を小刻みに半径込みで調べる。
     Vector2 movement = Vector2Subtract(end, start);
@@ -93,9 +119,32 @@ static bool RpgDataShots_FindWallImpactAlongSegment(const RpgStage *stage, Vecto
             return true;
         }
         Vector2 worldImpact;
-        if (RpgStage_FindSolidCircleCollisionCenter(stage, worldPosition, radius, &worldImpact)) {
-            *impactPosition = RpgDataShots_WorldPositionToStorage(stage, worldImpact);
-            return true;
+        const int storageColumn = (int)floorf(position.x / RPG_STAGE_TILE_SIZE);
+        const int storageRow = (int)floorf(position.y / RPG_STAGE_TILE_SIZE);
+        /* A projectile begins at the centre of its emitter's real collision
+           cell.  It must leave that one source cell before terrain collision
+           starts; otherwise it destroys itself on the first simulation step. */
+        const bool isInsideSourceCell = sourceCell != NULL &&
+                                        storageRow == sourceCell->row &&
+                                        storageColumn == sourceCell->column;
+        if (!isInsideSourceCell &&
+            RpgStage_FindSolidCircleCollisionCenter(stage, worldPosition, radius, &worldImpact)) {
+            int impactStorageRow;
+            int impactStorageColumn;
+            /* The emitter is deliberately a real solid cell.  After the
+               projectile centre has crossed its edge, the circle can still
+               overlap that same source cell by its radius.  This must not be
+               treated as a return hit on the shooter; keep checking until a
+               different solid cell (or another collision kind) is reached. */
+            const bool hitSourceCell = sourceCell != NULL &&
+                RpgStage_GetWorldCellAtPosition(stage, worldImpact,
+                                                 &impactStorageRow, &impactStorageColumn) &&
+                impactStorageRow == sourceCell->row &&
+                impactStorageColumn == sourceCell->column;
+            if (!hitSourceCell) {
+                *impactPosition = RpgDataShots_WorldPositionToStorage(stage, worldImpact);
+                return true;
+            }
         }
         /* Dynamic blocks expose the same world-space rectangles used by player physics. */
         if (movingSolids != NULL) {
@@ -143,20 +192,33 @@ static int RpgDataShots_FindWireFromReceiver(const RpgWires *wires, RpgGridCell 
     return -1;
 }
 
-static bool RpgDataShots_UpdateElectric(RpgDataShot *shot, const RpgWires *wires,
-                                        float cellDelay, float deltaTime)
+static bool RpgDataShots_UpdateElectric(RpgDataShot *shot, const RpgStage *stage,
+                                        const RpgReceivers *receivers,
+                                        const RpgWires *wires, float cellDelay, float deltaTime)
 {
     if (wires == NULL || shot->electricWireIndex < 0 || shot->electricWireIndex >= wires->count)
         return false;
     const RpgWire *wire = &wires->entries[shot->electricWireIndex];
     if (wire->kind != RPG_WIRE_KIND_ELECTRIC || wire->path.cellCount <= 0 || shot->electricCellIndex < 0 ||
-        shot->electricCellIndex >= wire->path.cellCount) return false;
+        shot->electricCellIndex >= wire->path.cellCount ||
+        !RpgWires_HasLiveReceiverSource(wire, receivers)) return false;
+    /* A red error is a missing physical block/object, but the authored wire
+       path deliberately remains visible.  Electricity must not bridge that
+       missing cell: it stops at the first red-error path cell. */
+    if (stage == NULL || RpgStage_IsCellError(stage,
+                                               wire->path.cells[shot->electricCellIndex].row,
+                                               wire->path.cells[shot->electricCellIndex].column))
+        return false;
     if (cellDelay < 0.01f) cellDelay = 0.01f;
     shot->electricDelayElapsed += deltaTime;
     while (shot->electricDelayElapsed >= cellDelay) {
         shot->electricDelayElapsed -= cellDelay;
         shot->electricCellIndex++;
         if (shot->electricCellIndex >= wire->path.cellCount) return false;
+        if (RpgStage_IsCellError(stage,
+                                 wire->path.cells[shot->electricCellIndex].row,
+                                 wire->path.cells[shot->electricCellIndex].column))
+            return false;
     }
     shot->position = RpgDataShots_GetCellCenter(wire->path.cells[shot->electricCellIndex]);
     return true;
@@ -173,11 +235,33 @@ static void RpgDataShots_Spawn(RpgDataShots *shots, const RpgAttachments *attach
         shots->entries[index] = (RpgDataShot){ .active = true, .isPreview = isPreview,
             .folderSerial = shots->nextFolderSerial++, .attachmentIndex = attachmentIndex,
             .position = RpgDataShots_GetCellCenter(shooter->path.cells[0]),
-            .metadataCell = { -1, -1 }, .electricLastAppliedCellIndex = -1,
+            .electricLastAppliedCellIndex = -1,
+            .folderMaterializationDelayFrames = 0,
             .folderMonitorHandle = -1 };
+        /* A shot has no runtime folder until it is explicitly eaten/spat.
+           It must nevertheless begin with the emitter's authored file
+           properties.  Passing zero for ordinary shots made every live data
+           shot display and behave as an empty (0-file) payload. */
+        int configuredFileCount = shooter->runtimePayloadReady ?
+                                  shooter->runtimePayloadFileCount : shooter->previewFileCount;
+        if (configuredFileCount < 1) configuredFileCount = 1;
+        /* Older and newly placed emitters may have a file count but no
+           explicit total size yet.  A non-empty payload must not display as
+           0 B: use one 100 B speed unit per configured file until a real
+           folder supplies its measured total. */
+        unsigned long long configuredTotalBytes = shooter->runtimePayloadReady ?
+                                                  shooter->runtimePayloadTotalBytes : shooter->previewTotalBytes;
+        if (configuredTotalBytes == 0)
+            configuredTotalBytes =
+                                                  (unsigned long long)configuredFileCount *
+                                                      RPG_DATA_SPEED_BASE_BYTES;
+        shots->entries[index].payloadFileCount = configuredFileCount;
+        shots->entries[index].payloadTotalBytes = configuredTotalBytes;
         RpgDataShot_SetFileProperties(&shots->entries[index], shooter,
-            isPreview ? shooter->previewFileCount : 0,
-            isPreview ? shooter->previewTotalBytes : 0);
+                                      configuredFileCount, configuredTotalBytes);
+        /* The visible shot deliberately starts now from the cached payload.
+           RpgObjectFolders_UpdateDataShotLifetimes() materializes its folder
+           on a later frame; input must not wait for filesystem work. */
         if (shots->nextFolderSerial <= 0) shots->nextFolderSerial = 1;
         return;
     }
@@ -242,14 +326,14 @@ void RpgDataShots_Update(RpgDataShots *shots, RpgAttachments *attachments,
                          const RpgMovingSolidSet *movingSolids,
                          float deltaTime, bool previewsOnly)
 {
-    RpgAttachments_SynchronizeModuleConfigs(attachments);
     RpgAttachments_UpdateShooterAnimations(attachments, deltaTime);
     for (int index = 0; index < RPG_DATA_SHOT_MAX_COUNT; index++) {
         RpgDataShot *shot = &shots->entries[index];
         if (!shot->active || shot->isZipperHeld || shot->attachmentIndex >= attachments->count) continue;
         if (shot->isElectric) {
             // 導線の進行は受容体ではなく、電気化したデータ弾自身が担当する。
-            if (!RpgDataShots_UpdateElectric(shot, wires, electricCellDelay, deltaTime)) shot->active = false;
+            if (!RpgDataShots_UpdateElectric(shot, stage, receivers, wires,
+                                              electricCellDelay, deltaTime)) shot->active = false;
             // プレビュー弾は更新呼び出し側の用途に関わらず、ギミックへ影響しない。
             else if (!shot->isPreview && !previewsOnly &&
                      shot->electricLastAppliedCellIndex != shot->electricCellIndex) {
@@ -314,13 +398,16 @@ void RpgDataShots_Update(RpgDataShots *shots, RpgAttachments *attachments,
                 shot->position = RpgDataShots_GetCellCenter(
                     wires->entries[shot->electricWireIndex].path.cells[0]);
             }
-        } else if (RpgDataShots_FindWallImpactAlongSegment(stage, previousPosition, shot->position, movingSolids, shot->size,
-                                                    &impactPosition)) {
+        } else if (RpgDataShots_FindWallImpactAlongSegment(stage, previousPosition, shot->position,
+                                                            movingSolids, shot->size,
+                                                            &path->cells[0], &impactPosition)) {
             shot->impactPosition = impactPosition;
             shot->hitWall = true;
             shot->active = false;
-        } else if (shot->pathCellIndex + 1 >= path->cellCount && path->cellCount > 1 && distance <= move)
-            shot->active = false;
+        }
+        /* The configured path only steers the shot.  Reaching its final cell
+           must not destroy it: from there it continues along the launch side
+           until an actual receiver, solid, or stage boundary stops it. */
     }
 }
 
@@ -361,7 +448,8 @@ void RpgDataShots_DrawMap(const RpgDataShots *shots, int mapIndex)
     float mapEndX = mapStartX + RPG_STAGE_COLUMNS * RPG_STAGE_TILE_SIZE;
     for (int index = 0; index < RPG_DATA_SHOT_MAX_COUNT; index++) {
         const RpgDataShot *shot = &shots->entries[index];
-        if (!shot->active || shot->isZipperHeld || shot->position.x < mapStartX || shot->position.x >= mapEndX) continue;
+        if (!shot->active || shot->isZipperHeld ||
+            shot->position.x < mapStartX || shot->position.x >= mapEndX) continue;
         Vector2 localPosition = RpgStage_SnapRenderPoint(
             (Vector2){ shot->position.x - mapStartX, shot->position.y });
         if (shot->isElectric) {

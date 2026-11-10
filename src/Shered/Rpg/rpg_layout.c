@@ -15,6 +15,10 @@ static const char *GetGlobalRuntimePath(void)
 
 static void NormalizeGlobalRuntime(RpgLayout *layout)
 {
+    /* Physics coordinates are stage pixels, never screen/DPI pixels. */
+    if (layout->playerJumpHeight < 1.0f ||
+        layout->playerJumpHeight > (float)(RPG_STAGE_TILE_SIZE * 12))
+        layout->playerJumpHeight = 88.16667f; /* legacy -460 px/s launch */
     if (layout->electricCellDelay < 0.01f || layout->electricCellDelay > 2.0f)
         layout->electricCellDelay = 0.15f;
     if (layout->magnetMetalSpeed < 16.0f || layout->magnetMetalSpeed > 960.0f)
@@ -55,7 +59,8 @@ RpgLayout RpgLayout_Default(void)
     // 足元をマス下辺中央に揃え、初期配置とエディターのスナップ規則を一致させる。
     return (RpgLayout){ .playerPosition = { 8.5f * RPG_STAGE_TILE_SIZE, RPG_STAGE_GROUND_TOP },
                          .npcPosition = { 12.5f * RPG_STAGE_TILE_SIZE, RPG_STAGE_GROUND_TOP },
-                         .playerMoveSpeed = 180.0f, .playerScale = 1.0f, .npcScale = 1.0f,
+                         .playerMoveSpeed = 180.0f, .playerScale = 1.0f,
+                         .playerJumpHeight = 88.16667f, .npcScale = 1.0f,
                           .stage3IntroEnabled = true, .electricCellDelay = 0.15f, .magnetMetalSpeed = 160.0f,
                           .backgroundBrightness = 1.0f, .blockBrightness = 1.0f,
                          .groundHue = 0.50f, .groundSaturation = 0.50f, .groundLightness = 0.50f,
@@ -160,18 +165,20 @@ bool RpgLayout_LoadGlobalRuntime(RpgLayout *layout)
     if (file == NULL) return RpgLayout_SaveGlobalRuntime(layout);
     int readCount = 0;
     if (fgets(line, sizeof(line), file) != NULL)
-        readCount = sscanf(line, "%f %f %f %f %f", &layout->electricCellDelay,
+        readCount = sscanf(line, "%f %f %f %f %f %f", &layout->electricCellDelay,
                            &layout->zipperFolderReturnDuration,
                            &layout->zipperFolderReturnAnimationDelay, &layout->referenceFollowerScale,
-                           &layout->magnetMetalSpeed);
+                           &layout->magnetMetalSpeed, &layout->playerJumpHeight);
     while (fgets(line, sizeof(line), file) != NULL)
         (void)sscanf(line, "key_door_failure_text=%191[^\r\n]", layout->keyDoorFailureText);
     fclose(file);
     if (readCount < 3) return RpgLayout_SaveGlobalRuntime(layout);
     if (readCount < 4) layout->referenceFollowerScale = 0.50f;
     if (readCount < 5) layout->magnetMetalSpeed = 160.0f;
+    if (readCount < 6) layout->playerJumpHeight = 88.16667f;
     NormalizeGlobalRuntime(layout);
-    return true;
+    /* Upgrade the old five-value runtime file once. */
+    return readCount < 6 ? RpgLayout_SaveGlobalRuntime(layout) : true;
 }
 
 bool RpgLayout_SaveGlobalRuntime(const RpgLayout *layout)
@@ -179,9 +186,10 @@ bool RpgLayout_SaveGlobalRuntime(const RpgLayout *layout)
     if (layout == NULL) return false;
     FILE *file = fopen(GetGlobalRuntimePath(), "w");
     if (file == NULL) return false;
-    fprintf(file, "%.3f %.2f %.2f %.2f %.1f\n", layout->electricCellDelay,
+    fprintf(file, "%.3f %.2f %.2f %.2f %.1f %.2f\n", layout->electricCellDelay,
             layout->zipperFolderReturnDuration, layout->zipperFolderReturnAnimationDelay,
-            layout->referenceFollowerScale, layout->magnetMetalSpeed);
+            layout->referenceFollowerScale, layout->magnetMetalSpeed,
+            layout->playerJumpHeight);
     fprintf(file, "key_door_failure_text=%s\n", layout->keyDoorFailureText);
     return fclose(file) == 0;
 }

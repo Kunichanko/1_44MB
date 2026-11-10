@@ -1,0 +1,5 @@
+type=1
+cell_row=9
+cell_column=327
+x=10480.0
+y=304.0

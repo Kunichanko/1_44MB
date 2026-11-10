@@ -16,6 +16,15 @@ enum { RPG_DATA_SHOT_MAX_COUNT = 96, RPG_DATA_SHOT_BASELINE_FILE_MAX = 128,
 typedef struct RpgDataShot {
     bool active;
     bool isPreview;
+    /* The visual and physics begin from the shooter's cached payload.  The
+       runtime folder is materialized by a later cooperative folder tick. */
+    bool folderMaterialized;
+    /* Retry backoff after a worker-side filesystem failure.  Initial queue
+       submission itself performs no Win32 I/O on the game thread. */
+    unsigned char folderMaterializationDelayFrames;
+    /* Set while the immutable folder-creation request is owned by the
+       Windows worker.  The worker never retains a RpgDataShot pointer. */
+    bool folderMaterializationQueued;
     /* Zipperに取り込まれている間は描画・更新を止め、返却時にメタデータから復元する。 */
     bool isZipperHeld;
     // 同時に存在する弾を電波発生装置とは別の実フォルダで識別する連番。
@@ -24,10 +33,13 @@ typedef struct RpgDataShot {
     int pathCellIndex;
     Vector2 position;
     Vector2 impactPosition;
-    RpgGridCell metadataCell;
     // 実フォルダを走査して得たファイル数・合計容量。見た目と速度はこの値から更新する。
     int fileCount;
     unsigned long long totalBytes;
+    /* Initial payload inherited from the emitting shooter.  Runtime files
+       dropped into this shot are layered on top by the folder monitor. */
+    int payloadFileCount;
+    unsigned long long payloadTotalBytes;
     // 発射直後のフォルダ内容を記録し、後から追加されたファイルだけを強調・ドロップ対象にする。
     bool folderStatsInitialized;
     /* Connected by rpg_object_folder_monitor while this runtime object owns a
@@ -61,6 +73,9 @@ RpgDataShots RpgDataShots_Default(void);
 // ファイル数・容量から実弾またはプレビュー弾の大きさと速度を同じ式で求める。
 void RpgDataShot_SetFileProperties(RpgDataShot *shot, const RpgShooterConfig *shooter,
                                    int fileCount, unsigned long long totalBytes);
+void RpgDataShots_ApplyShooterPayloadCache(RpgDataShots *shots,
+                                           const RpgAttachments *attachments,
+                                           int attachmentId);
 void RpgDataShots_Trigger(RpgDataShots *shots, RpgAttachments *attachments, int attachmentIndex);
 void RpgDataShots_TriggerAll(RpgDataShots *shots, RpgAttachments *attachments);
 void RpgDataShots_TriggerAllInMap(RpgDataShots *shots, RpgAttachments *attachments,

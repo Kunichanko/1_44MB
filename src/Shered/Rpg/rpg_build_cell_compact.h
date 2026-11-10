@@ -10,7 +10,15 @@ bool RpgBuildCellCompact_Create(const RpgStage *stage, const RpgBuildCellStorage
    finish remaining areas without blocking editor input. */
 bool RpgBuildCellCompact_CreatePreview(const RpgStage *stage, int startMapIndex,
                                        const RpgBuildCellStorageBackend *backend);
-void RpgBuildCellCompact_Update(const RpgBuildCellStorageBackend *backend);
+void RpgBuildCellCompact_Update(const RpgBuildCellStorageBackend *backend, int workBudget);
+/* Add one invalidated area to the existing incremental preview queue.  This
+   deliberately does not materialise all 240 cells in one editor frame. */
+bool RpgBuildCellCompact_QueueMap(const RpgStage *stage, int mapIndex);
+/* Queue one already-existing ordinary cell for a compact CSV refresh.  This
+   does not invalidate or touch the other cells in its area. */
+bool RpgBuildCellCompact_QueueCell(const RpgStage *stage, RpgGridCell cell);
+bool RpgBuildCellCompact_QueueCellUpdate(const RpgStage *stage, RpgGridCell cell,
+                                         int previousBlockType);
 bool RpgBuildCellCompact_EnsureMap(const RpgStage *stage, int mapIndex,
                                    const RpgBuildCellStorageBackend *backend);
 bool RpgBuildCellCompact_IsMapGenerated(const RpgStage *stage, int mapIndex);
@@ -28,6 +36,16 @@ void RpgBuildCellCompact_BeginMetadataBatch(void);
 bool RpgBuildCellCompact_EndMetadataBatch(const RpgBuildCellStorageBackend *backend);
 void RpgBuildCellCompact_GetGenerationProgress(const RpgStage *stage, int *generatedCells,
                                                int *totalCells, bool *isPending);
+/* A targeted editor edit rewrites an already materialized cell, so it does
+   not change the generated-cell total above.  Expose that short-lived batch
+   separately for the progress UI. */
+bool RpgBuildCellCompact_GetQueuedCellUpdateProgress(int *completedCells, int *totalCells);
+void RpgBuildCellCompact_ClearQueuedCellUpdateProgress(void);
+bool RpgBuildCellCompact_IsGenerationPending(void);
+/* Detach a discarded preview from its deferred work.  This intentionally
+   leaves the generated-state cache alone; Create/CreatePreview initialise it
+   before a new build session starts. */
+void RpgBuildCellCompact_CancelGeneration(void);
 /* Returns the next cell scheduled for incremental preview generation. */
 bool RpgBuildCellCompact_GetGenerationTarget(RpgGridCell *cell);
 bool RpgBuildCellCompact_UsesMetadataForBlock(int blockType);

@@ -41,6 +41,7 @@ typedef struct RpgWire {
 } RpgWire;
 typedef struct RpgWires { int count; RpgWire entries[RPG_WIRE_MAX_COUNT]; } RpgWires;
 struct RpgDataShots;
+struct RpgReceivers;
 
 RpgWires RpgWires_Default(void);
 bool RpgWires_Load(const char *filePath, RpgWires *wires);
@@ -56,10 +57,14 @@ bool RpgWires_FindEndpoint(const RpgWires *wires, int row, int column, int *wire
 bool RpgWires_MoveEndpoint(RpgWires *wires, const RpgStage *stage, int wireIndex,
                            bool isStart, int row, int column);
 void RpgWires_RemoveBroken(RpgWires *wires, const RpgStage *stage);
-void RpgWires_Draw(const RpgWires *wires, const RpgStage *stage);
-void RpgWires_DrawMap(const RpgWires *wires, const RpgStage *stage, int mapIndex);
+bool RpgWires_HasLiveReceiverSource(const RpgWire *wire, const struct RpgReceivers *receivers);
+void RpgWires_Draw(const RpgWires *wires, const RpgStage *stage,
+                   const struct RpgReceivers *receivers);
+void RpgWires_DrawMap(const RpgWires *wires, const RpgStage *stage,
+                      const struct RpgReceivers *receivers, int mapIndex);
 // 電気化したデータ弾が同じマスにいる導線だけを発光させる。進行状態はデータ弾側に持つ。
 void RpgWires_DrawElectric(const RpgWires *wires, const struct RpgDataShots *dataShots,
+                           const struct RpgReceivers *receivers,
                            int firstColumn, int columnCount);
 
 #endif

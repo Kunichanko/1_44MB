@@ -66,6 +66,13 @@ typedef struct RpgShooterConfig {
     float sizePerFile, speedPerKilobyte;
     int previewFileCount;
     unsigned long long previewTotalBytes;
+    /* Runtime-only payload cache.  It is derived from the shooter's own
+       object folder on a deferred monitor tick, never serialized as stage
+       authoring data.  A new shot can therefore start immediately with the
+       most recently known values. */
+    int runtimePayloadFileCount;
+    unsigned long long runtimePayloadTotalBytes;
+    bool runtimePayloadReady;
     RpgGridPath path;
     float animationElapsed;
 } RpgShooterConfig;

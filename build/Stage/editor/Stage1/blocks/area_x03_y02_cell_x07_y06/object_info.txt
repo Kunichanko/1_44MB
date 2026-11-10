@@ -1,3 +1,5 @@
 type=50
-x=880.0
+cell_row=6
+cell_column=347
+x=11120.0
 y=208.0

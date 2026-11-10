@@ -1,0 +1,5 @@
+type=39
+cell_row=4
+cell_column=47
+x=1520.0
+y=144.0

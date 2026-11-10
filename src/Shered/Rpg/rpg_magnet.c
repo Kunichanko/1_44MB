@@ -21,12 +21,12 @@ static const int magnetDirectionColumns[RPG_MAGNET_DIRECTION_COUNT] = { 0, 0, -1
 static bool IsMagnetOuterEdgeDirection(const RpgStage *stage, int row, int column,
                                        int directionRow, int directionColumn)
 {
-    const RpgMagnetObject *magnet = RpgStage_GetMagnetAtCellConst(stage, row, column);
+    const RpgCompositeObject *magnet = RpgStage_GetMagnetAtCellConst(stage, row, column);
     if (magnet == NULL) return true;
-    if (directionRow < 0) return row == magnet->rootRow;
-    if (directionRow > 0) return row == magnet->rootRow + magnet->height - 1;
-    if (directionColumn < 0) return column == magnet->rootColumn;
-    return column == magnet->rootColumn + magnet->width - 1;
+    if (directionRow < 0) return row == magnet->originRow;
+    if (directionRow > 0) return row == magnet->originRow + magnet->height - 1;
+    if (directionColumn < 0) return column == magnet->originColumn;
+    return column == magnet->originColumn + magnet->width - 1;
 }
 
 RpgMagnetRuntime RpgMagnetRuntime_Default(void)
@@ -72,26 +72,37 @@ void RpgMagnets_ConsumeCommunication(RpgMagnetRuntime *runtime, RpgStage *stage,
 
     /* Communication is area-scoped, like the other signal consumers.  It is
        intentionally unrelated to receiver-owned electrical wire paths. */
-    for (int index = 0; index < stage->magnetCount; index++) {
-        RpgMagnetObject *magnet = &stage->magnets[index];
+    for (int index = 0; index < stage->compositeObjectCount; index++) {
+        RpgCompositeObject *magnet = &stage->compositeObjects[index];
+        if (!RpgStage_IsCompositeRectangle(magnet) ||
+            !RpgBlockInventory_IsMagnetBlock(magnet->blockType)) continue;
         /* A Zipper-held composite keeps its geometry record so it can be
            spat back out, but it has no world cells and must not reactivate
            itself when a communication packet arrives. */
-        if (stage->blocks[magnet->rootRow][magnet->rootColumn] == RPG_BLOCK_BUILD_MISSING)
+        if (RpgStage_IsCellError(stage, magnet->originRow, magnet->originColumn))
             continue;
-        Vector2 center = RpgStage_GetWorldPositionForCell(stage, magnet->rootRow, magnet->rootColumn);
+        Vector2 center = RpgStage_GetWorldPositionForCell(stage, magnet->originRow, magnet->originColumn);
         if (RpgStage_GetMapAtWorldPosition(stage, center) != communication->sourceMapIndex) continue;
         magnet->blockType = communication->isActive ? RPG_BLOCK_EFFECT_MAGNET_ON :
                                                        RPG_BLOCK_EFFECT_MAGNET_OFF;
-        for (int row = magnet->rootRow; row < magnet->rootRow + magnet->height; row++)
-            for (int column = magnet->rootColumn; column < magnet->rootColumn + magnet->width; column++)
-                stage->blocks[row][column] = magnet->blockType;
+        for (int row = magnet->originRow; row < magnet->originRow + magnet->height; row++)
+            for (int column = magnet->originColumn; column < magnet->originColumn + magnet->width; column++)
+                RpgStage_SetCellBlock(stage, row, column, magnet->blockType);
     }
 }
 
 static bool IsCellInsideStage(int row, int column)
 {
     return row >= 0 && row < RPG_STAGE_ROWS && column >= 0 && column < RPG_STAGE_WORLD_COLUMNS;
+}
+
+/* Areas form one continuous collision world, but a magnet is deliberately an
+ * area-local device.  Storage columns identify its owning area even after
+ * the area's 2D grid position has been rearranged. */
+static int GetCellAreaIndex(int row, int column)
+{
+    if (!IsCellInsideStage(row, column)) return -1;
+    return column / RPG_STAGE_COLUMNS;
 }
 
 static Rectangle GetMetalBounds(Vector2 position)
@@ -126,7 +137,7 @@ void RpgMagnets_InitializeForStage(RpgMagnetRuntime *runtime, RpgStage *stage)
                 .bounds = GetMetalBounds(metal->position)
             };
             /* 保存用グリッドから外し、以後の衝突・描画は可動固体を参照する。 */
-            stage->blocks[row][column] = 0;
+            RpgStage_SetCellBlock(stage, row, column, 0);
             /* Dynamic blocks are not terrain cells: give each its own object
                folder while the runtime build is active. */
             (void)RpgObjectFolder_EnsureDynamicBlock(metal->objectCell, metal->blockType,
@@ -134,6 +145,37 @@ void RpgMagnets_InitializeForStage(RpgMagnetRuntime *runtime, RpgStage *stage)
         }
     }
     runtime->isInitialized = true;
+}
+
+bool RpgMagnets_AddRuntimeBlock(RpgMagnetRuntime *runtime, RpgStage *stage,
+                                RpgGridCell identityCell, int blockType, Vector2 position)
+{
+    RpgMagnetMetal *metal;
+    if (runtime == NULL || stage == NULL ||
+        (!RpgBlockInventory_IsMetalBlock(blockType) &&
+         !RpgBlockInventory_IsPushBlock(blockType)) ||
+        identityCell.row < 0 || identityCell.row >= RPG_STAGE_ROWS ||
+        identityCell.column < 0 || identityCell.column >= RPG_STAGE_WORLD_COLUMNS ||
+        runtime->metalCount >= RPG_MAGNET_MAX_METALS) return false;
+    if (!runtime->isInitialized) RpgMagnets_InitializeForStage(runtime, stage);
+    for (int index = 0; index < runtime->metalCount; index++)
+        if (runtime->metals[index].active &&
+            runtime->metals[index].objectCell.row == identityCell.row &&
+            runtime->metals[index].objectCell.column == identityCell.column) return false;
+    metal = &runtime->metals[runtime->metalCount];
+    *metal = (RpgMagnetMetal){
+        .position = position,
+        .previousPosition = position,
+        .lockedSocketAttachmentIndex = -1,
+        .objectCell = identityCell,
+        .blockType = blockType,
+        .active = true
+    };
+    runtime->movingSolids[runtime->metalCount++] = (RpgMovingSolid){
+        .previousBounds = GetMetalBounds(position), .bounds = GetMetalBounds(position)
+    };
+    RpgStage_SetCellBlock(stage, identityCell.row, identityCell.column, 0);
+    return true;
 }
 
 void RpgMagnets_BeginFrame(RpgMagnetRuntime *runtime)
@@ -144,28 +186,52 @@ void RpgMagnets_BeginFrame(RpgMagnetRuntime *runtime)
             runtime->metals[index].previousPosition = runtime->metals[index].position;
 }
 
-void RpgMagnets_LockInBlockSockets(RpgMagnetRuntime *runtime, RpgStage *stage,
-                                   const RpgAttachments *attachments, RpgButtonEvent *event,
-                                   RpgPlayerPushState *pushState)
+void RpgMagnets_ReconcileBlockSockets(RpgMagnetRuntime *runtime, RpgStage *stage,
+                                      const RpgAttachments *attachments, RpgButtonEvent *event,
+                                      RpgPlayerPushState *pushState)
 {
-    (void)event;
-    if (runtime == NULL || stage == NULL || attachments == NULL || !runtime->isInitialized)
-        return;
+    bool hasCoveredSocket[RPG_STAGE_MAP_COUNT] = { false };
+    if (runtime == NULL || stage == NULL || attachments == NULL || event == NULL ||
+        !runtime->isInitialized) return;
+
     for (int index = 0; index < runtime->metalCount; index++) {
         RpgMagnetMetal *metal = &runtime->metals[index];
         int socketIndex;
-        if (!metal->active || metal->lockedSocketAttachmentIndex >= 0) continue;
-        socketIndex = RpgAttachments_FindBlockSocketAtBoundsWorld(attachments, stage,
-                                                                   GetMetalBounds(metal->position));
+        int mapIndex;
+        Vector2 center;
+        if (!metal->active) continue;
+
+        /* A locked block has already been snapped to this socket.  Reuse the
+           stable attachment index rather than searching the whole attachment
+           list a second time just to publish its unchanged occupancy. */
+        socketIndex = metal->lockedSocketAttachmentIndex;
+        if (socketIndex < 0 || socketIndex >= attachments->count ||
+            RpgAttachments_IsRuntimeUnavailable(&attachments->entries[socketIndex]) ||
+            attachments->entries[socketIndex].type != RPG_BLOCK_ATTACHMENT_BLOCK_SOCKET) {
+            socketIndex = RpgAttachments_FindBlockSocketAtBoundsWorld(
+                attachments, stage, GetMetalBounds(metal->position));
+        }
         if (socketIndex < 0) {
-            metal->requiresSocketDeparture = false;
+            if (metal->lockedSocketAttachmentIndex < 0)
+                metal->requiresSocketDeparture = false;
             continue;
         }
-        if (metal->requiresSocketDeparture) continue;
+
+        /* The full-bounds lookup is also the socket beam's occlusion rule: a
+           partial overlap never emits.  A block can emit while held; it only
+           becomes fixed when it has not explicitly been released from here. */
+        center = (Vector2){ metal->position.x + RPG_STAGE_TILE_SIZE * 0.5f,
+                            metal->position.y + RPG_STAGE_TILE_SIZE * 0.5f };
+        mapIndex = RpgStage_GetMapAtWorldPosition(stage, center);
+        if (mapIndex < 0)
+            mapIndex = attachments->entries[socketIndex].cell.column / RPG_STAGE_COLUMNS;
+        if (mapIndex >= 0 && mapIndex < RPG_STAGE_MAP_COUNT)
+            hasCoveredSocket[mapIndex] = true;
+
+        if (metal->lockedSocketAttachmentIndex >= 0 || metal->requiresSocketDeparture) continue;
         /* The test intentionally accepts a small physics tolerance.  Once a
-           block is accepted, snap it to the actual target cell before its
-           4px seating animation so its collision, signal, and light occlusion
-           all agree on one exact socket position. */
+           block is accepted, snap it to the target cell so collision, signal,
+           and the 4px socket recess share the same exact position. */
         {
             RpgGridCell socketCell = RpgGridPath_GetSideNeighbor(
                 attachments->entries[socketIndex].cell, attachments->entries[socketIndex].side);
@@ -178,40 +244,8 @@ void RpgMagnets_LockInBlockSockets(RpgMagnetRuntime *runtime, RpgStage *stage,
         metal->isGrounded = true;
         metal->previousPosition = metal->position;
         metal->socketSettleOffset = 0.0f;
-        /* Releasing here makes a carried block become fixed the instant it
-           reaches a fully covered socket, without requiring another G press. */
         if (pushState != NULL && pushState->heldBlockIndex == index)
             *pushState = RpgPlayerPushState_Default();
-    }
-}
-
-void RpgMagnets_UpdateBlockSocketSignals(const RpgMagnetRuntime *runtime, RpgStage *stage,
-                                         const RpgAttachments *attachments,
-                                         RpgButtonEvent *event)
-{
-    bool hasCoveredSocket[RPG_STAGE_MAP_COUNT] = { false };
-    if (runtime == NULL || stage == NULL || attachments == NULL || event == NULL ||
-        !runtime->isInitialized) return;
-
-    for (int index = 0; index < runtime->metalCount; index++) {
-        const RpgMagnetMetal *metal = &runtime->metals[index];
-        int socketIndex;
-        int mapIndex;
-        Vector2 center;
-        if (!metal->active) continue;
-        /* This full-bounds test is also the socket beam's occlusion rule: a
-           partial overlap never emits, while a completely covered aperture
-           emits whether or not the block is currently fixed. */
-        socketIndex = RpgAttachments_FindBlockSocketAtBoundsWorld(
-            attachments, stage, GetMetalBounds(metal->position));
-        if (socketIndex < 0) continue;
-        center = (Vector2){ metal->position.x + RPG_STAGE_TILE_SIZE * 0.5f,
-                            metal->position.y + RPG_STAGE_TILE_SIZE * 0.5f };
-        mapIndex = RpgStage_GetMapAtWorldPosition(stage, center);
-        if (mapIndex < 0)
-            mapIndex = attachments->entries[socketIndex].cell.column / RPG_STAGE_COLUMNS;
-        if (mapIndex >= 0 && mapIndex < RPG_STAGE_MAP_COUNT)
-            hasCoveredSocket[mapIndex] = true;
     }
 
     for (int mapIndex = 0; mapIndex < RPG_STAGE_MAP_COUNT; mapIndex++) {
@@ -253,16 +287,20 @@ static bool IsRayClear(const RpgStage *stage, int magnetRow, int magnetColumn,
 {
     int metalRow;
     int metalColumn;
+    const int magnetArea = GetCellAreaIndex(magnetRow, magnetColumn);
     Vector2 magnetCenter = RpgStage_GetWorldPositionForCell(stage, magnetRow, magnetColumn);
-    if (!RpgStage_GetWorldCellAtPosition(stage, (Vector2){ metalPosition.x + RPG_STAGE_TILE_SIZE * 0.5f,
-                                                            metalPosition.y + RPG_STAGE_TILE_SIZE * 0.5f },
-                                        &metalRow, &metalColumn)) return false;
+    if (magnetArea < 0 || !RpgStage_GetWorldCellAtPosition(
+            stage, (Vector2){ metalPosition.x + RPG_STAGE_TILE_SIZE * 0.5f,
+                               metalPosition.y + RPG_STAGE_TILE_SIZE * 0.5f },
+            &metalRow, &metalColumn) ||
+        GetCellAreaIndex(metalRow, metalColumn) != magnetArea) return false;
     for (int distance = 1;; distance++) {
         Vector2 sample = { magnetCenter.x + directionColumn * distance * RPG_STAGE_TILE_SIZE,
                            magnetCenter.y + directionRow * distance * RPG_STAGE_TILE_SIZE };
         int row;
         int column;
-        if (!RpgStage_GetWorldCellAtPosition(stage, sample, &row, &column)) return false;
+        if (!RpgStage_GetWorldCellAtPosition(stage, sample, &row, &column) ||
+            GetCellAreaIndex(row, column) != magnetArea) return false;
         if (row == metalRow && column == metalColumn) return true;
         if (StopsMagnetField(stage->blocks[row][column])) return false;
     }
@@ -275,11 +313,14 @@ static bool FindMagnetTarget(const RpgMagnetRuntime *runtime, const RpgStage *st
     if (!RpgBlockInventory_IsMetalBlock(metal->blockType)) return false;
     Vector2 metalCenter = { metal->position.x + RPG_STAGE_TILE_SIZE * 0.5f,
                             metal->position.y + RPG_STAGE_TILE_SIZE * 0.5f };
+    const int metalArea = RpgStage_GetMapAtWorldPosition(stage, metalCenter);
     float bestDistance = 0.0f;
     bool found = false;
+    if (metalArea < 0) return false;
     for (int row = 0; row < RPG_STAGE_ROWS; row++) {
         for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++) {
             if (!RpgBlockInventory_IsMagnetActive(stage->blocks[row][column])) continue;
+            if (GetCellAreaIndex(row, column) != metalArea) continue;
             Vector2 magnetCenter = RpgStage_GetWorldPositionForCell(stage, row, column);
             for (int direction = 0; direction < RPG_MAGNET_DIRECTION_COUNT; direction++) {
                 int directionRow = magnetDirectionRows[direction];
@@ -486,6 +527,24 @@ bool RpgMagnets_IsPlayerPushHeld(const RpgMagnetRuntime *runtime,
            RpgBlockInventory_IsPushBlock(runtime->metals[pushState->heldBlockIndex].blockType);
 }
 
+int RpgMagnets_FindPlayerPushTarget(const RpgMagnetRuntime *runtime,
+                                    const RpgCharacter *player, float maximumDistance)
+{
+    int closestIndex = -1;
+    float closestDistance = maximumDistance;
+    if (runtime == NULL || player == NULL || !runtime->isInitialized) return -1;
+    for (int index = 0; index < runtime->metalCount; index++) {
+        const RpgMagnetMetal *block = &runtime->metals[index];
+        const float distance = Vector2Distance(player->position, GetPushBlockCenter(block));
+        if (!block->active || !RpgBlockInventory_IsPushBlock(block->blockType) ||
+            !IsWithinPushBlockInteractionRange(player, block, maximumDistance) ||
+            distance > closestDistance) continue;
+        closestDistance = distance;
+        closestIndex = index;
+    }
+    return closestIndex;
+}
+
 bool RpgMagnets_TogglePlayerPush(RpgMagnetRuntime *runtime, RpgStage *stage,
                                  RpgPlayerPushState *pushState, RpgCharacter *player,
                                  float maximumDistance, RpgButtonEvent *event)
@@ -500,18 +559,7 @@ bool RpgMagnets_TogglePlayerPush(RpgMagnetRuntime *runtime, RpgStage *stage,
         *pushState = RpgPlayerPushState_Default();
         return true;
     }
-    int closestIndex = -1;
-    float closestDistance = maximumDistance;
-    for (int index = 0; index < runtime->metalCount; index++) {
-        const RpgMagnetMetal *block = &runtime->metals[index];
-        if (!block->active || !RpgBlockInventory_IsPushBlock(block->blockType)) continue;
-        float distance = Vector2Distance(player->position, GetPushBlockCenter(block));
-        if (IsWithinPushBlockInteractionRange(player, block, maximumDistance) &&
-            distance <= closestDistance) {
-            closestDistance = distance;
-            closestIndex = index;
-        }
-    }
+    const int closestIndex = RpgMagnets_FindPlayerPushTarget(runtime, player, maximumDistance);
     if (closestIndex < 0) return false;
     RpgMagnetMetal *block = &runtime->metals[closestIndex];
     {
@@ -646,18 +694,25 @@ void RpgMagnets_DrawFields(const RpgStage *stage, int firstColumn, int columnCou
             for (int direction = 0; direction < RPG_MAGNET_DIRECTION_COUNT; direction++) {
                 int directionRow = magnetDirectionRows[direction];
                 int directionColumn = magnetDirectionColumns[direction];
+                Vector2 fieldEnd = center;
+                bool hasField = false;
                 if (!IsMagnetOuterEdgeDirection(stage, row, column, directionRow, directionColumn))
                     continue;
                 for (int distance = 1;; distance++) {
                     int targetRow = row + directionRow * distance;
                     int targetColumn = column + directionColumn * distance;
-                    if (!IsCellInsideStage(targetRow, targetColumn)) break;
+                    if (!IsCellInsideStage(targetRow, targetColumn) ||
+                        GetCellAreaIndex(targetRow, targetColumn) !=
+                            GetCellAreaIndex(row, column)) break;
                     int blockType = stage->blocks[targetRow][targetColumn];
-                    Vector2 target = { targetColumn * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f,
-                                       targetRow * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f };
-                    DrawLineEx(center, target, 1.5f, Fade(SKYBLUE, 0.28f));
+                    fieldEnd = (Vector2){ targetColumn * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f,
+                                          targetRow * RPG_STAGE_TILE_SIZE + RPG_STAGE_TILE_SIZE * 0.5f };
+                    hasField = true;
                     if (StopsMagnetField(blockType)) break;
                 }
+                /* One resolved range has one visible segment.  Previously the
+                   same ray was overdrawn once for every traversed cell. */
+                if (hasField) DrawLineEx(center, fieldEnd, 1.5f, Fade(SKYBLUE, 0.28f));
             }
         }
     }

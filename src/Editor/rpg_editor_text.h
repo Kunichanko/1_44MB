@@ -31,5 +31,12 @@ bool RpgEditorText_IsKeyboardCaptured(void);
 bool RpgEditorText_ConsumeEscape(void);
 void RpgEditorText_UpdateInput(char *text, size_t capacity, int *cursorIndex,
                                int *selectionAnchor, int *selectionEnd);
+/* Same cursor, selection, clipboard and focus behavior as UpdateInput, but
+ * accepts only decimal digits.  Decimal fields may additionally contain one
+ * period.  Inspector number controls must use this instead of their own
+ * append/backspace loops. */
+void RpgEditorText_UpdateNumericInput(char *text, size_t capacity, int *cursorIndex,
+                                      int *selectionAnchor, int *selectionEnd,
+                                      bool allowDecimalPoint);
 
 #endif

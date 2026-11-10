@@ -64,17 +64,19 @@ void RpgMagnets_ConsumeCommunication(RpgMagnetRuntime *runtime, RpgStage *stage,
                                      const RpgButtonEvent *communication);
 /* ステージに保存された金属を、実行時だけ細かく動く固体へ変換する。 */
 void RpgMagnets_InitializeForStage(RpgMagnetRuntime *runtime, RpgStage *stage);
+/* Restore a movable metal/push block from an already validated object
+ * folder.  It uses the same runtime representation as initial stage loading
+ * and leaves the associated stage cell as air. */
+bool RpgMagnets_AddRuntimeBlock(RpgMagnetRuntime *runtime, RpgStage *stage,
+                                RpgGridCell identityCell, int blockType, Vector2 position);
 /* Starts a world frame; movement code may replace previousPosition before changing a block. */
 void RpgMagnets_BeginFrame(RpgMagnetRuntime *runtime);
-/* Locks a fully seated runtime block into a top-mounted block socket. */
-void RpgMagnets_LockInBlockSockets(RpgMagnetRuntime *runtime, RpgStage *stage,
-                                   const RpgAttachments *attachments, RpgButtonEvent *event,
-                                   RpgPlayerPushState *pushState);
-/* Socket signal state is occupancy-driven, not lock-driven: an area stays
-   active whenever any runtime block fully covers one of its socket beams. */
-void RpgMagnets_UpdateBlockSocketSignals(const RpgMagnetRuntime *runtime, RpgStage *stage,
-                                         const RpgAttachments *attachments,
-                                         RpgButtonEvent *event);
+/* One post-physics socket pass both locks fully seated blocks and publishes
+   area-scoped occupancy.  Each free metal performs at most one socket lookup. */
+void RpgMagnets_ReconcileBlockSockets(RpgMagnetRuntime *runtime, RpgStage *stage,
+                                      const RpgAttachments *attachments,
+                                      RpgButtonEvent *event,
+                                      RpgPlayerPushState *pushState);
 void RpgMagnets_Update(RpgMagnetRuntime *runtime, RpgStage *stage, const RpgWires *wires,
                        float pixelsPerSecond, float deltaTime,
                        const RpgPlayerPushState *pushState);
@@ -84,6 +86,11 @@ RpgMovingSolidSet RpgMagnets_GetMovingSolidsExcept(const RpgMagnetRuntime *runti
 bool RpgMagnets_TogglePlayerPush(RpgMagnetRuntime *runtime, RpgStage *stage,
                                  RpgPlayerPushState *pushState, RpgCharacter *player,
                                  float maximumDistance, RpgButtonEvent *event);
+/* Non-mutating counterpart of the G interaction.  UI uses this exact target
+   selection so a prompt is visible only while pressing G can act on a push
+   block. */
+int RpgMagnets_FindPlayerPushTarget(const RpgMagnetRuntime *runtime,
+                                    const RpgCharacter *player, float maximumDistance);
 bool RpgMagnets_IsPlayerPushHeld(const RpgMagnetRuntime *runtime,
                                  const RpgPlayerPushState *pushState);
 /* Keeps the carried block and player one tile apart without allowing either

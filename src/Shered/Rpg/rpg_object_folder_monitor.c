@@ -1,6 +1,7 @@
 // Responsibility: Win32 change-notification handles shared by runtime objects.
 #include "rpg_object_folder_monitor.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -15,6 +16,7 @@ typedef struct RpgObjectFolderMonitorEntry {
     char directory[1200];
     RpgObjectFolderMonitorCallback callback;
     void *context;
+    unsigned int nativeChangeSerial;
 #ifdef _WIN32
     HANDLE notification;
 #endif
@@ -138,8 +140,24 @@ bool RpgObjectFolderMonitor_Poll(int handle)
         }
     }
 #endif
+    if (changed) entry->nativeChangeSerial++;
     if (changed && entry->callback != NULL) entry->callback(entry->context, entry->directory);
     return changed;
+}
+
+bool RpgObjectFolderMonitor_IsWatching(int handle)
+{
+    if (!IsValidHandle(handle)) return false;
+#ifdef _WIN32
+    return entries[handle].notification != NULL && entries[handle].notification != INVALID_HANDLE_VALUE;
+#else
+    return true;
+#endif
+}
+
+unsigned int RpgObjectFolderMonitor_GetNativeChangeSerial(int handle)
+{
+    return IsValidHandle(handle) ? entries[handle].nativeChangeSerial : 0U;
 }
 
 void RpgObjectFolderMonitor_PollAll(void)

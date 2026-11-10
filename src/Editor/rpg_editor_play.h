@@ -1,4 +1,3 @@
-// 依存する自プロジェクト内ファイル: rpg_attachment.h, rpg_character.h, rpg_item.h, rpg_map_event.h, rpg_receiver.h, rpg_signal_block.h, rpg_stage.h, rpg_wire.h, rpg_zipper.h
 // 役割: エディター内プレイ開始前の編集状態を保持し、停止時に安全に復元する。
 #ifndef RPG_EDITOR_PLAY_H
 #define RPG_EDITOR_PLAY_H

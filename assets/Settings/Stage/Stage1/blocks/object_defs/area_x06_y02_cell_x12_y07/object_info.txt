@@ -1,0 +1,5 @@
+type=38
+cell_row=7
+cell_column=152
+x=4880.0
+y=240.0

@@ -1,0 +1,5 @@
+type=1
+cell_row=5
+cell_column=252
+x=8080.0
+y=176.0

@@ -1,3 +1,5 @@
-type=42
-x=1072.0
+type=50
+cell_row=6
+cell_column=353
+x=11312.0
 y=208.0

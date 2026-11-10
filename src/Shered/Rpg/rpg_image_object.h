@@ -59,10 +59,18 @@ void RpgImageObjects_DrawMap(const RpgImageObjects *objects, int mapIndex, int m
                              int tileSize, Color tint);
 void RpgImageObjects_DrawLayer(const RpgImageObjects *objects, int mapIndex, int mapColumns,
                                int tileSize, Color tint, RpgImageObjectLayer layer);
+void RpgImageObjects_DrawLayerAtWorldOrigin(const RpgImageObjects *objects, int mapIndex,
+                                            int mapColumns, int tileSize,
+                                            Vector2 mapWorldOrigin, Color tint,
+                                            RpgImageObjectLayer layer);
 /* エディター共通ドラッグ用。配置済み画像と同じ経路でゴーストを描画する。 */
 void RpgImageObjects_DrawPreview(const RpgImageObject *object, Rectangle bounds, Color tint);
 Rectangle RpgImageObjects_GetLocalBounds(const RpgImageObject *object, int mapIndex,
                                          int mapColumns, int tileSize);
+Rectangle RpgImageObjects_GetLocalBoundsAtWorldOrigin(const RpgImageObject *object,
+                                                       int mapIndex, int mapColumns,
+                                                       Vector2 mapWorldOrigin,
+                                                       int tileSize);
 float RpgImageObjects_GetWorldCenterX(const RpgImageObject *object, int tileSize);
 float RpgImageObjects_GetWorldCenterY(const RpgImageObject *object, int tileSize);
 void RpgImageObjects_SetRuntimePosition(RpgImageObject *object, Vector2 worldCenter);

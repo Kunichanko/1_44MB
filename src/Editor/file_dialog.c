@@ -12,6 +12,9 @@
 #include <string.h>
 #include <wchar.h>
 
+/* 基底ディレクトリが定義されたrequestから、Windowsのファイル選択ダイアログを呼び出す */
+
+//requestから基底ディレクトリを取得する
 static bool ResolveBaseDirectory(const FileDialogRequest *request, wchar_t *baseDirectory,
                                  int baseDirectoryCount)
 {
@@ -20,9 +23,11 @@ static bool ResolveBaseDirectory(const FileDialogRequest *request, wchar_t *base
         baseDirectory == NULL || baseDirectoryCount <= 0 ||
         !RpgFileIo_Utf8ToWide(request->baseDirectory, requestedBase,
                                (int)(sizeof(requestedBase) / sizeof(requestedBase[0])))) return false;
+                               
     return GetFullPathNameW(requestedBase, (DWORD)baseDirectoryCount, baseDirectory, NULL) > 0;
 }
 
+// 相対パスを基底ディレクトリから絶対パスに変換する
 bool FileDialog_ResolvePath(const FileDialogRequest *request, const char *relativePath,
                             char *absolutePath, size_t absolutePathSize)
 {
@@ -34,10 +39,12 @@ bool FileDialog_ResolvePath(const FileDialogRequest *request, const char *relati
     if (PathIsRelativeW(storedPath)) {
         if (PathCombineW(combinedPath, baseDirectory, storedPath) == NULL) return false;
     } else if (wcsncpy_s(combinedPath, sizeof(combinedPath) / sizeof(combinedPath[0]), storedPath, _TRUNCATE) != 0) return false;
+
     return GetFullPathNameW(combinedPath, (DWORD)(sizeof(resolvedPath) / sizeof(resolvedPath[0])), resolvedPath, NULL) > 0 &&
            RpgFileIo_WideToUtf8(resolvedPath, absolutePath, (int)absolutePathSize);
 }
 
+// ファイル選択ダイアログを開き、選択されたファイルの相対パスを取得する
 bool FileDialog_Select(char *relativePath, size_t relativePathSize, const FileDialogRequest *request)
 {
     wchar_t selectedPath[1024] = {0}, baseDirectory[1024] = {0};
@@ -50,6 +57,7 @@ bool FileDialog_Select(char *relativePath, size_t relativePathSize, const FileDi
     snprintf(titleUtf8, sizeof(titleUtf8), "%s [Base: %s]",
              request->title != NULL ? request->title : "Select file", request->baseDirectory);
     (void)RpgFileIo_Utf8ToWide(titleUtf8, titleWide, (int)(sizeof(titleWide) / sizeof(titleWide[0])));
+
     OPENFILENAMEW dialog = {0};
     dialog.lStructSize = sizeof(dialog);
     dialog.lpstrFilter = filter;
@@ -62,10 +70,12 @@ bool FileDialog_Select(char *relativePath, size_t relativePathSize, const FileDi
     if (GetOpenFileNameW(&dialog) == FALSE ||
         !PathRelativePathToW(relativePathWide, baseDirectory, FILE_ATTRIBUTE_DIRECTORY,
                              selectedPath, FILE_ATTRIBUTE_NORMAL)) return false;
+        
+    const wchar_t *relativePathPtr = relativePathWide;
     if (wcsncmp(relativePathWide, L".\\", 2) == 0)
-        memmove(relativePathWide, relativePathWide + 2,
-                (wcslen(relativePathWide + 2) + 1) * sizeof(wchar_t));
-    return RpgFileIo_WideToUtf8(relativePathWide, relativePath, (int)relativePathSize);
+        relativePathPtr += 2;
+
+    return RpgFileIo_WideToUtf8(relativePathPtr, relativePath, (int)relativePathSize);
 }
 
 #if 0 /* Legacy entry point retained only as disabled source history. */
@@ -96,4 +106,3 @@ bool FileDialog_SelectFile(char *destinationPath, size_t destinationPathSize,
            RpgFileIo_WideToUtf8(selectedPath, destinationPath, (int)destinationPathSize);
 }
 #endif
-// 役割: Windows のファイル選択ダイアログをエディターから利用できるようにする。

@@ -10,13 +10,16 @@ bool RpgBuildCellFolders_Create(const RpgStage *stage, int startMapIndex,
 /* エディター内プレイは開始エリアだけを作成し、残りの全マス生成を予約しない。 */
 bool RpgBuildCellFolders_CreatePreview(const RpgStage *stage, int startMapIndex,
                                        const RpgBuildCellStorageBackend *backend);
-void RpgBuildCellFolders_Update(const RpgBuildCellStorageBackend *backend);
+void RpgBuildCellFolders_Update(const RpgBuildCellStorageBackend *backend, int workBudget);
 bool RpgBuildCellFolders_EnsureMap(const RpgStage *stage, int mapIndex,
                                    const RpgBuildCellStorageBackend *backend);
 bool RpgBuildCellFolders_IsMapGenerated(const RpgStage *stage, int mapIndex);
 void RpgBuildCellFolders_InvalidateMap(int mapIndex);
 void RpgBuildCellFolders_GetGenerationProgress(const RpgStage *stage, int *generatedCells,
                                                int *totalCells, bool *isPending);
+bool RpgBuildCellFolders_IsGenerationPending(void);
+/* See RpgBuildCellCompact_CancelGeneration(). */
+void RpgBuildCellFolders_CancelGeneration(void);
 /* Returns the next cell scheduled for incremental preview generation. */
 bool RpgBuildCellFolders_GetGenerationTarget(RpgGridCell *cell);
 bool RpgBuildCellFolders_EnsureCell(RpgGridCell cell, int blockType,

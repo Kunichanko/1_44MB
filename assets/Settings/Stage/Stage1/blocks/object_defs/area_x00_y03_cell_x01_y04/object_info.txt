@@ -1,0 +1,5 @@
+type=1
+cell_row=4
+cell_column=361
+x=11568.0
+y=144.0

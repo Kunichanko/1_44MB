@@ -1,0 +1,5 @@
+type=18
+cell_row=3
+cell_column=98
+x=3152.0
+y=112.0

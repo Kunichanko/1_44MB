@@ -12,6 +12,30 @@
 
 typedef struct RpgObjectFolder { RpgGridCell cell; } RpgObjectFolder;
 
+/* A terrain block's transfer identity is authored in its own object_info.txt.
+ * Zipper keeps a copy only as a fast runtime cache; this record is the
+ * verification boundary between the object folder and that cache. */
+typedef struct RpgBlockTransferMetadata {
+    int blockType;
+    RpgGridCell cell;
+    Vector2 position;
+} RpgBlockTransferMetadata;
+
+/* Read-only diagnostic snapshot for the most recent editor-preview resume. */
+typedef struct RpgObjectFolderResumeProfile {
+    double stageSetupMs;
+    double repairReferenceCopiesMs;
+    double prepareReferenceFilesMs;
+    double removeTransientShotsMs;
+    double applyCellProgressMs;
+    double collectCompositeFoldersMs;
+    double validateSpecialFoldersMs;
+    double totalMs;
+    bool succeeded;
+} RpgObjectFolderResumeProfile;
+
+bool RpgObjectFolders_GetLastResumeProfile(RpgObjectFolderResumeProfile *profile);
+
 typedef enum RpgZipperCommandRequest {
     RPG_ZIPPER_COMMAND_NONE = 0,
     RPG_ZIPPER_COMMAND_EAT,
@@ -20,8 +44,17 @@ typedef enum RpgZipperCommandRequest {
 
 /* Zipper への格納先を返す。移動本体は通常Folder格納と同じ StoreFileInDirectory を使用する。 */
 bool RpgObjectFolder_GetZipperInboxDirectory(char *path, size_t pathSize);
-/* Zipper 内の実ファイル容量を byte 単位で返す。変更通知時だけ再走査する。 */
+/* Zipper にゲーム操作で入出庫したデータ量を byte 単位で返す。
+   描画時のフォルダ再帰走査は行わない。 */
 unsigned long long RpgObjectFolder_GetZipperStorageBytes(void);
+/* Advances the low-priority filesystem audit for the active Zipper folder.
+ * Gameplay uses the immediate game-owned ledger above; this verifier only
+ * reconciles that ledger after a complete, stable background scan. */
+void RpgObjectFolder_UpdateZipperStorageAudit(void);
+/* Updates at most one changed shooter-folder payload cache per call.  The
+   output id is nonzero only when an actual completed scan changed a cache. */
+bool RpgObjectFolders_UpdateShooterPayloadCaches(RpgAttachments *attachments,
+                                                 int *updatedAttachmentId);
 /* 追従Fileをゲーム内Folderへ格納する。ファイル操作は描画処理から独立させる。 */
 /* ステージFileの永続コピーを残したまま、Folderへ同名ファイルを格納する。 */
 bool RpgObjectFolder_StoreFileInDirectory(const char *sourcePath, const char *destinationDirectory);
@@ -53,6 +86,12 @@ bool RpgObjectFolder_OpenZipperDirectory(void);
 bool RpgObjectFolder_EnsureRuntimeZipperDirectory(void);
 /* Folder を移動せずに Zipper 構造へ更新し、以後の Zipper ルートとして採用する。 */
 bool RpgObjectFolder_ActivateReferenceFolderAsZipper(RpgStage *stage, RpgGridCell cell);
+/* Current Folder references are movable objects, not terrain cells. */
+bool RpgObjectFolder_ActivateReferenceObjectFolderAsZipper(RpgReferenceObject *object);
+bool RpgObjectFolder_ConsumeReferenceObjectFolderZipperRequest(const RpgStage *stage,
+                                                                RpgReferenceObjects *objects,
+                                                                Vector2 playerPosition,
+                                                                int *objectIndex);
 void RpgObjectFolder_PrepareZipperAnimationCommand(void);
 // cmd の実行要求を一度だけ受け取る。アニメーション・ゲーム機能の内容は呼び出し側で独立して処理する。
 bool RpgObjectFolder_BeginZipperCommandRequest(void);
@@ -60,7 +99,12 @@ RpgZipperCommandRequest RpgObjectFolder_GetPendingZipperCommandRequest(void);
 bool RpgObjectFolder_CompleteZipperCommandRequest(void);
 
 // Zipper 操作は複製ではなく、対象フォルダそのものを Zipper 直下へ移動して行う。
-bool RpgObjectFolder_MoveDataShotToZipper(RpgDataShot *shot);
+/* Creates the pending runtime folder and starts its monitor.  Normal shots
+   may already be visible from the emitting shooter's cached payload. */
+bool RpgObjectFolder_MaterializeDataShot(RpgDataShot *shot,
+                                         const RpgAttachments *attachments);
+/* Moves an already materialized data-shot folder into Zipper. */
+bool RpgObjectFolder_MoveDataShotToZipper(RpgDataShot *shot, const RpgAttachments *attachments);
 bool RpgObjectFolder_MoveBlockToZipper(const RpgObjectFolder *folder, int blockType);
 /* Builds the parent folder as the immediate result of eating a block, then
    moves that one folder with every owned attachment/receiver metadata file
@@ -68,7 +112,20 @@ bool RpgObjectFolder_MoveBlockToZipper(const RpgObjectFolder *folder, int blockT
 bool RpgObjectFolder_MoveBlockWithAttachmentsToZipper(const RpgObjectFolder *folder, int blockType,
                                                        const RpgAttachments *attachments,
                                                        const RpgReceivers *receivers,
-                                                       const RpgWires *wires);
+                                                       const RpgWires *wires,
+                                                       RpgBlockTransferMetadata *metadata);
+/* Ensure that the one runtime folder for a multi-cell object has been
+ * materialized from its component-cell folders.  This is deliberately a
+ * targeted operation: it is used immediately before a composite transfer,
+ * not as an all-stage rebuild. */
+bool RpgObjectFolders_EnsureCompositeFolder(const RpgStage *stage, RpgGridCell cell);
+/* Read and validate the common object_info record at the block's current
+ * build or Zipper-Inbox location.  This never creates or mutates a folder. */
+bool RpgObjectFolder_ReadBlockTransferMetadata(const RpgObjectFolder *folder, int blockType,
+                                               bool inZipper,
+                                               RpgBlockTransferMetadata *metadata);
+bool RpgObjectFolder_BlockTransferMetadataMatches(const RpgBlockTransferMetadata *metadata,
+                                                  RpgGridCell expectedCell, int expectedBlockType);
 /* A file object owns the small runtime folder which contains its real file.
    Move that folder as one unit so eat/spit never copies the file or creates a
    missing terrain cell. */
@@ -83,10 +140,33 @@ bool RpgObjectFolder_BeginReturnDataShotFromZipper(const RpgDataShot *shot);
 bool RpgObjectFolder_BeginReturnBlockFromZipper(const RpgObjectFolder *folder, int blockType);
 bool RpgObjectFolder_ReturnDataShotFromZipper(const RpgDataShot *shot);
 bool RpgObjectFolder_ReturnBlockFromZipper(const RpgObjectFolder *folder, int blockType);
+bool RpgObjectFolder_ReturnBlockFolderToBuild(const char *returnSource,
+                                              const RpgObjectFolder *folder, int blockType);
 bool RpgObjectFolder_BeginReturnReferenceFileFromZipper(const RpgReferenceObject *object);
 bool RpgObjectFolder_ReturnReferenceFileFromZipper(const RpgReferenceObject *object);
 bool RpgObjectFolder_BeginReturnReferenceObjectFromZipper(const RpgReferenceObject *object);
 bool RpgObjectFolder_ReturnReferenceObjectFromZipper(const RpgReferenceObject *object);
+/* A successful air-origin Folder materialisation consumes the transient
+ * Folder object because authored air has no physical object directory. */
+bool RpgObjectFolder_DiscardReferenceFolder(const RpgReferenceObject *object);
+/* Folder-materialisation counterpart of dynamic-block spit.  The source is
+ * a movable Folder, and the target remains in movables rather than blocks. */
+bool RpgObjectFolder_ReturnReferenceFolderToDynamicBlock(const RpgReferenceObject *object,
+                                                          RpgGridCell identityCell, int blockType,
+                                                          Vector2 position);
+/* Promote a movable Folder whose own object_info.txt describes one normal
+   block.  The caller owns stage mutation; this function only moves the
+   physical directory from movables/reference_folders into blocks/cells. */
+bool RpgObjectFolder_PromoteReferenceFolderToBlock(const RpgReferenceObject *object,
+                                                   const RpgObjectFolder *destination,
+                                                   int blockType);
+bool RpgObjectFolder_BeginReturnReferenceFolderAsBlock(const RpgReferenceObject *object,
+                                                        const RpgObjectFolder *destination,
+                                                        int blockType);
+/* Reverses an uncommitted BeginReturnReferenceFolderAsBlock operation. */
+bool RpgObjectFolder_CancelReturnReferenceFolderAsBlock(const char *returnSource,
+                                                         const RpgObjectFolder *destination,
+                                                         int blockType);
 /* Dynamic metal/push blocks own folders under build/objects, never under a
    terrain cell. Their original cell is identity only; position is metadata. */
 bool RpgObjectFolder_EnsureDynamicBlock(RpgGridCell identityCell, int blockType, Vector2 position);
@@ -102,6 +182,24 @@ bool RpgObjectFolder_RestoreDataShotFromMetadata(RpgDataShot *shot);
 void RpgObjectFolders_PrepareBlockOwnedMetadata(const RpgAttachments *attachments,
                                                 const RpgReceivers *receivers,
                                                 const RpgWires *wires);
+/* Finalize an editor cell-delta batch after its individual cell writes have
+   completed.  The mask contains attachment owners and/or composite component
+   cells.  Only those owners are re-serialized; unrelated cells in the same
+   map are not rebuilt.  `removedCompositeIds` are ownership folders from the
+   pre-edit snapshot and are discarded before current components are grouped. */
+bool RpgObjectFolders_RefreshEditorPreviewCellBatch(
+    const RpgStage *stage, const RpgAttachments *attachments,
+    const RpgReceivers *receivers, const RpgWires *wires,
+    bool cells[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS],
+    const int *removedCompositeIds, int removedCompositeCount);
+/* Refresh only the changed movable FILE/FOLDER/PNG object directories in an
+   already-active editor preview.  `previous*` is the snapshot from before
+   the coalesced edit; objects absent from the current stage have their old
+   runtime directory removed, while changed/current objects are materialized
+   again.  This intentionally never invalidates an entire area. */
+bool RpgObjectFolders_RefreshEditorPreviewMovableObjectBatch(
+    RpgStage *stage, const RpgReferenceObjects *previousReferences,
+    const RpgImageObjects *previousImages);
 void RpgObjectFolders_PrepareReferenceFolderMetadata(const RpgStage *stage);
 /* PNG配置物はマスを占有せず、データ弾と同じ build/objects 配下の所有フォルダを使う。 */
 void RpgObjectFolders_PrepareImageObjectFolders(const RpgImageObjects *objects);
@@ -127,6 +225,11 @@ bool RpgObjectFolders_ResumeStageBuild(int stageNumber, RpgStage *stage, char *b
    Stage/editor/StageN runtime directory without recreating every cell. */
 bool RpgObjectFolders_ResumeEditorPreviewBuild(int stageNumber, RpgStage *stage,
                                                char *buildPath, size_t buildPathSize);
+/* Reconnect an editor preview that the editor has already proven current and
+   fully materialized.  It intentionally skips the expensive repair scans;
+   callers must fall back to ResumeEditorPreviewBuild when that proof is lost. */
+bool RpgObjectFolders_ResumePreparedEditorPreviewBuild(int stageNumber, RpgStage *stage,
+                                                       char *buildPath, size_t buildPathSize);
 /* build/drops に残る File オブジェクトを、続きからの実行時オブジェクトへ復元する。 */
 void RpgObjectFolders_LoadReferenceDrops(RpgReferenceObjects *objects);
 bool RpgObjectFolders_IsStageBuildActive(void);
@@ -147,14 +250,35 @@ bool RpgObjectFolders_RepairEditorPreview(const RpgStage *stage,
                                           const RpgReceivers *receivers,
                                           const RpgWires *wires,
                                           Vector2 playerStartPosition);
+/* Performs at most one editor-preview repair phase.  Unlike
+   RpgObjectFolders_RepairEditorPreview(), this is safe to call from the
+   editor frame loop: one dirty map is materialised per call, keeping input
+   and drawing responsive while the disposable cache catches up. */
+bool RpgObjectFolders_UpdateEditorPreviewRepair(const RpgStage *stage,
+                                                const RpgAttachments *attachments,
+                                                const RpgReceivers *receivers,
+                                                const RpgWires *wires,
+                                                Vector2 playerStartPosition,
+                                                bool *isComplete);
 /* Play marks this only when a static block/reference folder is actually
    moved or changed.  Stop can then repair only its affected area while still
    removing transient runtime artifacts from an untouched preview. */
 /* Starts mutation tracking for an editor preview.  It deliberately performs
    no tree snapshot or recursive copy. */
 bool RpgObjectFolders_BeginEditorPreviewRuntimeTracking(void);
+/* A freshly created or fully repaired editor preview is an authoritative
+   baseline, not a Play-side filesystem mutation.  Keep this distinct from
+   BeginEditorPreviewRuntimeTracking(): that function starts a Play session,
+   while this one merely clears stale mutation bookkeeping after publication. */
+void RpgObjectFolders_ConfirmEditorPreviewBaseline(void);
 bool RpgObjectFolders_HasEditorPreviewStaticMutations(void);
 void RpgObjectFolders_MarkEditorPreviewMapMutation(int mapIndex);
+/* Area insertion, deletion and relocation change authored grid identities.
+   Mark only the slots whose active state or grid coordinate changed; the
+   preview worker removes their former identities before publishing the new
+   ones. */
+void RpgObjectFolders_MarkEditorPreviewTopologyMutation(const RpgStage *before,
+                                                        const RpgStage *after);
 void RpgObjectFolders_MarkEditorPreviewStaticMutation(void);
 void RpgObjectFolders_MarkEditorPreviewCellMutation(RpgGridCell cell, int blockType);
 bool RpgObjectFolders_ReadCompactCellAvailability(bool available[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS]);

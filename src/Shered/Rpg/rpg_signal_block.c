@@ -41,9 +41,28 @@ static int GetPartType(RpgSignalDirection direction)
            direction == SIGNAL_UP ? RPG_BLOCK_SIGNAL_SHRINK_PART_UP : RPG_BLOCK_SIGNAL_SHRINK_PART_HORIZONTAL;
 }
 
+/* The block type is retained beneath a red-error cell for a later spit.
+ * Signal code therefore must inspect the cell state, not only that type:
+ * an eaten composite must remain completely inert. */
+static bool IsMaterialized(const RpgStage *stage, const RpgSignalBlock *block)
+{
+    RpgSignalDirection direction;
+    int partRow, partColumn;
+    if (stage == NULL || block == NULL || !IsInside(block->row, block->column) ||
+        RpgStage_IsCellUnavailable(stage, block->row, block->column)) return false;
+    direction = GetDirection(stage, block);
+    partRow = GetPartRow(block, direction);
+    partColumn = GetPartColumn(block, direction);
+    /* A retracted part is air and valid; an error part belongs to an absent
+       or broken composite and must not be recreated by a signal. */
+    return !IsInside(partRow, partColumn) ||
+           !RpgStage_IsCellUnavailable(stage, partRow, partColumn);
+}
+
 // 通常状態とシグナル中の一時状態のどちらにも使う、2マス目の共通切替処理。
 static void SetExpanded(RpgStage *stage, const RpgSignalBlock *block, bool isExpanded)
 {
+    if (!IsMaterialized(stage, block)) return;
     RpgSignalDirection direction = GetDirection(stage, block);
     int partRow = GetPartRow(block, direction);
     int partColumn = GetPartColumn(block, direction);
@@ -51,9 +70,9 @@ static void SetExpanded(RpgStage *stage, const RpgSignalBlock *block, bool isExp
     if (isExpanded) {
         if (stage->blocks[partRow][partColumn] == 0 ||
             stage->blocks[partRow][partColumn] == GetPartType(direction))
-            stage->blocks[partRow][partColumn] = GetPartType(direction);
+            RpgStage_SetCellBlock(stage, partRow, partColumn, GetPartType(direction));
     } else if (stage->blocks[partRow][partColumn] == GetPartType(direction)) {
-        stage->blocks[partRow][partColumn] = 0;
+        RpgStage_SetCellBlock(stage, partRow, partColumn, 0);
     }
 }
 
@@ -126,7 +145,8 @@ bool RpgSignalBlocks_Rotate(RpgSignalBlocks *blocks, RpgStage *stage, int index)
 {
     if (blocks == NULL || stage == NULL || index < 0 || index >= blocks->count) return false;
     RpgSignalBlock *block = &blocks->entries[index];
-    if (block->activeRemaining > 0.0f || block->previewRemaining > 0.0f) return false;
+    if (!IsMaterialized(stage, block) || block->activeRemaining > 0.0f ||
+        block->previewRemaining > 0.0f) return false;
     RpgSignalDirection oldDirection = GetDirection(stage, block);
     RpgSignalDirection newDirection = (RpgSignalDirection)((oldDirection + 1) % 4);
     int oldPartRow = GetPartRow(block, oldDirection), oldPartColumn = GetPartColumn(block, oldDirection);
@@ -136,9 +156,10 @@ bool RpgSignalBlocks_Rotate(RpgSignalBlocks *blocks, RpgStage *stage, int index)
          stage->blocks[newPartRow][newPartColumn] != 0)) return false;
     if (IsInside(oldPartRow, oldPartColumn) &&
         stage->blocks[oldPartRow][oldPartColumn] == GetPartType(oldDirection))
-        stage->blocks[oldPartRow][oldPartColumn] = 0;
-    stage->blocks[block->row][block->column] = GetRootType(newDirection);
-    if (block->startsExpanded) stage->blocks[newPartRow][newPartColumn] = GetPartType(newDirection);
+        RpgStage_SetCellBlock(stage, oldPartRow, oldPartColumn, 0);
+    RpgStage_SetCellBlock(stage, block->row, block->column, GetRootType(newDirection));
+    if (block->startsExpanded)
+        RpgStage_SetCellBlock(stage, newPartRow, newPartColumn, GetPartType(newDirection));
     return true;
 }
 
@@ -155,6 +176,7 @@ bool RpgSignalBlocks_SetStartsExpanded(RpgSignalBlocks *blocks, RpgStage *stage,
 {
     if (blocks == NULL || stage == NULL || index < 0 || index >= blocks->count) return false;
     RpgSignalBlock *block = &blocks->entries[index];
+    if (!IsMaterialized(stage, block)) return false;
     if (block->activeRemaining > 0.0f || block->previewRemaining > 0.0f) return false;
     if (block->startsExpanded == startsExpanded) return true;
     block->startsExpanded = startsExpanded;
@@ -167,6 +189,11 @@ void RpgSignalBlocks_RemoveBroken(RpgSignalBlocks *blocks, const RpgStage *stage
     if (blocks == NULL || stage == NULL) return;
     for (int index = blocks->count - 1; index >= 0; index--) {
         const RpgSignalBlock *block = &blocks->entries[index];
+        /* Red-error is a temporary held-object state, not authoring damage.
+           Retain this record so the signal block is still configured after
+           its composite returns from Zipper. */
+        if (IsInside(block->row, block->column) &&
+            RpgStage_IsCellUnavailable(stage, block->row, block->column)) continue;
         RpgSignalDirection direction = GetDirection(stage, block);
         int partRow = GetPartRow(block, direction), partColumn = GetPartColumn(block, direction);
         bool rootValid = IsInside(block->row, block->column) &&
@@ -185,6 +212,7 @@ void RpgSignalBlocks_RemoveBroken(RpgSignalBlocks *blocks, const RpgStage *stage
 static void Activate(RpgSignalBlocks *blocks, RpgStage *stage, int index)
 {
     RpgSignalBlock *block = &blocks->entries[index];
+    if (!IsMaterialized(stage, block)) return;
     SetExpanded(stage, block, !block->startsExpanded);
     block->activeRemaining = block->duration;
 }
@@ -200,6 +228,13 @@ void RpgSignalBlocks_Update(RpgSignalBlocks *blocks, RpgStage *stage,
                 Activate(blocks, stage, index);
     for (int index = 0; index < blocks->count; index++) {
         RpgSignalBlock *block = &blocks->entries[index];
+        if (!IsMaterialized(stage, block)) {
+            /* An active timer must not resurrect an object that was eaten
+               after the signal began. */
+            block->activeRemaining = 0.0f;
+            block->previewRemaining = 0.0f;
+            continue;
+        }
         if (block->previewRemaining > 0.0f) {
             block->previewRemaining -= deltaTime;
             if (block->previewRemaining <= 0.0f) {
@@ -222,6 +257,7 @@ void RpgSignalBlocks_Preview(RpgSignalBlocks *blocks, RpgStage *stage, const Rpg
         if (event->target != RPG_PREVIEW_TARGET_ALL &&
             event->target != RPG_PREVIEW_TARGET_SIGNAL_BLOCK_BASE + index) continue;
         RpgSignalBlock *block = &blocks->entries[index];
+        if (!IsMaterialized(stage, block)) continue;
         SetExpanded(stage, block, !block->startsExpanded);
         block->previewRemaining = block->duration;
     }
@@ -234,7 +270,7 @@ void RpgSignalBlocks_EndPreviews(RpgSignalBlocks *blocks, RpgStage *stage)
         RpgSignalBlock *block = &blocks->entries[index];
         if (block->previewRemaining <= 0.0f) continue;
         block->previewRemaining = 0.0f;
-        RestoreStandardState(stage, block);
+        if (IsMaterialized(stage, block)) RestoreStandardState(stage, block);
     }
 }
 

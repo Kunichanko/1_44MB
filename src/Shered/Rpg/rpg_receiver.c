@@ -167,13 +167,11 @@ bool RpgReceivers_CycleSide(RpgReceivers *receivers, int receiverIndex)
 bool RpgReceivers_Remove(RpgReceivers *receivers, int receiverIndex)
 {
     int attachmentIndex = AttachmentIndexAtReceiverIndex(receivers, receiverIndex);
-    if (attachmentIndex < 0) return false;
-    memmove(&receivers->attachments->entries[attachmentIndex],
-            &receivers->attachments->entries[attachmentIndex + 1],
-            (size_t)(receivers->attachments->count - attachmentIndex - 1) *
-            sizeof(receivers->attachments->entries[0]));
-    receivers->attachments->count--;
-    return true;
+    if (attachmentIndex < 0 || receivers == NULL || receivers->attachments == NULL) return false;
+    /* A receiver is a normal attachment.  Use the common removal path so its
+       attachment-owned route configuration disappears with the source. */
+    return RpgAttachments_Remove(receivers->attachments, NULL,
+                                 receivers->attachments->entries[attachmentIndex]);
 }
 
 void RpgReceivers_RemoveBroken(RpgReceivers *receivers, const RpgStage *stage)

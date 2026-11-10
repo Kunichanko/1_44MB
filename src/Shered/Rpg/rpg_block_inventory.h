@@ -75,8 +75,10 @@ enum {
     /* Retired conveyor palette value.  Do not reuse; old palette files may
        still contain it and are sanitized on load. */
     RPG_BLOCK_PROPERTY_CONVEYOR = 104,
+    /* Editor-only palette command.  It becomes RPG_CELL_ERROR (a blank CSV
+       field), never a persisted terrain block ID. */
+    RPG_BLOCK_PROPERTY_STATIC_ERROR = 105,
     /* ビルド出力から対応フォルダが失われたマスを表す、実行時専用の壁。 */
-    RPG_BLOCK_BUILD_MISSING = 300
 };
 
 enum { RPG_BLOCK_INVENTORY_NAME_LENGTH = 64 };
@@ -143,6 +145,7 @@ bool RpgBlockInventory_IsAttachment(int blockType);
    owner: it gets one block folder and follows normal missing-cell handling. */
 bool RpgBlockInventory_IsAttachmentBlock(int blockType);
 bool RpgBlockInventory_IsMapEventProperty(int blockType);
+bool RpgBlockInventory_IsStaticErrorMarker(int blockType);
 bool RpgBlockInventory_IsOneWayPlatform(int blockType);
 bool RpgBlockInventory_IsMagnetBlock(int blockType);
 bool RpgBlockInventory_IsMagnetActive(int blockType);
@@ -150,6 +153,9 @@ bool RpgBlockInventory_IsMetalBlock(int blockType);
 bool RpgBlockInventory_IsPushBlock(int blockType);
 bool RpgBlockInventory_IsSocketSignalBlock(int blockType);
 bool RpgBlockInventory_IsSocketSignalOneWayBlock(int blockType);
+/* Zero is air.  Every non-zero value must be a block type known to the
+   current executable before it can become a normal stage cell. */
+bool RpgBlockInventory_IsKnownBlockType(int blockType);
 RpgBlockStructureKind RpgBlockInventory_GetStructureKind(int blockType);
 bool RpgBlockInventory_IsOrdinaryBlock(int blockType);
 int RpgBlockInventory_GetEffectRootType(int blockType);

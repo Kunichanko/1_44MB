@@ -1,5 +1,4 @@
 // 役割: RPG エディターの UTF-8 テキスト計測とカーソル描画を実装する。
-// 依存する自プロジェクト内ファイル: game_font.h, rpg_editor_text.h
 #include "rpg_editor_text.h"
 
 #include "game_font.h"
@@ -14,42 +13,57 @@ void RpgEditorText_SetKeyboardCapture(bool captured)
     isKeyboardCaptured = captured;
 }
 
+// 必要？
 void RpgEditorText_ClaimKeyboard(void)
 {
     isKeyboardCaptured = true;
 }
 
+// 必要？
 bool RpgEditorText_IsKeyboardCaptured(void)
 {
     return isKeyboardCaptured;
 }
 
+// 必要？
 bool RpgEditorText_ConsumeEscape(void)
 {
     return isKeyboardCaptured && IsKeyPressed(KEY_ESCAPE);
 }
 
+// textの次の文字のバイトインデックスを返す
 static int GetNextUtf8Index(const char *text, int index)
 {
     int byteCount = 0;
     if (text[index] == '\0') return index;
+
+    // textのindexバイト目の文字のコードポイントを10進数で取得し、biteCountにはそのバイト数が入る
     GetCodepointNext(text + index, &byteCount);
+
     return index + byteCount;
 }
 
+// 文字列の中の、キャレットを置くべきindexを返す
 int RpgEditorText_GetCursorIndexAtX(const char *text, float x, float fontSize)
 {
     int index = 0;
     char prefix[RPG_DIALOGUE_LINE_LENGTH];
+
     while (text[index] != '\0') {
         int nextIndex = GetNextUtf8Index(text, index);
+
+        // textのnextIndexバイト目までをprefixにコピーする
         memcpy(prefix, text, (size_t)nextIndex);
         prefix[nextIndex] = '\0';
+
         float rightX = GameFont_MeasureText(prefix, fontSize).x;
+
         if (x < rightX) {
             memcpy(prefix, text, (size_t)index);
             prefix[index] = '\0';
+
             float leftX = GameFont_MeasureText(prefix, fontSize).x;
+
             return x - leftX < rightX - x ? index : nextIndex;
         }
         index = nextIndex;
@@ -57,40 +71,51 @@ int RpgEditorText_GetCursorIndexAtX(const char *text, float x, float fontSize)
     return index;
 }
 
+// 必要？たぶん初期化
 void RpgEditorText_BeginPointerSelection(const char *text, float localX, float fontSize,
                                          int *cursorIndex, int *selectionAnchor, int *selectionEnd)
 {
     if (text == NULL || cursorIndex == NULL || selectionAnchor == NULL || selectionEnd == NULL) return;
+
     int index = RpgEditorText_GetCursorIndexAtX(text, localX, fontSize);
+
     *cursorIndex = index;
     *selectionAnchor = index;
     *selectionEnd = index;
 }
 
+// 必要？
 void RpgEditorText_UpdatePointerSelection(const char *text, float localX, float fontSize,
                                           int *cursorIndex, int *selectionEnd)
 {
     if (text == NULL || cursorIndex == NULL || selectionEnd == NULL) return;
+
     int index = RpgEditorText_GetCursorIndexAtX(text, localX, fontSize);
+
     *cursorIndex = index;
     *selectionEnd = index;
 }
 
+// 汎用的。クリックが指定矩形の外側で行われたか判断する
 bool RpgEditorText_ShouldEndEditingOnOutsideClick(Rectangle fieldBounds, Vector2 pointer)
 {
     return IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(pointer, fieldBounds);
 }
 
+// 指定した横幅を基準に改行した場合、何行になるかを返す
 int RpgEditorText_GetWrappedLineCount(const char *text, float fontSize, float width)
 {
     int lineCount = 1;
     int lineStart = 0;
     int index = 0;
     char part[RPG_DIALOGUE_LINE_LENGTH];
+
     while (text[index] != '\0') {
         int nextIndex = GetNextUtf8Index(text, index);
+
         memcpy(part, text + lineStart, (size_t)(nextIndex - lineStart));
         part[nextIndex - lineStart] = '\0';
+
         if (index > lineStart && GameFont_MeasureText(part, fontSize).x > width) {
             lineCount++;
             lineStart = index;
@@ -99,16 +124,22 @@ int RpgEditorText_GetWrappedLineCount(const char *text, float fontSize, float wi
     return lineCount;
 }
 
+// 指定位置に0.5秒ごとに点滅するキャレットを生成する
 void RpgEditorText_DrawCaret(int x, int y, int height)
 {
-    if ((int)(GetTime() * 2.0) % 2 == 0) DrawRectangle(x - 1, y, 3, height, RED);
+    if ((int)(GetTime() * 2.0) % 2 == 0) {
+        DrawRectangle(x - 1, y, 2, height, BLACK);
+    }
 }
+
 
 static int GetPreviousUtf8Index(const char *text, int index)
 {
     if (index <= 0) return 0;
+
     index--;
     while (index > 0 && ((unsigned char)text[index] & 0xc0) == 0x80) index--;
+
     return index;
 }
 
@@ -168,17 +199,29 @@ static void RemoveBeforeCursor(char *text, int *cursorIndex)
     *cursorIndex = previous;
 }
 
-void RpgEditorText_UpdateInput(char *text, size_t capacity, int *cursorIndex,
-                               int *selectionAnchor, int *selectionEnd)
+static bool AcceptsInputCodepoint(const char *text, int codepoint,
+                                  bool numericOnly, bool allowDecimalPoint)
+{
+    if (codepoint < 32) return false;
+    if (!numericOnly) return true;
+    if (codepoint >= '0' && codepoint <= '9') return true;
+    return allowDecimalPoint && codepoint == '.' && strchr(text, '.') == NULL;
+}
+
+static void UpdateInputInternal(char *text, size_t capacity, int *cursorIndex,
+                                int *selectionAnchor, int *selectionEnd,
+                                bool numericOnly, bool allowDecimalPoint)
 {
     if (text == NULL || capacity == 0 || cursorIndex == NULL ||
         selectionAnchor == NULL || selectionEnd == NULL) return;
+
     RpgEditorText_ClaimKeyboard();
     int textLength = (int)strlen(text);
     if (*cursorIndex < 0) *cursorIndex = 0;
     if (*cursorIndex > textLength) *cursorIndex = textLength;
     bool hasControl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
     bool isSelectAll = hasControl && IsKeyPressed(KEY_A);
+
     if (isSelectAll) {
         *cursorIndex = textLength;
         *selectionAnchor = 0;
@@ -207,7 +250,8 @@ void RpgEditorText_UpdateInput(char *text, size_t capacity, int *cursorIndex,
             int byteCount = 0;
             int codepoint = GetCodepointNext(clipboard, &byteCount);
             if (byteCount <= 0) break;
-            if (codepoint >= 32) InsertCodepoint(text, capacity, cursorIndex, codepoint);
+            if (AcceptsInputCodepoint(text, codepoint, numericOnly, allowDecimalPoint))
+                InsertCodepoint(text, capacity, cursorIndex, codepoint);
             clipboard += byteCount;
         }
         *selectionAnchor = *cursorIndex;
@@ -215,10 +259,26 @@ void RpgEditorText_UpdateInput(char *text, size_t capacity, int *cursorIndex,
         GameFont_AddText(text);
     }
     for (int codepoint = GetCharPressed(); codepoint > 0; codepoint = GetCharPressed()) {
-        if (!isPaste && !isSelectAll && codepoint >= 32) {
+        if (!isPaste && !isSelectAll &&
+            AcceptsInputCodepoint(text, codepoint, numericOnly, allowDecimalPoint)) {
             DeleteSelection(text, cursorIndex, selectionAnchor, selectionEnd);
             InsertCodepoint(text, capacity, cursorIndex, codepoint);
             GameFont_AddText(text);
         }
     }
+}
+
+void RpgEditorText_UpdateInput(char *text, size_t capacity, int *cursorIndex,
+                               int *selectionAnchor, int *selectionEnd)
+{
+    UpdateInputInternal(text, capacity, cursorIndex, selectionAnchor, selectionEnd,
+                        false, false);
+}
+
+void RpgEditorText_UpdateNumericInput(char *text, size_t capacity, int *cursorIndex,
+                                      int *selectionAnchor, int *selectionEnd,
+                                      bool allowDecimalPoint)
+{
+    UpdateInputInternal(text, capacity, cursorIndex, selectionAnchor, selectionEnd,
+                        true, allowDecimalPoint);
 }

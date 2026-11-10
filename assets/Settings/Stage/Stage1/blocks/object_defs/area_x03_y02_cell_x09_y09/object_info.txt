@@ -1,3 +1,5 @@
 type=1
-x=944.0
+cell_row=9
+cell_column=349
+x=11184.0
 y=304.0

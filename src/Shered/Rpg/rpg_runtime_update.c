@@ -21,13 +21,6 @@ void RpgRuntime_UpdateWorld(RpgRuntimeUpdateContext *context, float deltaTime)
     RpgCharacter *player = context->player;
     RpgMagnets_InitializeForStage(context->magnetRuntime, context->stage);
     RpgMagnets_BeginFrame(context->magnetRuntime);
-    /* Socket occupancy is tested before consumer systems read this frame's
-       button event, so an already seated block can fire the normal area signal
-       without a special signal pipeline. */
-    RpgMagnets_LockInBlockSockets(context->magnetRuntime, context->stage, context->attachments,
-                                  context->socketCommunicationEvent, context->playerPushState);
-    RpgMagnets_UpdateBlockSocketSignals(context->magnetRuntime, context->stage,
-                                        context->attachments, context->socketCommunicationEvent);
     RpgMovingSolidSet dataShotSolids = RpgMagnets_GetMovingSolids(context->magnetRuntime);
     RpgMovingSolidSet movingSolids = dataShotSolids;
     bool isHoldingPushBlock = RpgMagnets_IsPlayerPushHeld(context->magnetRuntime,
@@ -54,14 +47,6 @@ void RpgRuntime_UpdateWorld(RpgRuntimeUpdateContext *context, float deltaTime)
             (void)RpgMagnets_MoveHeldPushBlock(context->magnetRuntime, context->stage,
                                                 context->playerPushState, player,
                                                 player->position.x - playerXBeforeCarryMotion);
-            /* The carried block can arrive over a socket during this input
-               step.  Test again after its shared movement path, so locking
-               happens immediately rather than requiring another frame or G. */
-            RpgMagnets_LockInBlockSockets(context->magnetRuntime, context->stage,
-                                          context->attachments, context->socketCommunicationEvent,
-                                          context->playerPushState);
-            RpgMagnets_UpdateBlockSocketSignals(context->magnetRuntime, context->stage,
-                                                context->attachments, context->socketCommunicationEvent);
         }
     } else player->isMoving = false;
     RpgStage_SetSpatialReferenceMap(context->stage, -1);
@@ -91,13 +76,12 @@ void RpgRuntime_UpdateWorld(RpgRuntimeUpdateContext *context, float deltaTime)
     RpgMagnets_Update(context->magnetRuntime, context->stage, context->wires,
                       context->layout->magnetMetalSpeed, deltaTime,
                       context->playerPushState);
-    /* Magnets, gravity and conveyors can also complete a socket alignment.
-       Recheck after their movement so a block never loses its socket property
-       merely because it was moving rather than being carried by the player. */
-    RpgMagnets_LockInBlockSockets(context->magnetRuntime, context->stage, context->attachments,
-                                  context->socketCommunicationEvent, context->playerPushState);
-    RpgMagnets_UpdateBlockSocketSignals(context->magnetRuntime, context->stage,
-                                        context->attachments, context->socketCommunicationEvent);
+    /* All player, magnet and gravity movement is complete here.  A single
+       reconciliation both seats blocks and publishes socket occupancy, so a
+       carried block does not trigger an additional pair of full scans. */
+    RpgMagnets_ReconcileBlockSockets(context->magnetRuntime, context->stage,
+                                     context->attachments, context->socketCommunicationEvent,
+                                     context->playerPushState);
     /* A carried block remains a moving solid throughout the whole frame.  The
        pair synchronizer above maintains the one-tile gap; this shared resolver
        still handles contacts with every other moving object. */

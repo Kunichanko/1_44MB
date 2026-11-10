@@ -39,6 +39,10 @@ typedef struct RpgStageBuildWatcher {
 
 static RpgStageBuildWatcher watcher = { 0 };
 static double nextReferenceRequestPollTime = 0.0;
+/* Nested because one editor operation can write compact cell metadata and
+   then its owning composite folder.  The watcher is restarted only when the
+   outermost writer has completed. */
+static unsigned int internalPreviewWriteDepth = 0;
 
 static bool ToWide(const char *source, wchar_t *destination, int destinationCount)
 {
@@ -114,10 +118,10 @@ static void RefreshCompactCells(RpgStage *stage)
         if (!watcher.compactCells[row][column]) continue;
         if (!couldRead || !available[row][column]) {
             watcher.missingCells[row][column] = true;
-            stage->blocks[row][column] = RPG_BLOCK_BUILD_MISSING;
+            RpgStage_SetCellError(stage, row, column, watcher.originalBlocks[row][column]);
         } else if (watcher.missingCells[row][column]) {
             watcher.missingCells[row][column] = false;
-            stage->blocks[row][column] = watcher.originalBlocks[row][column];
+            RpgStage_SetCellBlock(stage, row, column, watcher.originalBlocks[row][column]);
         }
     }
 }
@@ -132,7 +136,8 @@ static void SetWatchedEffectMissing(RpgStage *stage, int rootRow, int rootColumn
     shape = RpgBlockInventory_GetEffectShape(rootType);
     if (shape == NULL || shape->rootType != rootType) {
         watcher.missingCells[rootRow][rootColumn] = missing;
-        stage->blocks[rootRow][rootColumn] = missing ? RPG_BLOCK_BUILD_MISSING : rootType;
+        if (missing) RpgStage_SetCellError(stage, rootRow, rootColumn, rootType);
+        else RpgStage_SetCellBlock(stage, rootRow, rootColumn, rootType);
         return;
     }
     for (int index = 0; index < shape->cellCount; index++) {
@@ -141,7 +146,8 @@ static void SetWatchedEffectMissing(RpgStage *stage, int rootRow, int rootColumn
         int column = rootColumn + part->offsetX;
         if (row < 0 || row >= RPG_STAGE_ROWS || column < 0 || column >= RPG_STAGE_WORLD_COLUMNS) continue;
         watcher.missingCells[row][column] = missing;
-        stage->blocks[row][column] = missing ? RPG_BLOCK_BUILD_MISSING : part->blockType;
+        if (missing) RpgStage_SetCellError(stage, row, column, part->blockType);
+        else RpgStage_SetCellBlock(stage, row, column, part->blockType);
     }
 }
 
@@ -306,7 +312,8 @@ bool RpgStageBuild_CreateEditorPreview(int stageNumber, RpgStage *stage,
     return CreateStageBuild(stageNumber, stage, attachments, receivers, wires, playerStartPosition, true);
 }
 
-static bool ResumeStageBuildForKind(int stageNumber, RpgStage *stage, bool isEditorPreview)
+static bool ResumeStageBuildForKind(int stageNumber, RpgStage *stage, bool isEditorPreview,
+                                    bool preparedEditorPreview)
 {
 #ifdef _WIN32
     char buildPath[1200];
@@ -315,13 +322,16 @@ static bool ResumeStageBuildForKind(int stageNumber, RpgStage *stage, bool isEdi
     RpgReferenceObjects_EnsureSourcePaths(&stage->referenceObjects);
     /* originalBlocks は静的定義なので、build の欠損状態を反映する前に控える。 */
     memcpy(watcher.originalBlocks, stage->blocks, sizeof(watcher.originalBlocks));
-    if (!(isEditorPreview ? RpgObjectFolders_ResumeEditorPreviewBuild(stageNumber, stage, buildPath,
-                                                                        sizeof(buildPath)) :
-          RpgObjectFolders_ResumeStageBuild(stageNumber, stage, buildPath, sizeof(buildPath)))) return false;
+    if (!(preparedEditorPreview ?
+          RpgObjectFolders_ResumePreparedEditorPreviewBuild(stageNumber, stage, buildPath,
+                                                             sizeof(buildPath)) :
+          (isEditorPreview ? RpgObjectFolders_ResumeEditorPreviewBuild(stageNumber, stage, buildPath,
+                                                                         sizeof(buildPath)) :
+          RpgObjectFolders_ResumeStageBuild(stageNumber, stage, buildPath, sizeof(buildPath))))) return false;
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++)
         watcher.compactCells[row][column] = RpgBuildCellStorage_UsesMetadataForBlock(watcher.originalBlocks[row][column]);
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_WORLD_COLUMNS; column++)
-        watcher.missingCells[row][column] = stage->blocks[row][column] == RPG_BLOCK_BUILD_MISSING;
+        watcher.missingCells[row][column] = RpgStage_IsCellError(stage, row, column);
     (void)StartWatcher(buildPath);
     return true;
 #else
@@ -334,13 +344,19 @@ static bool ResumeStageBuildForKind(int stageNumber, RpgStage *stage, bool isEdi
 bool RpgStageBuild_Resume(int stageNumber, RpgStage *stage)
 {
     if (!RpgStageAuthority_CanWriteGameRuntime()) return false;
-    return ResumeStageBuildForKind(stageNumber, stage, false);
+    return ResumeStageBuildForKind(stageNumber, stage, false, false);
 }
 
 bool RpgStageBuild_ResumeEditorPreview(int stageNumber, RpgStage *stage)
 {
     if (!RpgStageAuthority_CanWriteEditorRuntime()) return false;
-    return ResumeStageBuildForKind(stageNumber, stage, true);
+    return ResumeStageBuildForKind(stageNumber, stage, true, false);
+}
+
+bool RpgStageBuild_ResumePreparedEditorPreview(int stageNumber, RpgStage *stage)
+{
+    if (!RpgStageAuthority_CanWriteEditorRuntime()) return false;
+    return ResumeStageBuildForKind(stageNumber, stage, true, true);
 }
 
 bool RpgStageBuild_EnsureAllAreasGenerated(RpgStage *stage)
@@ -362,6 +378,32 @@ bool RpgStageBuild_RefreshEditorPreviewCompactCells(const RpgStage *stage)
     return RpgObjectFolders_RefreshEditorPreviewCompactCells(stage);
 }
 
+void RpgStageBuild_BeginInternalPreviewWrite(void)
+{
+#ifdef _WIN32
+    if (internalPreviewWriteDepth++ != 0) return;
+    /* The active read contains only a notification buffer.  Cancelling it
+       before changing the preview discards self-authored folder events while
+       leaving the build and its current stage intact. */
+    if (watcher.directory != NULL && watcher.directory != INVALID_HANDLE_VALUE &&
+        watcher.isWatching) {
+        (void)CancelIo(watcher.directory);
+        watcher.isWatching = false;
+        if (watcher.event != NULL) ResetEvent(watcher.event);
+    }
+#endif
+}
+
+void RpgStageBuild_EndInternalPreviewWrite(void)
+{
+#ifdef _WIN32
+    if (internalPreviewWriteDepth == 0 || --internalPreviewWriteDepth != 0) return;
+    if (watcher.directory != NULL && watcher.directory != INVALID_HANDLE_VALUE &&
+        watcher.event != NULL && !watcher.isWatching)
+        (void)QueueDirectoryRead();
+#endif
+}
+
 bool RpgStageBuild_RepairEditorPreview(const RpgStage *stage,
                                        const RpgAttachments *attachments,
                                        const RpgReceivers *receivers,
@@ -376,8 +418,15 @@ void RpgStageBuild_Update(RpgStage *stage)
 {
 #ifdef _WIN32
     DWORD byteCount = 0;
+    bool generatedInternally;
     if (!RpgStageAuthority_CanWriteEditorRuntime() && !RpgStageAuthority_CanWriteGameRuntime()) return;
+    /* Cells.csv and cell-owned folders are generated by this process.  Pause
+       the directory read for exactly that write so these expected changes do
+       not re-enter ProcessChanges as if Explorer had removed an object. */
+    generatedInternally = RpgBuildCellStorage_IsGenerationPending();
+    if (generatedInternally) RpgStageBuild_BeginInternalPreviewWrite();
     RpgObjectFolders_UpdateBuildCellGeneration(stage);
+    if (generatedInternally) RpgStageBuild_EndInternalPreviewWrite();
     if (!watcher.isWatching || watcher.event == NULL || WaitForSingleObject(watcher.event, 0) != WAIT_OBJECT_0) return;
     if (GetOverlappedResult(watcher.directory, &watcher.overlapped, &byteCount, FALSE) != 0 && byteCount > 0)
         ProcessChanges(stage, byteCount);
@@ -427,5 +476,6 @@ void RpgStageBuild_Close(void)
     CloseWatcher();
     memset(&watcher, 0, sizeof(watcher));
     nextReferenceRequestPollTime = 0.0;
+    internalPreviewWriteDepth = 0;
 #endif
 }

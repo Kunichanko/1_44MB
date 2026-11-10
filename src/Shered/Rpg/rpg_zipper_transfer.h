@@ -20,16 +20,19 @@ typedef struct RpgZipperTransferContext {
     RpgMagnetRuntime *magnetRuntime;
     RpgReferenceObjects *referenceObjects;
     RpgPlayerPushState *playerPushState;
+    /* Set when an otherwise valid object_info differs from Zipper's cached
+       queue record and the folder metadata is used to refresh that cache. */
+    bool *didRefreshBlockMetadata;
 } RpgZipperTransferContext;
 
 /* The caller only supplies a fully described target.  The transfer module
    owns all kind-specific move, error-cell and restore decisions. */
 bool RpgZipperTransfer_Eat(RpgZipperTransferContext *context,
-                            const RpgZipperHeldObject *target);
+                            RpgZipperHeldObject *target);
 bool RpgZipperTransfer_BeginSpit(RpgZipperTransferContext *context,
-                                  const RpgZipperHeldObject *target);
+                                  RpgZipperHeldObject *target);
 bool RpgZipperTransfer_CompleteSpit(RpgZipperTransferContext *context,
-                                     const RpgZipperHeldObject *target);
+                                     RpgZipperHeldObject *target);
 Vector2 RpgZipperTransfer_GetReturnDestination(const RpgZipperTransferContext *context,
                                                 const RpgZipperHeldObject *target,
                                                 Vector2 fallback);

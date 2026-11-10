@@ -12,6 +12,9 @@ typedef struct RpgLayout {
     Vector2 npcPosition;
     float playerMoveSpeed;
     float playerScale;
+    /* Global player jump apex in stage/world pixels.  The editor displays
+       this as whole tiles plus remaining pixels. */
+    float playerJumpHeight;
     float npcScale;
     bool stage3IntroEnabled;
     /* ステージ固有の背景PNG。空文字なら背景を描画しない。 */

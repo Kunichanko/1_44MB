@@ -19,7 +19,10 @@ enum { RPG_STAGE_TILE_SIZE = 32, RPG_STAGE_COLUMNS = 20, RPG_STAGE_ROWS = 12,
        RPG_STAGE_GROUND_START_ROW = RPG_STAGE_ROWS - 2,
        RPG_STAGE_GROUND_TOP = RPG_STAGE_GROUND_START_ROW * RPG_STAGE_TILE_SIZE,
        RPG_STAGE_REFERENCE_PATH_LENGTH = 260, RPG_KEY_DOOR_MAX_COUNT = 32,
-       RPG_MAGNET_OBJECT_MAX_COUNT = 64, RPG_COMPOSITE_OBJECT_MAX_COUNT = 128 };
+       /* Fixed and resizable composites share one ID space and one record
+          collection.  The former 128 fixed + 64 magnet slots are retained as
+          one capacity so opening an existing stage cannot lose an object. */
+       RPG_COMPOSITE_OBJECT_MAX_COUNT = 192 };
 
 typedef enum RpgAreaDirection {
     RPG_AREA_LEFT,
@@ -28,34 +31,51 @@ typedef enum RpgAreaDirection {
     RPG_AREA_DOWN
 } RpgAreaDirection;
 
+/* The saved cell value and its existence are deliberately separate.  A zero
+ * is ordinary air; an ERROR is serialized as an empty CSV field and renders
+ * as the red missing-object marker.  RUNTIME_ERROR is an invalid block type
+ * discovered while the game is running: it renders black and is never
+ * serialized as authored stage data. */
+typedef enum RpgCellState {
+    RPG_CELL_AIR = 0,
+    RPG_CELL_BLOCK,
+    RPG_CELL_ERROR,
+    RPG_CELL_RUNTIME_ERROR
+} RpgCellState;
+
 typedef struct RpgKeyDoor {
     int rootRow;
     int rootColumn;
     char keyPath[RPG_STAGE_REFERENCE_PATH_LENGTH];
 } RpgKeyDoor;
 
+typedef enum RpgCompositeGeometry {
+    /* Components come from the immutable RpgEffectShape registered for the
+       block type (doors, extend/shrink blocks, etc.). */
+    RPG_COMPOSITE_GEOMETRY_FIXED_SHAPE = 0,
+    /* Components occupy every cell in the inclusive origin/width/height
+       rectangle.  Magnets currently use this, but the record is not
+       magnet-specific. */
+    RPG_COMPOSITE_GEOMETRY_RECTANGLE
+} RpgCompositeGeometry;
+
 /* A composite has a stable identity independent from every tile that happens
- * to make up its current geometry.  `origin*` is only placement data used by
- * fixed effect-shape layouts; it is never a filesystem owner. */
+ * to make up its current geometry.  Both fixed and resizable objects use this
+ * one record. `origin*` is placement data only; it is never a filesystem
+ * owner.  Fixed shapes leave width/height at zero. */
 typedef struct RpgCompositeObject {
     int id;
-    int originRow;
-    int originColumn;
+    union { int originRow; int rootRow; };
+    union { int originColumn; int rootColumn; };
     int blockType;
-} RpgCompositeObject;
-
-/* A magnet owns one rectangular group of terrain component cells.  The cells
- * remain materialized in `blocks` for ordinary collision and build handling,
- * but selection, movement, deletion, rendering and communication use this
- * single record. */
-typedef struct RpgMagnetObject {
-    int id;
-    int rootRow;
-    int rootColumn;
+    RpgCompositeGeometry geometry;
     int width;
     int height;
-    int blockType;
-} RpgMagnetObject;
+} RpgCompositeObject;
+/* Source compatibility for gameplay code that deals specifically with the
+ * rectangular magnet flavour.  This is an alias only: no second record or
+ * collection exists in RpgStage. */
+typedef RpgCompositeObject RpgMagnetObject;
 
 typedef enum RpgReferenceObjectKind {
     RPG_REFERENCE_OBJECT_FILE = 0,
@@ -84,6 +104,8 @@ typedef struct RpgReferenceObject {
     bool isCompressing;
     bool isCompressed;
     float compressionElapsed;
+    /* Runtime-only: this Folder is travelling into a valid block cell. */
+    bool isMaterializing;
 } RpgReferenceObject;
 typedef struct RpgReferenceObjects {
     int count;
@@ -103,9 +125,7 @@ typedef struct RpgStage {
        a map edge in the continuous stage space before its storage slot changes. */
     int spatialReferenceMap;
     int blocks[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS];
-    /* Static editor tombstone for a dropped object folder.  It stores only
-       the original object type, never any generated FILE objects. */
-    int missingBlockTypes[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS];
+    RpgCellState cellStates[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS];
     char referencePaths[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS][RPG_STAGE_REFERENCE_PATH_LENGTH];
     /* Legacy cell paths are migration input only; reference objects are
        movable and serialize under the per-area movables tree. */
@@ -115,17 +135,28 @@ typedef struct RpgStage {
     int compositeObjectCount;
     int nextCompositeObjectId;
     RpgCompositeObject compositeObjects[RPG_COMPOSITE_OBJECT_MAX_COUNT];
-    /* Runtime lookup cache.  It is derived from compositeObjects/magnets and
+    /* Runtime lookup cache.  It is derived from compositeObjects and
        is deliberately not part of the saved stage format. */
     int compositeObjectIds[RPG_STAGE_ROWS][RPG_STAGE_WORLD_COLUMNS];
-    int magnetCount;
-    RpgMagnetObject magnets[RPG_MAGNET_OBJECT_MAX_COUNT];
     /* PNG画像はFolderやFILE.pngと別の、見た目専用オブジェクトとして管理する。 */
     RpgImageObjects imageObjects;
 } RpgStage;
 
 /* 大きいステージ本体を値返却せず、呼出し側が保持する領域を初期化する。 */
 void RpgStage_Initialize(RpgStage *stage);
+RpgCellState RpgStage_GetCellState(const RpgStage *stage, int row, int column);
+/* Static red missing-object marker. */
+bool RpgStage_IsCellError(const RpgStage *stage, int row, int column);
+/* Runtime-only invalid/corrupt block type marker. */
+bool RpgStage_IsCellRuntimeError(const RpgStage *stage, int row, int column);
+/* Both error variants are drawn and collide as a complete solid cell. */
+bool RpgStage_IsCellUnavailable(const RpgStage *stage, int row, int column);
+void RpgStage_SetCellBlock(RpgStage *stage, int row, int column, int blockType);
+/* `storedBlockType` is retained only for runtime eat/spit restoration.  Pass
+   zero for a static/editor error which deliberately has no restore payload. */
+void RpgStage_SetCellError(RpgStage *stage, int row, int column, int storedBlockType);
+/* Runtime-only invalid block type.  Saving the stage writes this as air. */
+void RpgStage_SetCellRuntimeError(RpgStage *stage, int row, int column, int brokenBlockType);
 bool RpgStage_Load(const char *filePath, RpgStage *stage);
 bool RpgStage_Save(const char *filePath, const RpgStage *stage);
 int RpgStage_GetMapCount(const RpgStage *stage);
@@ -152,6 +183,11 @@ bool RpgStage_RemoveMap(RpgStage *stage, int mapIndex);
 /* Moves an existing area slot to an unoccupied 2D map coordinate without
    relocating the map's stored blocks or owned objects. */
 bool RpgStage_MoveMapToGrid(RpgStage *stage, int mapIndex, int gridX, int gridY);
+/* Exchanges the user-facing 2D positions of two existing area slots.  The
+ * slots themselves (and therefore their cells, attachments and per-area
+ * files) stay intact; callers translate separately owned world-position
+ * objects with the same two area offsets. */
+bool RpgStage_SwapMapGridPositions(RpgStage *stage, int firstMapIndex, int secondMapIndex);
 bool RpgStage_SetBlockAtPosition(RpgStage *stage, Vector2 position, bool isBlock);
 bool RpgStage_SetBlockTypeAtPosition(RpgStage *stage, Vector2 position, int blockType);
 int RpgStage_GetBlockTypeAtPosition(const RpgStage *stage, Vector2 position);
@@ -163,29 +199,41 @@ void RpgStage_NormalizeKeyDoors(RpgStage *stage);
 RpgKeyDoor *RpgStage_EnsureKeyDoor(RpgStage *stage, int row, int column);
 RpgKeyDoor *RpgStage_GetKeyDoorAtCell(RpgStage *stage, int row, int column);
 const RpgKeyDoor *RpgStage_GetKeyDoorAtCellConst(const RpgStage *stage, int row, int column);
-/* Multi-cell magnet ownership.  `NormalizeMagnets` imports old cell-only
- * magnets into maximal filled rectangles once, while all new edits use the
- * explicit records below. */
-void RpgStage_NormalizeMagnets(RpgStage *stage);
-/* Assign/retain stable object IDs for fixed multi-cell effect shapes. */
+/* Assign/retain stable object IDs for both fixed shapes and variable
+ * rectangles.  It imports old `magnet` records and old cell-only magnets. */
 void RpgStage_NormalizeCompositeObjects(RpgStage *stage);
 /* Returns a stable object ID for any composite component, or zero for a
  * single-cell block.  The ID is the sole folder/eat/spit identity. */
 int RpgStage_GetCompositeObjectIdAtCell(const RpgStage *stage, int row, int column);
+/* The caller has already moved the component cells.  Move the persistent
+ * fixed-composite record to the same root so folder ownership and incremental
+ * preview generation see one object move rather than unrelated cell edits. */
+bool RpgStage_RelocateCompositeObjectById(RpgStage *stage, int objectId,
+                                          int destinationRow, int destinationColumn);
 /* Collect all component cells of the one composite containing `row,column`.
  * Returns false for a one-cell block or an insufficient output buffer. */
 bool RpgStage_GetCompositeCellsAtCell(const RpgStage *stage, int row, int column,
                                       RpgGridCell *cells, int cellCapacity, int *cellCount);
 /* Set/restore all tiles of one composite atomically. */
 bool RpgStage_SetCompositeMissingAtCell(RpgStage *stage, int row, int column, bool missing);
-const RpgMagnetObject *RpgStage_GetMagnetAtCellConst(const RpgStage *stage, int row, int column);
-RpgMagnetObject *RpgStage_GetMagnetAtCell(RpgStage *stage, int row, int column);
+bool RpgStage_IsCompositeRectangle(const RpgCompositeObject *object);
+const RpgCompositeObject *RpgStage_GetCompositeAtCellConst(const RpgStage *stage, int row, int column);
+RpgCompositeObject *RpgStage_GetCompositeAtCell(RpgStage *stage, int row, int column);
+/* Magnet-named accessors retain a narrow gameplay API, but return the common
+ * composite record and never access a separate magnet collection. */
+const RpgCompositeObject *RpgStage_GetMagnetAtCellConst(const RpgStage *stage, int row, int column);
+RpgCompositeObject *RpgStage_GetMagnetAtCell(RpgStage *stage, int row, int column);
 bool RpgStage_AddMagnet(RpgStage *stage, int row, int column, int width, int height, int blockType);
 bool RpgStage_RemoveMagnetAtCell(RpgStage *stage, int row, int column);
 bool RpgStage_MoveMagnetAtCell(RpgStage *stage, int row, int column, int destinationRow,
                                int destinationColumn);
 bool RpgStage_ResizeMagnetAtCell(RpgStage *stage, int row, int column, int oppositeRow,
                                  int oppositeColumn);
+/* Resize one magnet to explicit inclusive cell bounds.  Unlike the legacy
+ * opposite-corner helper this supports dragging any one of the four edges. */
+bool RpgStage_ResizeMagnetBoundsAtCell(RpgStage *stage, int row, int column,
+                                       int minimumRow, int minimumColumn,
+                                       int maximumRow, int maximumColumn);
 bool RpgStage_SetReferencePathAtCell(RpgStage *stage, int row, int column, const char *path);
 const char *RpgStage_GetReferencePathAtCell(const RpgStage *stage, int row, int column);
 #if 0 /* obsolete pre-movable reference-object declaration */
@@ -295,6 +343,11 @@ void RpgStage_DrawMap(const RpgStage *stage, int mapIndex, bool showGrid, float 
 void RpgStage_DrawMapWithAttachments(const RpgStage *stage,
                                      const struct RpgAttachments *attachments,
                                      int mapIndex, bool showGrid, float brightness);
+/* Error cells are normally included in the terrain pass.  Draw them again
+   after routes when an error must visually cut a wire or trajectory. */
+void RpgStage_DrawUnavailableOverlay(const RpgStage *stage, bool showGrid, float brightness);
+void RpgStage_DrawMapUnavailableOverlay(const RpgStage *stage, int mapIndex,
+                                        bool showGrid, float brightness);
 void RpgStage_DrawEffects(const RpgStage *stage);
 void RpgStage_DrawMapEffects(const RpgStage *stage, int mapIndex);
 void RpgStage_DrawReferenceObject(Texture2D fileTexture, Rectangle cell, Color tint);

@@ -72,6 +72,10 @@ bool RpgPlayerInteraction_Dispatch(const RpgPlayerInteractionInput *input)
     static const RpgPlayerInteractionDefinition openReference = {
         RPG_INTERACTION_OWNER_REFERENCE_FILE, KEY_E, 50, RPG_PLAYER_INTERACTION_OPEN_REFERENCE
     };
+    static const RpgPlayerInteractionDefinition openReferenceFolder = {
+        RPG_INTERACTION_OWNER_REFERENCE_FOLDER, KEY_O, 100,
+        RPG_PLAYER_INTERACTION_OPEN_REFERENCE_FOLDER
+    };
     RpgInteractionSet set;
     RpgPlayerInteractionCandidate candidates[RPG_INTERACTION_MAX_BINDINGS];
     int candidateCount = 0;
@@ -87,6 +91,9 @@ bool RpgPlayerInteraction_Dispatch(const RpgPlayerInteractionInput *input)
         if (input->canStoreReference)
             (void)RegisterCandidate(&set, candidates, &candidateCount, input, store,
                                     input->folderTargetId);
+        if (input->canOpenReferenceFolder)
+            (void)RegisterCandidate(&set, candidates, &candidateCount, input,
+                                    openReferenceFolder, input->referenceTargetId);
     }
     if (!input->isGrounded) return RpgInteraction_DispatchPressed(&set);
 

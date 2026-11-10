@@ -2,6 +2,8 @@
 // 役割: 本編とエディター内プレイで共通のRPGフレーム更新と描画を実装する。
 // 依存関係を更新: rpg_viewport.h を追加した。
 #include "rpg_runtime.h"
+
+#include "rpg_communication.h"
 #include "rpg_viewport.h"
 #include "raymath.h"
 #include "rlgl.h"
@@ -597,6 +599,35 @@ static bool StoreReferenceTargetInDirectory(RpgRuntimeContext *context, RpgRefer
     return true;
 }
 
+/* The runtime folder move itself only knows two paths.  A Folder object's
+ * path has no area/cell in its name, so the generic filesystem layer cannot
+ * safely derive ownership from it.  Keep that layer neutral and mark just
+ * the destination owner's cell here, where the gameplay target still exists.
+ * This is a candidate for a static-vs-runtime comparison at Stop, not an
+ * operation log and never an all-area fallback. */
+static void MarkStoredReferenceTargetPreviewOwner(RpgRuntimeContext *context,
+                                                   RpgReferenceTarget target)
+{
+    RpgGridCell cell;
+    if (context == NULL || context->stage == NULL) return;
+    if (target.kind == RPG_REFERENCE_TARGET_CELL) {
+        cell = (RpgGridCell){ target.row, target.column };
+    } else if (target.kind == RPG_REFERENCE_TARGET_DROP && context->referenceDrops != NULL &&
+               target.dropIndex >= 0 && target.dropIndex < context->referenceDrops->count &&
+               RpgStage_GetWorldCellAtPosition(context->stage,
+                                                context->referenceDrops->entries[target.dropIndex].position,
+                                                &cell.row, &cell.column)) {
+        /* cell is assigned by RpgStage_GetWorldCellAtPosition(). */
+    } else {
+        return;
+    }
+    if (cell.row < 0 || cell.row >= RPG_STAGE_ROWS ||
+        cell.column < 0 || cell.column >= RPG_STAGE_WORLD_COLUMNS)
+        return;
+    RpgObjectFolders_MarkEditorPreviewCellMutation(
+        cell, context->stage->blocks[cell.row][cell.column]);
+}
+
 static void UpdateReferenceFolderTransfer(RpgRuntimeContext *context, float deltaTime)
 {
     RpgReferenceFolderTransfer *transfer = &referenceFolderTransfer;
@@ -671,6 +702,8 @@ static void UpdateReferenceFolderTransfer(RpgRuntimeContext *context, float delt
                 context->stage, transfer->objects,
                 transfer->objects->entries[transfer->folderTarget.dropIndex].id);
         }
+        if (!transfer->isKeyDoorTransfer)
+            MarkStoredReferenceTargetPreviewOwner(context, transfer->folderTarget);
     } else {
         RpgKeyDoorTrace_Log("transfer completion: StoreFileInDirectory failed id=%d destination='%s'",
                             transfer->followerId, transfer->destinationDirectory);
@@ -1136,6 +1169,13 @@ static bool CompleteZipperHeldObjectReturn(RpgRuntimeContext *context)
     bool returned = RpgZipperTransfer_CompleteSpit(&transfer, target);
     if (didRefreshMetadata) NotifyZipperMetadataRefresh(context);
     if (returned) {
+        /* Restored objects did not receive a new edge while inside Zipper.
+           Reconcile every stateful communication consumer from the stage's
+           canonical area signal before the object can update or draw. */
+        RpgCommunication_Reconcile(&(RpgCommunicationContext){
+                                       .stage = context->stage,
+                                       .magnetRuntime = context->magnetRuntime
+                                   });
         /* Spit restores an object to the world; it is not a new collision.
            Never recreate an attachment merely because the returned object is
            still at Zipper's position.  A later launched-Zipper collision is

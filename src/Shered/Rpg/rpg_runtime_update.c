@@ -5,6 +5,7 @@
 #include <stddef.h>
 
 #include "rpg_block_inventory.h"
+#include "rpg_communication.h"
 
 void RpgRuntime_UpdateWorld(RpgRuntimeUpdateContext *context, float deltaTime)
 {
@@ -67,8 +68,10 @@ void RpgRuntime_UpdateWorld(RpgRuntimeUpdateContext *context, float deltaTime)
                                     RPG_BUTTON_EVENT_SOURCE_PLAYER_BUTTON,
                                     isButtonPressed);
     *context->wasButtonPressed = isButtonPressed;
-    RpgMagnets_ConsumeCommunication(context->magnetRuntime, context->stage,
-                                    context->socketCommunicationEvent);
+    RpgCommunication_Consume(&(RpgCommunicationContext){
+                                 .stage = context->stage,
+                                 .magnetRuntime = context->magnetRuntime
+                             }, context->socketCommunicationEvent);
     RpgDataShots_ConsumeButtonEvent(context->dataShots, context->attachments, context->buttonEvent);
     RpgSignalBlocks_Update(context->signalBlocks, context->stage, context->buttonEvent, deltaTime);
     RpgDataShots_Update(context->dataShots, context->attachments, context->stage, context->receivers,

@@ -63,15 +63,8 @@ static bool IsWithinPushBlockInteractionRange(const RpgCharacter *player,
            Vector2Distance(playerCenter, center) <= maximumDistance;
 }
 
-void RpgMagnets_ConsumeCommunication(RpgMagnetRuntime *runtime, RpgStage *stage,
-                                     const RpgButtonEvent *communication)
+static void ApplyCommunicationToMap(RpgStage *stage, int mapIndex, bool isActive)
 {
-    if (runtime == NULL || stage == NULL || communication == NULL ||
-        !RpgButtonEvent_Consume(communication, &runtime->lastCommunicationSequence) ||
-        communication->sourceMapIndex < 0) return;
-
-    /* Communication is area-scoped, like the other signal consumers.  It is
-       intentionally unrelated to receiver-owned electrical wire paths. */
     for (int index = 0; index < stage->compositeObjectCount; index++) {
         RpgCompositeObject *magnet = &stage->compositeObjects[index];
         if (!RpgStage_IsCompositeRectangle(magnet) ||
@@ -82,13 +75,33 @@ void RpgMagnets_ConsumeCommunication(RpgMagnetRuntime *runtime, RpgStage *stage,
         if (RpgStage_IsCellError(stage, magnet->originRow, magnet->originColumn))
             continue;
         Vector2 center = RpgStage_GetWorldPositionForCell(stage, magnet->originRow, magnet->originColumn);
-        if (RpgStage_GetMapAtWorldPosition(stage, center) != communication->sourceMapIndex) continue;
-        magnet->blockType = communication->isActive ? RPG_BLOCK_EFFECT_MAGNET_ON :
-                                                       RPG_BLOCK_EFFECT_MAGNET_OFF;
+        if (RpgStage_GetMapAtWorldPosition(stage, center) != mapIndex) continue;
+        magnet->blockType = isActive ? RPG_BLOCK_EFFECT_MAGNET_ON :
+                                       RPG_BLOCK_EFFECT_MAGNET_OFF;
         for (int row = magnet->originRow; row < magnet->originRow + magnet->height; row++)
             for (int column = magnet->originColumn; column < magnet->originColumn + magnet->width; column++)
                 RpgStage_SetCellBlock(stage, row, column, magnet->blockType);
     }
+}
+
+void RpgMagnets_ConsumeCommunication(RpgMagnetRuntime *runtime, RpgStage *stage,
+                                     const RpgButtonEvent *communication)
+{
+    if (runtime == NULL || stage == NULL || communication == NULL ||
+        !RpgButtonEvent_Consume(communication, &runtime->lastCommunicationSequence) ||
+        communication->sourceMapIndex < 0) return;
+
+    /* Communication is area-scoped, like the other signal consumers.  It is
+       intentionally unrelated to receiver-owned electrical wire paths. */
+    ApplyCommunicationToMap(stage, communication->sourceMapIndex, communication->isActive);
+}
+
+void RpgMagnets_ReconcileCommunicationState(RpgMagnetRuntime *runtime, RpgStage *stage)
+{
+    if (runtime == NULL || stage == NULL) return;
+    for (int mapIndex = 0; mapIndex < RPG_STAGE_MAP_COUNT; mapIndex++)
+        ApplyCommunicationToMap(stage, mapIndex,
+                                RpgStage_IsSocketSignalActive(stage, mapIndex));
 }
 
 static bool IsCellInsideStage(int row, int column)

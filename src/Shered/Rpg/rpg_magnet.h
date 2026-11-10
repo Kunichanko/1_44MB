@@ -62,6 +62,10 @@ RpgMagnetRuntime RpgMagnetRuntime_Default(void);
 RpgPlayerPushState RpgPlayerPushState_Default(void);
 void RpgMagnets_ConsumeCommunication(RpgMagnetRuntime *runtime, RpgStage *stage,
                                      const RpgButtonEvent *communication);
+/* Apply the current per-area communication state to all world magnets.
+   Unlike ConsumeCommunication(), this does not require a new event edge and
+   is used when an object has just returned from Zipper. */
+void RpgMagnets_ReconcileCommunicationState(RpgMagnetRuntime *runtime, RpgStage *stage);
 /* ステージに保存された金属を、実行時だけ細かく動く固体へ変換する。 */
 void RpgMagnets_InitializeForStage(RpgMagnetRuntime *runtime, RpgStage *stage);
 /* Restore a movable metal/push block from an already validated object

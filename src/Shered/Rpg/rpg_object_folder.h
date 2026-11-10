@@ -142,6 +142,9 @@ bool RpgObjectFolder_ReturnDataShotFromZipper(const RpgDataShot *shot);
 bool RpgObjectFolder_ReturnBlockFromZipper(const RpgObjectFolder *folder, int blockType);
 bool RpgObjectFolder_ReturnBlockFolderToBuild(const char *returnSource,
                                               const RpgObjectFolder *folder, int blockType);
+/* Directory-move diagnostics for non-blocking Folder materialisation. */
+unsigned long RpgObjectFolder_GetLastDirectoryMoveError(void);
+bool RpgObjectFolder_IsLastDirectoryMoveErrorRetryable(void);
 bool RpgObjectFolder_BeginReturnReferenceFileFromZipper(const RpgReferenceObject *object);
 bool RpgObjectFolder_ReturnReferenceFileFromZipper(const RpgReferenceObject *object);
 bool RpgObjectFolder_BeginReturnReferenceObjectFromZipper(const RpgReferenceObject *object);

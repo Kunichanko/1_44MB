@@ -28,15 +28,24 @@ typedef struct RpgExplorerTreeNode {
 
 typedef struct RpgExplorerFilesystem {
     char rootPath[RPG_EXPLORER_PATH_LENGTH];
+    /* User-selected virtual Explorer root, derived once from rootPath. */
+    char rootName[RPG_EXPLORER_NAME_LENGTH];
     char currentPath[RPG_EXPLORER_PATH_LENGTH];
     RpgExplorerEntry entries[RPG_EXPLORER_MAX_ENTRIES];
     int entryCount;
     RpgExplorerTreeNode treeNodes[RPG_EXPLORER_MAX_TREE_NODES];
     int treeNodeCount;
+    /* Opaque Win32 change-notification handle.  Kept here so the virtual
+       explorer refreshes only after an actual filesystem notification. */
+    void *changeNotification;
 } RpgExplorerFilesystem;
 
 bool RpgExplorerFilesystem_Initialize(RpgExplorerFilesystem *filesystem, const char *rootPath);
 bool RpgExplorerFilesystem_Refresh(RpgExplorerFilesystem *filesystem);
+/* Non-blocking recursive root watcher.  Returns true once per detected
+   filesystem change; the caller then refreshes its presentation. */
+bool RpgExplorerFilesystem_PollChanges(RpgExplorerFilesystem *filesystem);
+void RpgExplorerFilesystem_Shutdown(RpgExplorerFilesystem *filesystem);
 bool RpgExplorerFilesystem_NavigateTo(RpgExplorerFilesystem *filesystem, const char *directory);
 bool RpgExplorerFilesystem_NavigateUp(RpgExplorerFilesystem *filesystem);
 bool RpgExplorerFilesystem_OpenEntry(RpgExplorerFilesystem *filesystem, int entryIndex);

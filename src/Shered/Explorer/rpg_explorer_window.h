@@ -15,6 +15,14 @@ typedef enum RpgExplorerCaptionButton {
 
 bool RpgExplorerWindow_Install(void *nativeWindow, float titleBarHeight);
 void RpgExplorerWindow_Uninstall(void);
+/* Associates Explorer with the game for keyboard forwarding and conditional
+   z-order upkeep.  It intentionally does not change Win32 ownership. */
+void RpgExplorerWindow_SetOwner(void *nativeOwner);
+/* Registers the Explorer process under its root directory.  The launcher
+   uses this identity to reuse an existing virtual Explorer and to request a
+   normal close before that directory itself is moved. */
+void RpgExplorerWindow_SetRootPath(const char *rootPath);
+void RpgExplorerWindow_UpdateOwnerZOrder(void);
 void RpgExplorerWindow_SetTabBounds(Rectangle bounds);
 void RpgExplorerWindow_SetCaptionButtonWidth(float logicalWidth);
 void RpgExplorerWindow_SetCaptionButtonLayout(Rectangle bounds);

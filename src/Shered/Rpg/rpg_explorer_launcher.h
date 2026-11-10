@@ -19,5 +19,9 @@ void RpgExplorerLauncher_SetZipperDirectory(const char *path);
 bool RpgExplorerLauncher_GetZipperDirectory(char *path, size_t pathSize);
 bool RpgExplorerLauncher_OpenZipperDirectory(void);
 bool RpgExplorerLauncher_OpenDirectory(const char *path);
+/* Virtual Explorer windows are keyed by their root Folder.  These helpers
+   do not change the requested root. */
+bool RpgExplorerLauncher_RequestCloseVirtualExplorerForDirectory(const char *path);
+bool RpgExplorerLauncher_IsVirtualExplorerForDirectoryOpen(const char *path);
 
 #endif

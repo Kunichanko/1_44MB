@@ -1,12 +1,14 @@
 #include "rpg_reference_folder_materialization.h"
 
 #include "rpg_block_inventory.h"
+#include "rpg_explorer_launcher.h"
 #include "rpg_folder_travel_visual.h"
 #include "rpg_object_folder.h"
 #include "rpg_object_folder_monitor.h"
 #include "rpg_reference_folder_monitor_trace.h"
 
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 
 #ifdef _WIN32
@@ -22,6 +24,12 @@ typedef struct RpgReferenceFolderWatch {
     int objectId;
     int monitorHandle;
     bool dirty;
+    /* A virtual Explorer edits this directory from another process.  The
+       notification is the normal fast path, while this inexpensive
+       object_info signature is a bounded fallback for a missed notification. */
+    bool objectInfoSignatureKnown;
+    uint64_t objectInfoSignature;
+    float objectInfoFallbackElapsed;
 } RpgReferenceFolderWatch;
 
 typedef struct RpgReferenceFolderMaterialization {
@@ -43,6 +51,10 @@ typedef struct RpgReferenceFolderMaterialization {
     RpgReferenceObject originalObject;
     bool failureAnimating;
     bool folderStaged;
+    bool waitingForVirtualExplorerClose;
+    float virtualExplorerCloseElapsed;
+    float folderMoveRetryElapsed;
+    float folderMoveRetryAttemptElapsed;
 } RpgReferenceFolderMaterialization;
 
 typedef struct RpgReferenceFolderMonitorTask {
@@ -70,6 +82,54 @@ static char pendingMonitorTaskMessage[160] = { 0 };
 static bool materializationInitialized = false;
 
 enum { RPG_REFERENCE_FOLDER_MONITOR_TASK_TIMEOUT_MS = 350 };
+static const float RPG_REFERENCE_FOLDER_OBJECT_INFO_FALLBACK_SECONDS = 0.25f;
+static const float RPG_REFERENCE_FOLDER_EXPLORER_CLOSE_TIMEOUT_SECONDS = 2.0f;
+static const float RPG_REFERENCE_FOLDER_MOVE_RETRY_TIMEOUT_SECONDS = 2.0f;
+
+typedef enum RpgMaterializationCompletion {
+    RPG_MATERIALIZATION_COMPLETED,
+    RPG_MATERIALIZATION_RETRY_FOLDER_MOVE,
+    RPG_MATERIALIZATION_FAILED
+} RpgMaterializationCompletion;
+
+static uint64_t GetObjectInfoSignature(const char *directory)
+{
+#ifdef _WIN32
+    char path[RPG_STAGE_REFERENCE_PATH_LENGTH + 64];
+    wchar_t widePath[RPG_STAGE_REFERENCE_PATH_LENGTH + 64];
+    WIN32_FILE_ATTRIBUTE_DATA attributes;
+    uint64_t timestamp;
+    uint64_t size;
+    if (directory == NULL ||
+        snprintf(path, sizeof(path), "%s\\object_info.txt", directory) <= 0 ||
+        MultiByteToWideChar(CP_UTF8, 0, path, -1, widePath,
+                            (int)(sizeof(widePath) / sizeof(widePath[0]))) <= 0 ||
+        !GetFileAttributesExW(widePath, GetFileExInfoStandard, &attributes)) return 0;
+    timestamp = ((uint64_t)attributes.ftLastWriteTime.dwHighDateTime << 32) |
+                attributes.ftLastWriteTime.dwLowDateTime;
+    size = ((uint64_t)attributes.nFileSizeHigh << 32) | attributes.nFileSizeLow;
+    /* Zero remains the explicit "object_info does not exist" value. */
+    return (timestamp ^ (size * UINT64_C(0x9E3779B185EBCA87))) | UINT64_C(1);
+#else
+    (void)directory;
+    return 0;
+#endif
+}
+
+static bool RefreshObjectInfoSignature(RpgReferenceFolderWatch *watch, const char *directory)
+{
+    uint64_t signature;
+    if (watch == NULL) return false;
+    signature = GetObjectInfoSignature(directory);
+    if (!watch->objectInfoSignatureKnown) {
+        watch->objectInfoSignatureKnown = true;
+        watch->objectInfoSignature = signature;
+        return signature != 0;
+    }
+    if (watch->objectInfoSignature == signature) return false;
+    watch->objectInfoSignature = signature;
+    return true;
+}
 
 static void MarkFolderDirty(void *context, const char *directory)
 {
@@ -285,6 +345,8 @@ static void BeginInPlaceMaterializationFailure(RpgReferenceObject *object)
     materialization.duration = 0.35f;
     materialization.failureAnimating = true;
     materialization.folderStaged = false;
+    materialization.waitingForVirtualExplorerClose = false;
+    materialization.virtualExplorerCloseElapsed = 0.0f;
     snprintf(materialization.returnSource, sizeof(materialization.returnSource), "%s", object->path);
     RpgReferenceFolderMonitorTrace_Log("materialization rejected before travel: folder=%d", object->id);
 }
@@ -301,6 +363,9 @@ static void TryStartMaterialization(RpgStage *stage, RpgReferenceObjects *object
         object->isMaterializing) return;
     if (!GetMaterializationIntent(stage, object->path, &blockType, &cell,
                                   NULL, &restoresAir, &restoresMovable)) {
+        if (GetObjectInfoSignature(object->path) != 0)
+            RpgReferenceFolderMonitorTrace_Log(
+                "materialization rejected: folder=%d has invalid or unsupported object_info", object->id);
         if (IsActiveMonitorTaskForFolder(object->id)) BeginInPlaceMaterializationFailure(object);
         return;
     }
@@ -323,6 +388,8 @@ static void TryStartMaterialization(RpgStage *stage, RpgReferenceObjects *object
     materialization.originalObject = *object;
     materialization.originalObject.isMaterializing = false;
     materialization.folderStaged = false;
+    materialization.waitingForVirtualExplorerClose = false;
+    materialization.virtualExplorerCloseElapsed = 0.0f;
     /* A directory notification may arrive while gameplay is updating.  Do
        not move a potentially large Folder in that notification frame: begin
        the visual now, keep its on-disk directory in place, and commit the
@@ -435,11 +502,11 @@ static void UpdateMonitorTask(const RpgReferenceObjects *objects, float deltaTim
     }
 }
 
-static void CompleteMaterialization(void)
+static RpgMaterializationCompletion CompleteMaterialization(void)
 {
     RpgObjectFolder folder;
     Rectangle destinationBounds;
-    if (materialization.stage == NULL) { BeginMaterializationFailure(); return; }
+    if (materialization.stage == NULL) return RPG_MATERIALIZATION_FAILED;
     folder.cell = materialization.destinationCell;
     if (materialization.restoresAir) {
         /* Air has no block folder or physics record to rebuild.  It still
@@ -449,13 +516,16 @@ static void CompleteMaterialization(void)
            into the type stored in a stale object_info.txt. */
         if (!RpgStage_IsCellError(materialization.stage, folder.cell.row, folder.cell.column) ||
             !RpgObjectFolder_DiscardReferenceFolder(&materialization.originalObject)) {
-            BeginMaterializationFailure();
-            return;
+            RpgReferenceFolderMonitorTrace_Log(
+                "materialization rejected: folder=%d air destination state=%d",
+                materialization.objectId,
+                (int)RpgStage_GetCellState(materialization.stage, folder.cell.row, folder.cell.column));
+            return RPG_MATERIALIZATION_FAILED;
         }
         RpgStage_SetCellBlock(materialization.stage, folder.cell.row, folder.cell.column, 0);
         materialization.active = false;
         materialization.objectId = -1;
-        return;
+        return RPG_MATERIALIZATION_COMPLETED;
     }
     if (materialization.restoresMovable) {
         /* A dropped metal/push block deliberately left its old terrain cell
@@ -465,8 +535,12 @@ static void CompleteMaterialization(void)
         if (materialization.magnetRuntime == NULL ||
             RpgStage_GetCellState(materialization.stage, folder.cell.row, folder.cell.column) != RPG_CELL_AIR ||
             materialization.magnetRuntime->metalCount >= RPG_MAGNET_MAX_METALS) {
-            BeginMaterializationFailure();
-            return;
+            RpgReferenceFolderMonitorTrace_Log(
+                "materialization rejected: folder=%d movable destination state=%d capacity=%d",
+                materialization.objectId,
+                (int)RpgStage_GetCellState(materialization.stage, folder.cell.row, folder.cell.column),
+                materialization.magnetRuntime != NULL ? materialization.magnetRuntime->metalCount : -1);
+            return RPG_MATERIALIZATION_FAILED;
         }
         destinationBounds = RpgStage_GetWorldBoundsForCell(materialization.stage,
                                                              folder.cell.row, folder.cell.column);
@@ -476,23 +550,39 @@ static void CompleteMaterialization(void)
             !RpgMagnets_AddRuntimeBlock(materialization.magnetRuntime, materialization.stage,
                                         folder.cell, materialization.blockType,
                                         (Vector2){ destinationBounds.x, destinationBounds.y })) {
-            BeginMaterializationFailure();
-            return;
+            if (RpgObjectFolder_IsLastDirectoryMoveErrorRetryable())
+                return RPG_MATERIALIZATION_RETRY_FOLDER_MOVE;
+            RpgReferenceFolderMonitorTrace_Log(
+                "materialization move failed: folder=%d movable win32=%lu",
+                materialization.objectId, RpgObjectFolder_GetLastDirectoryMoveError());
+            return RPG_MATERIALIZATION_FAILED;
         }
         materialization.active = false;
         materialization.objectId = -1;
-        return;
+        return RPG_MATERIALIZATION_COMPLETED;
     }
-    if (!RpgStage_IsCellError(materialization.stage, folder.cell.row, folder.cell.column) ||
-        !RpgObjectFolder_ReturnBlockFolderToBuild(materialization.returnSource, &folder,
+    if (!RpgStage_IsCellError(materialization.stage, folder.cell.row, folder.cell.column)) {
+        RpgReferenceFolderMonitorTrace_Log(
+            "materialization rejected: folder=%d block row=%d column=%d state=%d (red error required)",
+            materialization.objectId, folder.cell.row, folder.cell.column,
+            (int)RpgStage_GetCellState(materialization.stage, folder.cell.row, folder.cell.column));
+        return RPG_MATERIALIZATION_FAILED;
+    }
+    if (!RpgObjectFolder_ReturnBlockFolderToBuild(materialization.returnSource, &folder,
                                                   materialization.blockType)) {
-        BeginMaterializationFailure();
-        return;
+        if (RpgObjectFolder_IsLastDirectoryMoveErrorRetryable())
+            return RPG_MATERIALIZATION_RETRY_FOLDER_MOVE;
+        RpgReferenceFolderMonitorTrace_Log(
+            "materialization move failed: folder=%d block row=%d column=%d win32=%lu",
+            materialization.objectId, folder.cell.row, folder.cell.column,
+            RpgObjectFolder_GetLastDirectoryMoveError());
+        return RPG_MATERIALIZATION_FAILED;
     }
     RpgStage_SetCellBlock(materialization.stage, folder.cell.row, folder.cell.column,
                           materialization.blockType);
     materialization.active = false;
     materialization.objectId = -1;
+    return RPG_MATERIALIZATION_COMPLETED;
 }
 
 void RpgReferenceFolderMaterialization_Update(RpgStage *stage, RpgReferenceObjects *objects,
@@ -535,6 +625,19 @@ void RpgReferenceFolderMaterialization_Update(RpgStage *stage, RpgReferenceObjec
         }
         watch->monitorHandle = RpgObjectFolderMonitor_Connect(watch->monitorHandle, object->path,
                                                                true, MarkFolderDirty, watch);
+        /* A watcher normally marks dirty immediately through Win32.  If a
+           cross-process virtual Explorer update is missed, probe only this
+           one metadata file four times per second; never rescan the folder. */
+        watch->objectInfoFallbackElapsed += deltaTime;
+        if (!watch->objectInfoSignatureKnown ||
+            watch->objectInfoFallbackElapsed >= RPG_REFERENCE_FOLDER_OBJECT_INFO_FALLBACK_SECONDS) {
+            watch->objectInfoFallbackElapsed = 0.0f;
+            if (RefreshObjectInfoSignature(watch, object->path)) {
+                watch->dirty = true;
+                RpgReferenceFolderMonitorTrace_Log(
+                    "materialization fallback detected object_info change: folder=%d", object->id);
+            }
+        }
         if (watch->dirty) {
             watch->dirty = false;
             if (IsUnchangedRejectedMaterialization(stage, object)) {
@@ -558,7 +661,58 @@ void RpgReferenceFolderMaterialization_Update(RpgStage *stage, RpgReferenceObjec
         materialization.active = false;
         materialization.failureAnimating = false;
         materialization.objectId = -1;
-    } else CompleteMaterialization();
+    } else {
+        /* The virtual Explorer intentionally runs with this Folder as its
+           root/current directory.  Request its ordinary close before moving
+           the Folder into the build tree, then wait until the HWND is gone. */
+        if (!materialization.waitingForVirtualExplorerClose &&
+            RpgExplorerLauncher_RequestCloseVirtualExplorerForDirectory(materialization.returnSource)) {
+            materialization.waitingForVirtualExplorerClose = true;
+            materialization.virtualExplorerCloseElapsed = 0.0f;
+            RpgReferenceFolderMonitorTrace_Log("materialization waiting for virtual Explorer close: folder=%d",
+                                               materialization.objectId);
+            return;
+        }
+        if (materialization.waitingForVirtualExplorerClose) {
+            materialization.virtualExplorerCloseElapsed += deltaTime;
+            if (RpgExplorerLauncher_IsVirtualExplorerForDirectoryOpen(materialization.returnSource)) {
+                if (materialization.virtualExplorerCloseElapsed < RPG_REFERENCE_FOLDER_EXPLORER_CLOSE_TIMEOUT_SECONDS)
+                    return;
+                RpgReferenceFolderMonitorTrace_Log("materialization close timeout: folder=%d", materialization.objectId);
+                BeginMaterializationFailure();
+                return;
+            }
+            materialization.waitingForVirtualExplorerClose = false;
+        }
+        {
+            if (materialization.folderMoveRetryElapsed > 0.0f) {
+                materialization.folderMoveRetryElapsed += deltaTime;
+                materialization.folderMoveRetryAttemptElapsed += deltaTime;
+                if (materialization.folderMoveRetryElapsed >= RPG_REFERENCE_FOLDER_MOVE_RETRY_TIMEOUT_SECONDS) {
+                    RpgReferenceFolderMonitorTrace_Log(
+                        "materialization directory move timeout: folder=%d win32=%lu",
+                        materialization.objectId, RpgObjectFolder_GetLastDirectoryMoveError());
+                    BeginMaterializationFailure();
+                    return;
+                }
+                if (materialization.folderMoveRetryAttemptElapsed < 0.05f) return;
+                materialization.folderMoveRetryAttemptElapsed = 0.0f;
+            }
+            RpgMaterializationCompletion completion = CompleteMaterialization();
+            if (completion == RPG_MATERIALIZATION_RETRY_FOLDER_MOVE) {
+                if (materialization.folderMoveRetryElapsed == 0.0f) {
+                    materialization.folderMoveRetryElapsed = deltaTime;
+                    materialization.folderMoveRetryAttemptElapsed = 0.0f;
+                    RpgReferenceFolderMonitorTrace_Log(
+                        "materialization retrying directory move: folder=%d win32=%lu",
+                        materialization.objectId, RpgObjectFolder_GetLastDirectoryMoveError());
+                }
+                return;
+            } else if (completion == RPG_MATERIALIZATION_FAILED) {
+                BeginMaterializationFailure();
+            }
+        }
+    }
 }
 
 bool RpgReferenceFolderMaterialization_ConsumeMonitorTaskMessage(char *text, size_t textSize)

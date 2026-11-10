@@ -284,13 +284,15 @@ static void MarkEditorPreviewPathMutation(const char *path)
     const char *area;
     int gridX, gridY, mapIndex;
     if (path == NULL || (area = strstr(path, "area_x")) == NULL ||
-        sscanf(area, "area_x%d_y%d_cell_", &gridX, &gridY) != 2) {
-        RpgObjectFolders_MarkEditorPreviewStaticMutation();
+        sscanf(area, "area_x%d_y%d_cell_", &gridX, &gridY) != 2)
+        /* A movable Folder or a composite root deliberately has no cell in
+           its pathname.  This low-level file operation cannot infer which
+           stage object owns it, so it must not pessimistically dirty every
+           area.  Its caller supplies the owner cell once it knows the
+           target (key door / Folder object). */
         return;
-    }
     mapIndex = FindBuildMapByGridPosition(gridX, gridY);
     if (mapIndex >= 0) RpgObjectFolders_MarkEditorPreviewMapMutation(mapIndex);
-    else RpgObjectFolders_MarkEditorPreviewStaticMutation();
 }
 
 bool RpgObjectFolders_HasEditorPreviewStaticMutations(void)
@@ -743,8 +745,7 @@ static void OnZipperStorageFolderChanged(void *context, const char *directory)
 
 static bool IsZipperAuditHelperFile(const wchar_t *name)
 {
-    return _wcsicmp(name, L"eat.cmd") == 0 || _wcsicmp(name, L"eat.vbs") == 0 ||
-           _wcsicmp(name, L"spit.cmd") == 0 || _wcsicmp(name, L"spit.vbs") == 0 ||
+    return _wcsicmp(name, L"eat.vbs") == 0 || _wcsicmp(name, L"spit.vbs") == 0 ||
            _wcsicmp(name, L"zipper_command.request") == 0 ||
            _wcsicmp(name, L"assyuku.cmd") == 0 || _wcsicmp(name, L"assyuku.vbs") == 0 ||
            _wcsicmp(name, L"assyuku.request") == 0;
@@ -1459,13 +1460,51 @@ static void RPG_OBJECT_FOLDER_UNUSED ClearFolderContents(const char *directory)
     NotifyShellChange(RPG_SHCNE_UPDATEDIR, directory, NULL);
 }
 
+static unsigned long lastDirectoryMoveError = 0;
+
+unsigned long RpgObjectFolder_GetLastDirectoryMoveError(void)
+{
+    return lastDirectoryMoveError;
+}
+
+bool RpgObjectFolder_IsLastDirectoryMoveErrorRetryable(void)
+{
+#ifdef _WIN32
+    return lastDirectoryMoveError == ERROR_SHARING_VIOLATION ||
+           lastDirectoryMoveError == ERROR_LOCK_VIOLATION ||
+           lastDirectoryMoveError == ERROR_ACCESS_DENIED;
+#else
+    return false;
+#endif
+}
+
 static bool MoveDirectory(const char *source, const char *destination)
 {
     wchar_t wideSource[1200], wideDestination[1200];
+    HANDLE sourceHandle;
     unsigned long long sourceBytes;
     unsigned long long replacedDestinationBytes;
     bool moved;
-    if (!FolderExistsUtf8(source) || !ToWide(source, wideSource, 1200) || !ToWide(destination, wideDestination, 1200)) return false;
+    lastDirectoryMoveError = 0;
+    if (!FolderExistsUtf8(source)) {
+        lastDirectoryMoveError = ERROR_PATH_NOT_FOUND;
+        return false;
+    }
+    if (!ToWide(source, wideSource, 1200) || !ToWide(destination, wideDestination, 1200)) {
+        lastDirectoryMoveError = ERROR_INVALID_PARAMETER;
+        return false;
+    }
+    /* A virtual Explorer may have destroyed its window before its process
+       releases the root directory.  Probe delete sharing before replacing a
+       destination so a transient lock leaves both directory trees intact. */
+    sourceHandle = CreateFileW(wideSource, DELETE | FILE_READ_ATTRIBUTES,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (sourceHandle == INVALID_HANDLE_VALUE) {
+        lastDirectoryMoveError = GetLastError();
+        return false;
+    }
+    CloseHandle(sourceHandle);
     sourceBytes = MeasurePathBytesUtf8(source);
     replacedDestinationBytes = FolderExistsUtf8(destination) ? MeasurePathBytesUtf8(destination) : 0;
     RemoveTree(destination);
@@ -1473,6 +1512,7 @@ static bool MoveDirectory(const char *source, const char *destination)
        the following MoveFileExW happens to fail. */
     UpdateZipperStorageForPathMove(source, destination, 0, replacedDestinationBytes, false);
     moved = MoveFileExW(wideSource, wideDestination, MOVEFILE_WRITE_THROUGH) != 0;
+    if (!moved) lastDirectoryMoveError = GetLastError();
     UpdateZipperStorageForPathMove(source, destination, sourceBytes, 0, moved);
     if (moved) {
         /* Rename通知だけでは表示中の移動先一覧が更新されないExplorerがあるため、
@@ -3465,12 +3505,16 @@ bool RpgObjectFolder_StoreFileInDirectory(const char *sourcePath, const char *de
 void RpgObjectFolder_PrepareZipperAnimationCommand(void)
 {
 #ifdef _WIN32
-    char inbox[1200], command[1200], script[1200], legacy[1200];
-    wchar_t wideCommand[1200], wideScript[1200], wideLegacy[1200]; FILE *file;
+    char inbox[1200], script[1200], legacy[1200];
+    wchar_t wideScript[1200], wideLegacy[1200]; FILE *file;
     if (!GetInboxPath(inbox, sizeof(inbox)) || !CreateFolderUtf8(inbox) ||
-        snprintf(command, sizeof(command), "%s\\eat.cmd", inbox) <= 0 ||
         snprintf(script, sizeof(script), "%s\\eat.vbs", inbox) <= 0 ||
-        !ToWide(command, wideCommand, 1200) || !ToWide(script, wideScript, 1200)) return;
+        !ToWide(script, wideScript, 1200)) return;
+    /* VBS is the only user-facing command entrypoint. */
+    if (snprintf(legacy, sizeof(legacy), "%s\\eat.cmd", inbox) > 0 && ToWide(legacy, wideLegacy, 1200))
+        (void)DeleteFileW(wideLegacy);
+    if (snprintf(legacy, sizeof(legacy), "%s\\spit.cmd", inbox) > 0 && ToWide(legacy, wideLegacy, 1200))
+        (void)DeleteFileW(wideLegacy);
     /* Remove direct leftovers from builds that used the old command name. */
     if (snprintf(legacy, sizeof(legacy), "%s\\assyuku.cmd", inbox) > 0 && ToWide(legacy, wideLegacy, 1200))
         (void)DeleteFileW(wideLegacy);
@@ -3484,6 +3528,8 @@ void RpgObjectFolder_PrepareZipperAnimationCommand(void)
         (void)DeleteFileW(wideLegacy);
     if (snprintf(legacy, sizeof(legacy), "%s\\zipper_command.request", inbox) > 0 && ToWide(legacy, wideLegacy, 1200))
         (void)DeleteFileW(wideLegacy);
+    /* Legacy batch launcher retained only as disabled source history. */
+#if 0
     file = _wfopen(wideCommand, L"wb");
     if (file != NULL) {
         /* cmdは既存操作との互換用。ダブルクリック時のコンソール表示を避けるには.vbsを使う。 */
@@ -3494,6 +3540,7 @@ void RpgObjectFolder_PrepareZipperAnimationCommand(void)
             NotifyShellPathHierarchyChanged(command);
         }
     }
+#endif
     file = _wfopen(wideScript, L"wb");
     if (file != NULL) {
         /* WScriptで実行されるため、同じ要求をコンソールなしで発行できる。 */
@@ -3509,9 +3556,9 @@ void RpgObjectFolder_PrepareZipperAnimationCommand(void)
             NotifyShellPathHierarchyChanged(script);
         }
     }
-    if (snprintf(command, sizeof(command), "%s\\spit.cmd", inbox) > 0 &&
-        snprintf(script, sizeof(script), "%s\\spit.vbs", inbox) > 0 &&
-        ToWide(command, wideCommand, 1200) && ToWide(script, wideScript, 1200)) {
+    if (snprintf(script, sizeof(script), "%s\\spit.vbs", inbox) > 0 &&
+        ToWide(script, wideScript, 1200)) {
+#if 0
         file = _wfopen(wideCommand, L"wb");
         if (file != NULL) {
             fputs("@echo off\r\ndel /f /q \"%~dp0zipper_command.request\" >nul 2>nul\r\n"
@@ -3521,6 +3568,7 @@ void RpgObjectFolder_PrepareZipperAnimationCommand(void)
                 NotifyShellPathHierarchyChanged(command);
             }
         }
+#endif
         file = _wfopen(wideScript, L"wb");
         if (file != NULL) {
             fputs("Randomize\r\n"
@@ -5561,7 +5609,7 @@ void RpgObjectFolders_ClearSessionStorage(void)
     if (activeBuildPath[0] == '\0' && GetObjectsPath(objects, sizeof(objects))) RemoveTree(objects);
     if (activeBuildPath[0] == '\0' && GetDropsPath(drops, sizeof(drops))) RemoveTree(drops);
     /* Inboxは実Explorerの表示ルートなので、削除・再作成せず同じディレクトリ内を掃除する。 */
-    /* Zipper is now the visible storage root.  It contains eat.cmd and any
+    /* Zipper is now the visible storage root.  It contains eat.vbs and any
        captured objects, so cleanup must not empty it as though it were a
        disposable Inbox. */
 #endif

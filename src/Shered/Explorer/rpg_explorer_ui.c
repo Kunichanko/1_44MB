@@ -21,11 +21,12 @@ static float ContentTop(const ExplorerMetrics *m) { return m->titleTabBarHeight 
 static float ContentBottom(const ExplorerMetrics *m) { return (float)GetScreenHeight() - m->statusBarHeight; }
 static void EnsureVisibleGlyphs(RpgExplorerUiState *state, const RpgExplorerFilesystem *fs, RpgExplorerTheme *theme)
 {
-    const char *texts[RPG_EXPLORER_MAX_ENTRIES * 2 + RPG_EXPLORER_MAX_TREE_NODES + 3];
+    const char *texts[RPG_EXPLORER_MAX_ENTRIES * 2 + RPG_EXPLORER_MAX_TREE_NODES + 4];
     int textCount = 0;
     if (state == NULL || fs == NULL || theme == NULL) return;
     texts[textCount++] = RpgExplorerFilesystem_GetRelativePath(fs, fs->currentPath);
     texts[textCount++] = state->status;
+    texts[textCount++] = fs->rootName;
     texts[textCount++] = "…";
     for (int index = 0; index < fs->treeNodeCount; index++) texts[textCount++] = fs->treeNodes[index].name;
     for (int index = 0; index < fs->entryCount; index++) {
@@ -220,7 +221,8 @@ static int BuildBreadcrumbSegments(const RpgExplorerFilesystem *fs,
     int count = 0;
     if (fs == NULL || segments == NULL || capacity <= 0) return 0;
     memset(segments, 0, (size_t)capacity * sizeof(*segments));
-    snprintf(segments[count].label, sizeof(segments[count].label), "Zipper");
+    snprintf(segments[count].label, sizeof(segments[count].label), "%s",
+             fs->rootName[0] != '\0' ? fs->rootName : "Zipper");
     snprintf(segments[count].path, sizeof(segments[count].path), "%s", fs->rootPath);
     segments[count++].canNavigate = true;
     snprintf(relative, sizeof(relative), "%s",
@@ -374,7 +376,8 @@ static void Chrome(const RpgExplorerTheme *theme, const RpgExplorerFilesystem *f
     DrawRectangle(0,0,GetScreenWidth(),(int)tabHeight,theme->chromeBackground);
     DrawRectangleRounded(tab,0.18f,8,theme->windowBackground);
     RpgExplorerTheme_DrawIcon(theme,ICON_VIEW,(Rectangle){tab.x + 14.0f, tab.y + 10.0f, 18.0f, 18.0f},theme->accent);
-    RpgExplorerTheme_DrawText(theme,"Zipper",(Vector2){tab.x + 43.0f, tab.y + 12.0f},16.0f,theme->text);
+    RpgExplorerTheme_DrawText(theme,fs->rootName[0] != '\0' ? fs->rootName : "Zipper",
+                              (Vector2){tab.x + 43.0f, tab.y + 12.0f},16.0f,theme->text);
     if (captionButtons.width <= 0.0f || tab.x + tab.width + 48.0f < captionButtons.x)
         RpgExplorerTheme_DrawText(theme,"+",(Vector2){tab.x + tab.width + 24.0f, tab.y + 9.0f},24.0f,theme->secondaryText);
     CaptionButtons(theme);
@@ -394,7 +397,12 @@ static void Chrome(const RpgExplorerTheme *theme, const RpgExplorerFilesystem *f
     Rectangle search={searchX,address.y,searchWidth,m->addressHeight};
     DrawRectangleRounded(search,0.18f,8,Fade(theme->chromeBackground,0.64f));
     DrawRectangleLinesEx(search,1.0f,theme->separator);
-    RpgExplorerTheme_DrawText(theme,"Zipper の検索",(Vector2){search.x + 12.0f, search.y + 7.0f},15.0f,theme->secondaryText);
+    {
+        char searchPlaceholder[RPG_EXPLORER_NAME_LENGTH + 32];
+        snprintf(searchPlaceholder, sizeof(searchPlaceholder), "%s の検索",
+                 fs->rootName[0] != '\0' ? fs->rootName : "Zipper");
+        RpgExplorerTheme_DrawText(theme,searchPlaceholder,(Vector2){search.x + 12.0f, search.y + 7.0f},15.0f,theme->secondaryText);
+    }
     RpgExplorerTheme_DrawIcon(theme,ICON_SEARCH,(Rectangle){search.x + search.width - 30.0f, search.y + 6.0f, 20.0f, 20.0f},theme->text);
     Line(0,navTop+m->navigationAddressBarHeight,width,navTop+m->navigationAddressBarHeight,theme);
 
@@ -653,7 +661,7 @@ static void Navigation(const RpgExplorerTheme *theme, const RpgExplorerFilesyste
                                                          m->navigationPaneWidth - m->navTreeSelectionHorizontalInset * 2.0f,
                                                          root.row.height }, theme->navigationHover);
     DrawFolderIcon(cache, root.icon);
-    DrawNavigationLabel(theme, "Zipper", root.textX, root.textY);
+    DrawNavigationLabel(theme, fs->rootName[0] != '\0' ? fs->rootName : "Zipper", root.textX, root.textY);
 
     for (int visibleIndex = state->treeScroll; visibleIndex < visibleCount && visibleIndex < state->treeScroll + rowCapacity; visibleIndex++) {
         int nodeIndex = visibleNodes[visibleIndex];
@@ -835,10 +843,19 @@ void RpgExplorerUi_Initialize(RpgExplorerUiState *state){if(state==NULL)return;m
 
 void RpgExplorerUi_UpdateAndDraw(RpgExplorerUiState *state,RpgExplorerFilesystem *fs,RpgExplorerShellCache *cache,RpgExplorerTheme *theme)
 {
+    RpgExplorerWindow_UpdateOwnerZOrder();
     RpgExplorerTheme_UpdateDpi(theme,GetWindowHandle());ExplorerMetrics *m=&theme->metrics;Vector2 p=GetMousePosition();float top=ContentTop(m);Rectangle up=NavigationButtonBounds(m,m->titleTabBarHeight,2),refresh=NavigationButtonBounds(m,m->titleTabBarHeight,3);
     RpgExplorerWindow_SetCaptionButtonWidth(m->captionButtonWidth);
     UpdateCaptionButtonLayout(theme);
     /* caption buttonはWM_NCHITTESTのnon-client経路だけで処理する。raylibは通常UIだけを扱う。 */
+    /* Refresh only when the non-blocking root watcher observes a filesystem
+       change, so an open virtual explorer follows Zipper updates. */
+    if (RpgExplorerFilesystem_PollChanges(fs)) {
+        state->isDragging = false;
+        state->draggedEntry = -1;
+        RefreshViewWithGlyphs(state, fs, cache, theme);
+        if (state->selectedEntry >= fs->entryCount) state->selectedEntry = -1;
+    }
     if (!state->visibleGlyphsPrepared) EnsureVisibleGlyphs(state, fs, theme);
     if(IsKeyPressed(KEY_BACKSPACE)||(IsMouseButtonPressed(MOUSE_BUTTON_LEFT)&&CheckCollisionPointRec(p,up))){if(RpgExplorerFilesystem_NavigateUp(fs)){state->listScroll=0;RefreshViewWithGlyphs(state,fs,cache,theme);}}if(IsKeyPressed(KEY_F5)||(IsMouseButtonPressed(MOUSE_BUTTON_LEFT)&&CheckCollisionPointRec(p,refresh)))RefreshViewWithGlyphs(state,fs,cache,theme);
     {
@@ -886,16 +903,19 @@ void RpgExplorerUi_UpdateAndDraw(RpgExplorerUiState *state,RpgExplorerFilesystem
                 if (RpgExplorerFilesystem_NavigateTo(fs, fs->treeNodes[tree.nodeIndex].path)){state->listScroll=0;RefreshViewWithGlyphs(state, fs, cache, theme);}
             } else if (entry >= 0) {
                 bool dbl = state->lastClickEntry == entry && GetTime() - state->lastClickTime <= .35;
+                bool isDirectory = fs->entries[entry].isDirectory;
                 state->selectedEntry = entry;
                 state->draggedEntry = entry;
                 state->dragStart = p;
                 state->lastClickEntry = entry;
                 state->lastClickTime = GetTime();
                 if (dbl && RpgExplorerFilesystem_OpenEntry(fs, entry)) {
-                    state->selectedEntry = -1;
                     state->draggedEntry = -1;
-                    state->listScroll = 0;
-                    RefreshViewWithGlyphs(state, fs, cache, theme);
+                    if (isDirectory) {
+                        state->selectedEntry = -1;
+                        state->listScroll = 0;
+                        RefreshViewWithGlyphs(state, fs, cache, theme);
+                    }
                 }
             }
         }

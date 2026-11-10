@@ -9,6 +9,7 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <shellapi.h>
 
 static bool Utf8ToWide(const char *text, wchar_t *wide, int count)
 {
@@ -32,6 +33,25 @@ static bool NormalizePath(const char *path, char *normalized, size_t size)
     return true;
 }
 
+static void SetRootName(RpgExplorerFilesystem *filesystem)
+{
+    const char *name;
+    const char *backslash;
+    const char *slash;
+    size_t length;
+    if (filesystem == NULL) return;
+    backslash = strrchr(filesystem->rootPath, '\\');
+    slash = strrchr(filesystem->rootPath, '/');
+    name = backslash != NULL ? backslash + 1 : filesystem->rootPath;
+    if (slash != NULL && slash + 1 > name) name = slash + 1;
+    /* A drive root has no component following its separator. */
+    if (name[0] == '\0') name = filesystem->rootPath;
+    length = strlen(name);
+    if (length >= sizeof(filesystem->rootName)) length = sizeof(filesystem->rootName) - 1;
+    memcpy(filesystem->rootName, name, length);
+    filesystem->rootName[length] = '\0';
+}
+
 static bool DirectoryExists(const char *path)
 {
     wchar_t wide[RPG_EXPLORER_PATH_LENGTH];
@@ -39,6 +59,30 @@ static bool DirectoryExists(const char *path)
     if (!Utf8ToWide(path, wide, RPG_EXPLORER_PATH_LENGTH)) return false;
     attributes = GetFileAttributesW(wide);
     return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+static void CloseChangeNotification(RpgExplorerFilesystem *filesystem)
+{
+    HANDLE handle;
+    if (filesystem == NULL) return;
+    handle = (HANDLE)filesystem->changeNotification;
+    if (handle != NULL && handle != INVALID_HANDLE_VALUE)
+        FindCloseChangeNotification(handle);
+    filesystem->changeNotification = NULL;
+}
+
+static void OpenChangeNotification(RpgExplorerFilesystem *filesystem)
+{
+    wchar_t root[RPG_EXPLORER_PATH_LENGTH];
+    HANDLE handle;
+    if (filesystem == NULL || filesystem->changeNotification != NULL ||
+        !Utf8ToWide(filesystem->rootPath, root, RPG_EXPLORER_PATH_LENGTH)) return;
+    handle = FindFirstChangeNotificationW(root, TRUE,
+                                           FILE_NOTIFY_CHANGE_FILE_NAME |
+                                           FILE_NOTIFY_CHANGE_DIR_NAME |
+                                           FILE_NOTIFY_CHANGE_SIZE |
+                                           FILE_NOTIFY_CHANGE_LAST_WRITE);
+    if (handle != INVALID_HANDLE_VALUE) filesystem->changeNotification = handle;
 }
 
 static int CompareEntries(const void *left, const void *right)
@@ -114,7 +158,12 @@ bool RpgExplorerFilesystem_Refresh(RpgExplorerFilesystem *filesystem)
     char current[RPG_EXPLORER_PATH_LENGTH];
     WIN32_FIND_DATAW data;
     HANDLE handle;
-    if (filesystem == NULL || !DirectoryExists(filesystem->currentPath) ||
+    if (filesystem == NULL) return false;
+    /* If the currently displayed folder was removed externally, recover to
+       the virtual explorer root rather than leaving a stale, blank view. */
+    if (!DirectoryExists(filesystem->currentPath) && DirectoryExists(filesystem->rootPath))
+        snprintf(filesystem->currentPath, sizeof(filesystem->currentPath), "%s", filesystem->rootPath);
+    if (!DirectoryExists(filesystem->currentPath) ||
         !Utf8ToWide(filesystem->currentPath, wideCurrent, RPG_EXPLORER_PATH_LENGTH) ||
         swprintf(search, RPG_EXPLORER_PATH_LENGTH, L"%ls\\*", wideCurrent) < 0 ||
         snprintf(current, sizeof(current), "%s", filesystem->currentPath) <= 0) return false;
@@ -153,8 +202,39 @@ bool RpgExplorerFilesystem_Initialize(RpgExplorerFilesystem *filesystem, const c
     if (!DirectoryExists(filesystem->rootPath) &&
         (!Utf8ToWide(filesystem->rootPath, wideRoot, RPG_EXPLORER_PATH_LENGTH) ||
          (!CreateDirectoryW(wideRoot, NULL) && GetLastError() != ERROR_ALREADY_EXISTS))) return false;
+    SetRootName(filesystem);
     snprintf(filesystem->currentPath, sizeof(filesystem->currentPath), "%s", filesystem->rootPath);
+    OpenChangeNotification(filesystem);
     return RpgExplorerFilesystem_Refresh(filesystem);
+}
+
+bool RpgExplorerFilesystem_PollChanges(RpgExplorerFilesystem *filesystem)
+{
+    HANDLE handle;
+    DWORD state;
+    bool changed = false;
+    if (filesystem == NULL) return false;
+    OpenChangeNotification(filesystem);
+    handle = (HANDLE)filesystem->changeNotification;
+    if (handle == NULL) return false;
+    state = WaitForSingleObject(handle, 0);
+    if (state == WAIT_OBJECT_0) {
+        changed = true;
+        if (FindNextChangeNotification(handle) == 0) {
+            CloseChangeNotification(filesystem);
+            OpenChangeNotification(filesystem);
+        }
+    } else if (state != WAIT_TIMEOUT) {
+        changed = true;
+        CloseChangeNotification(filesystem);
+        OpenChangeNotification(filesystem);
+    }
+    return changed;
+}
+
+void RpgExplorerFilesystem_Shutdown(RpgExplorerFilesystem *filesystem)
+{
+    CloseChangeNotification(filesystem);
 }
 
 bool RpgExplorerFilesystem_NavigateTo(RpgExplorerFilesystem *filesystem, const char *directory)
@@ -179,9 +259,14 @@ bool RpgExplorerFilesystem_NavigateUp(RpgExplorerFilesystem *filesystem)
 
 bool RpgExplorerFilesystem_OpenEntry(RpgExplorerFilesystem *filesystem, int entryIndex)
 {
-    if (filesystem == NULL || entryIndex < 0 || entryIndex >= filesystem->entryCount ||
-        !filesystem->entries[entryIndex].isDirectory) return false;
-    return RpgExplorerFilesystem_NavigateTo(filesystem, filesystem->entries[entryIndex].path);
+    const RpgExplorerEntry *entry;
+    wchar_t widePath[RPG_EXPLORER_PATH_LENGTH];
+    if (filesystem == NULL || entryIndex < 0 || entryIndex >= filesystem->entryCount) return false;
+    entry = &filesystem->entries[entryIndex];
+    if (entry->isDirectory)
+        return RpgExplorerFilesystem_NavigateTo(filesystem, entry->path);
+    if (!Utf8ToWide(entry->path, widePath, RPG_EXPLORER_PATH_LENGTH)) return false;
+    return (INT_PTR)ShellExecuteW(NULL, L"open", widePath, NULL, NULL, SW_SHOWNORMAL) > 32;
 }
 
 bool RpgExplorerFilesystem_MoveEntryToDirectory(RpgExplorerFilesystem *filesystem, int sourceIndex,
@@ -205,6 +290,8 @@ bool RpgExplorerFilesystem_MoveEntryToDirectory(RpgExplorerFilesystem *filesyste
 bool RpgExplorerFilesystem_Initialize(RpgExplorerFilesystem *filesystem, const char *rootPath)
 { (void)filesystem; (void)rootPath; return false; }
 bool RpgExplorerFilesystem_Refresh(RpgExplorerFilesystem *filesystem) { (void)filesystem; return false; }
+bool RpgExplorerFilesystem_PollChanges(RpgExplorerFilesystem *filesystem) { (void)filesystem; return false; }
+void RpgExplorerFilesystem_Shutdown(RpgExplorerFilesystem *filesystem) { (void)filesystem; }
 bool RpgExplorerFilesystem_NavigateTo(RpgExplorerFilesystem *filesystem, const char *directory)
 { (void)filesystem; (void)directory; return false; }
 bool RpgExplorerFilesystem_NavigateUp(RpgExplorerFilesystem *filesystem) { (void)filesystem; return false; }

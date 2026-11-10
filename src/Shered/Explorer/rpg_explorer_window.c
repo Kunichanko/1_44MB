@@ -4,6 +4,8 @@
 
 #ifdef _WIN32
 #include <math.h>
+#include <stdint.h>
+#include <wctype.h>
 
 #define WIN32_LEAN_AND_MEAN
 #define Rectangle Win32Rectangle
@@ -27,6 +29,10 @@ extern UINT WINAPI GetDpiForWindow(HWND window);
 extern int WINAPI GetSystemMetricsForDpi(int index, UINT dpi);
 
 static HWND explorerWindow = NULL;
+/* The game HWND is associated with the in-game virtual Explorer, but is not
+   made a Win32 owner: changing GWLP_HWNDPARENT after GLFW has created an
+   OpenGL window crashes both GLFW processes on mouse/activation changes. */
+static HWND ownerWindow = NULL;
 static WNDPROC originalWindowProcedure = NULL;
 static Rectangle tabBounds = { 8.0f, 4.0f, 276.0f, 28.0f };
 static float titleBarHeight = 32.0f;
@@ -37,8 +43,87 @@ static Rectangle maximizeButtonBounds = { 0 };
 static Rectangle closeButtonBounds = { 0 };
 static bool captionLayoutComesFromUi = false;
 static int pressedCaptionButton = -1;
+static ULONGLONG lastOwnerZOrderTick = 0;
+static bool ownerZOrderIsTopmost = false;
+static uint32_t explorerRootHash = 0;
+
+/* These names are deliberately shared with rpg_explorer_launcher.c without
+   adding a new DLL or IPC dependency.  A property is visible across Win32
+   processes, while the registered message is used only for activate/close. */
+static const wchar_t *const explorerRootPropertyName = L"Zipper.RpgExplorer.RootHash.v1";
+static const wchar_t *const explorerControlMessageName = L"Zipper.RpgExplorer.Control.v1";
+enum {
+    RPG_EXPLORER_CONTROL_ACTIVATE = 1,
+    RPG_EXPLORER_CONTROL_CLOSE = 2
+};
 
 static float WindowDpiScale(HWND window);
+
+static UINT ExplorerControlMessage(void)
+{
+    static UINT message = 0;
+    if (message == 0) message = RegisterWindowMessageW(explorerControlMessageName);
+    return message;
+}
+
+static uint32_t HashRootPath(const char *rootPath)
+{
+    wchar_t widePath[1200];
+    wchar_t absolutePath[1200];
+    DWORD length;
+    uint32_t hash = 2166136261u;
+
+    if (rootPath == NULL || rootPath[0] == '\0' ||
+        MultiByteToWideChar(CP_UTF8, 0, rootPath, -1, widePath,
+                            (int)(sizeof(widePath) / sizeof(widePath[0]))) <= 0)
+        return 0;
+    length = GetFullPathNameW(widePath, (DWORD)(sizeof(absolutePath) / sizeof(absolutePath[0])),
+                              absolutePath, NULL);
+    if (length == 0 || length >= sizeof(absolutePath) / sizeof(absolutePath[0])) return 0;
+    for (const wchar_t *cursor = absolutePath; *cursor != L'\0'; ++cursor) {
+        wchar_t character = towlower(*cursor);
+        if (character == L'/') character = L'\\';
+        hash ^= (uint8_t)(character & 0xff);
+        hash *= 16777619u;
+        hash ^= (uint8_t)((character >> 8) & 0xff);
+        hash *= 16777619u;
+    }
+    return hash == 0 ? 1 : hash;
+}
+
+static void ApplyOwnerWindowBehavior(void)
+{
+    if (explorerWindow == NULL || ownerWindow == NULL || !IsWindow(ownerWindow)) return;
+
+    /* Keep the regular top-level GLFW window intact.  Actual z-order upkeep
+       is performed only while the game/Explorer is foreground, below. */
+}
+
+static void KeepAboveAssociatedGame(void)
+{
+    HWND foreground;
+    ULONGLONG now;
+
+    if (explorerWindow == NULL || ownerWindow == NULL || !IsWindow(ownerWindow)) return;
+    now = GetTickCount64();
+    if (now - lastOwnerZOrderTick < 100) return;
+    lastOwnerZOrderTick = now;
+    foreground = GetForegroundWindow();
+    if (foreground == ownerWindow || foreground == explorerWindow) {
+        /* HWND_TOP alone loses to the game each time it is clicked.  Promote
+           only while this game pair is active, then release it below when the
+           user switches to any other app. */
+        if (!ownerZOrderIsTopmost) {
+            SetWindowPos(explorerWindow, HWND_TOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+            ownerZOrderIsTopmost = true;
+        }
+    } else if (ownerZOrderIsTopmost) {
+        SetWindowPos(explorerWindow, HWND_NOTOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        ownerZOrderIsTopmost = false;
+    }
+}
 
 static void StoreCaptionButtonLayout(Rectangle bounds)
 {
@@ -204,9 +289,40 @@ static bool IsCaptionSystemCommand(WPARAM command)
            systemCommand == SC_RESTORE || systemCommand == SC_CLOSE;
 }
 
+static bool IsKeyboardMessage(UINT message)
+{
+    return message == WM_KEYDOWN || message == WM_KEYUP ||
+           message == WM_SYSKEYDOWN || message == WM_SYSKEYUP ||
+           message == WM_CHAR || message == WM_SYSCHAR ||
+           message == WM_DEADCHAR || message == WM_SYSDEADCHAR ||
+           message == WM_UNICHAR;
+}
+
 static LRESULT CALLBACK ExplorerWindowProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
 {
     LRESULT result;
+    if (message == ExplorerControlMessage() &&
+        explorerRootHash != 0 && (uint32_t)(uintptr_t)lParam == explorerRootHash) {
+        if (wParam == RPG_EXPLORER_CONTROL_ACTIVATE) {
+            if (IsIconic(window)) ShowWindow(window, SW_RESTORE);
+            SetWindowPos(window, HWND_TOP, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER);
+            SetForegroundWindow(window);
+            return 1;
+        }
+        if (wParam == RPG_EXPLORER_CONTROL_CLOSE) {
+            /* Preserve raylib's normal WM_CLOSE -> WindowShouldClose path. */
+            PostMessageW(window, WM_CLOSE, 0, 0);
+            return 1;
+        }
+    }
+    if (ownerWindow != NULL && IsWindow(ownerWindow) && IsKeyboardMessage(message)) {
+        /* The Explorer may have mouse focus, but all keyboard control belongs
+           to the game.  Post instead of Send to avoid cross-process re-entry
+           into raylib/GLFW while Explorer is dispatching its own message. */
+        (void)PostMessageW(ownerWindow, message, wParam, lParam);
+        return 0;
+    }
     if (message == WM_NCCALCSIZE && wParam != FALSE) {
         /* 通常時はclient-area title barを維持し、最大化時だけ画面外のresize frameを除く。 */
         CalculateClientArea(window, (NCCALCSIZE_PARAMS *)lParam);
@@ -287,6 +403,7 @@ bool RpgExplorerWindow_Install(void *nativeWindow, float requestedTitleBarHeight
     }
     originalWindowProcedure = (WNDPROC)previousProcedure;
     ExtendDwmFrame(explorerWindow);
+    ApplyOwnerWindowBehavior();
     SetWindowPos(explorerWindow, NULL, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     /* raylib の最初の framebuffer を実際の resize と同じ経路で確定させる。 */
@@ -315,11 +432,39 @@ void RpgExplorerWindow_Uninstall(void)
         SetWindowPos(explorerWindow, NULL, 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     }
+    if (explorerWindow != NULL) RemovePropW(explorerWindow, explorerRootPropertyName);
     explorerWindow = NULL;
+    ownerWindow = NULL;
+    lastOwnerZOrderTick = 0;
+    ownerZOrderIsTopmost = false;
     originalWindowProcedure = NULL;
     captionLayoutComesFromUi = false;
     pressedCaptionButton = -1;
     StoreCaptionButtonLayout((Rectangle){ 0 });
+}
+
+void RpgExplorerWindow_SetOwner(void *nativeOwner)
+{
+    HWND requestedOwner = (HWND)nativeOwner;
+    ownerWindow = requestedOwner != NULL && IsWindow(requestedOwner) ? requestedOwner : NULL;
+    lastOwnerZOrderTick = 0;
+    ownerZOrderIsTopmost = false;
+    ApplyOwnerWindowBehavior();
+}
+
+void RpgExplorerWindow_SetRootPath(const char *rootPath)
+{
+    uint32_t hash = HashRootPath(rootPath);
+    if (explorerWindow == NULL) return;
+    RemovePropW(explorerWindow, explorerRootPropertyName);
+    explorerRootHash = hash;
+    if (hash != 0)
+        SetPropW(explorerWindow, explorerRootPropertyName, (HANDLE)(UINT_PTR)hash);
+}
+
+void RpgExplorerWindow_UpdateOwnerZOrder(void)
+{
+    KeepAboveAssociatedGame();
 }
 
 void RpgExplorerWindow_SetTabBounds(Rectangle bounds)
@@ -376,6 +521,9 @@ bool RpgExplorerWindow_IsMaximized(void) { return explorerWindow != NULL && IsZo
 bool RpgExplorerWindow_Install(void *nativeWindow, float requestedTitleBarHeight)
 { (void)nativeWindow; (void)requestedTitleBarHeight; return false; }
 void RpgExplorerWindow_Uninstall(void) { }
+void RpgExplorerWindow_SetOwner(void *nativeOwner) { (void)nativeOwner; }
+void RpgExplorerWindow_SetRootPath(const char *rootPath) { (void)rootPath; }
+void RpgExplorerWindow_UpdateOwnerZOrder(void) { }
 void RpgExplorerWindow_SetTabBounds(Rectangle bounds) { (void)bounds; }
 void RpgExplorerWindow_SetCaptionButtonWidth(float logicalWidth) { (void)logicalWidth; }
 void RpgExplorerWindow_SetCaptionButtonLayout(Rectangle bounds) { (void)bounds; }

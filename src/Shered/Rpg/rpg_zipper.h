@@ -54,6 +54,8 @@ typedef struct RpgZipper {
     float launchSpeed;
     float returnSpeed;
     float followSpeed;
+    /* Runtime-only velocity for the connected spring follower. */
+    Vector2 followVelocity;
     bool launchPreviewEnabled;
     /* heldObject is the FIFO head.  Further captured objects wait here in
        capture order until spit returns them one at a time. */
@@ -88,6 +90,10 @@ void RpgZipper_ClearConnection(RpgZipper *zipper);
 bool RpgZipper_TryToggleLaunch(RpgZipper *zipper, RpgCharacter *player,
                                Vector2 aimWorldPosition, bool *followsPlayer,
                                bool *isLaunched, Vector2 *launchVelocity);
+/* Keeps a connected Zipper behind the player's facing direction using a
+   critically damped-style spring.  This is shared by main play and editor
+   preview play. */
+void RpgZipper_UpdateFollow(RpgZipper *zipper, const RpgCharacter *player, float deltaTime);
 bool RpgZipper_Load(const char *filePath, RpgZipper *zipper);
 bool RpgZipper_Save(const char *filePath, const RpgZipper *zipper);
 Rectangle RpgZipper_GetSpriteBounds(const RpgCharacter *character, float groundY);

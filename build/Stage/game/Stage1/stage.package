@@ -7172,7 +7172,8 @@ cell_column=331
 x=10608.0
 y=272.0
 drop_origin=movable
-FILE 46 40
+FILE 61 0
+movables\reference_sources\reference_0081\double_jump.abilityFILE 46 40
 object_defs\cell_r01_c013_t001\object_info.txtkind=editor_cell
 type=1
 row=1

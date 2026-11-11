@@ -16,6 +16,7 @@ RpgZipper RpgZipper_Default(void)
     zipper.launchSpeed = 720.0f;
     zipper.returnSpeed = 180.0f;
     zipper.followSpeed = 180.0f;
+    zipper.followVelocity = (Vector2){ 0.0f, 0.0f };
     zipper.launchPreviewEnabled = false;
     RpgZipper_ClearConnection(&zipper);
     RpgZipper_ClearHeldObject(&zipper);
@@ -120,12 +121,50 @@ bool RpgZipper_TryToggleLaunch(RpgZipper *zipper, RpgCharacter *player,
         *launchVelocity = Vector2Scale(Vector2Normalize(direction), zipper->launchSpeed);
         *isLaunched = true;
         *followsPlayer = false;
+        zipper->followVelocity = (Vector2){ 0.0f, 0.0f };
         RpgCharacter_ResetAnimation(player);
         return true;
     }
     if (*isLaunched) return false;
     *followsPlayer = true;
+    zipper->followVelocity = (Vector2){ 0.0f, 0.0f };
     return true;
+}
+
+void RpgZipper_UpdateFollow(RpgZipper *zipper, const RpgCharacter *player, float deltaTime)
+{
+    const float springStrength = 42.0f;
+    const float springDamping = 11.5f;
+    float facing;
+    float maximumSpeed;
+    Vector2 target;
+    Vector2 distance;
+    float velocityLength;
+    if (zipper == NULL || player == NULL || deltaTime <= 0.0f) return;
+    /* A filesystem operation or debugger pause must not turn one delayed
+       frame into an enormous spring step. */
+    deltaTime = Clamp(deltaTime, 0.0f, 1.0f / 20.0f);
+
+    facing = player->facingDirection < 0 ? -1.0f : 1.0f;
+    target = (Vector2){ player->position.x - facing * RPG_STAGE_TILE_SIZE * player->scale,
+                        player->position.y };
+    distance = Vector2Subtract(target, zipper->character.position);
+    zipper->followVelocity = Vector2Add(zipper->followVelocity,
+        Vector2Scale(Vector2Subtract(Vector2Scale(distance, springStrength),
+                                      Vector2Scale(zipper->followVelocity, springDamping)),
+                     deltaTime));
+
+    maximumSpeed = fmaxf(zipper->followSpeed * 3.0f, zipper->followSpeed);
+    velocityLength = Vector2Length(zipper->followVelocity);
+    if (maximumSpeed > 0.0f && velocityLength > maximumSpeed)
+        zipper->followVelocity = Vector2Scale(zipper->followVelocity, maximumSpeed / velocityLength);
+    zipper->character.position = Vector2Add(zipper->character.position,
+                                             Vector2Scale(zipper->followVelocity, deltaTime));
+
+    if (Vector2LengthSqr(distance) < 0.0025f && Vector2LengthSqr(zipper->followVelocity) < 0.0025f) {
+        zipper->character.position = target;
+        zipper->followVelocity = (Vector2){ 0.0f, 0.0f };
+    }
 }
 
 // 旧設定は5項目、新設定は6項目。整数読込が小数部を別項目として扱わないよう、先に項目数を数える。

@@ -18,6 +18,9 @@ typedef struct RpgCharacter {
     Vector2 position;
     float verticalSpeed;
     bool isGrounded;
+    /* Reset when grounded; consumed only if an enabled Zipper ability allows
+       the player to jump once more in midair. */
+    bool doubleJumpUsed;
     float moveSpeed;
     float scale;
     /* Maximum jump apex measured in stage/world pixels. */

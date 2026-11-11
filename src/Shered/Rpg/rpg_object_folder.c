@@ -4,6 +4,7 @@
 #include "rpg_explorer_launcher.h"
 #include "rpg_object_folder_monitor.h"
 #include "rpg_stage_storage.h"
+#include "rpg_zipper_ability.h"
 #include "raylib.h"
 
 // 依存関係: build の通常マス生成は rpg_build_cell_storage の選択方式へ委譲する。
@@ -166,6 +167,9 @@ static char zipperStorageMonitorPath[1200] = { 0 };
 static bool zipperCommandRequestDirty = true;
 static ULONGLONG zipperCommandFallbackPollAt = 0;
 static unsigned long long zipperStorageBytes = 0;
+/* Content consumers (abilities, later item types) share the one recursive
+   Zipper watcher instead of adding filesystem work to the game loop. */
+static unsigned int zipperStorageChangeSerial = 1;
 
 /* Capacity is updated immediately by successful game-owned transfers.  The
  * audit below is deliberately independent: it walks the directory in small
@@ -739,6 +743,8 @@ static void OnZipperStorageFolderChanged(void *context, const char *directory)
 {
     (void)context;
     (void)directory;
+    zipperStorageChangeSerial++;
+    if (zipperStorageChangeSerial == 0) zipperStorageChangeSerial = 1;
     zipperCommandRequestDirty = true;
     RequestZipperStorageAudit();
 }
@@ -884,6 +890,11 @@ void RpgObjectFolder_UpdateZipperStorageAudit(void)
         if (zipperStorageAudit.depth == 0) FinishZipperStorageAudit();
     }
 #endif
+}
+
+unsigned int RpgObjectFolder_GetZipperStorageChangeSerial(void)
+{
+    return zipperStorageChangeSerial;
 }
 
 /* Keep the Win32 watcher connection independent from whether the capacity HUD
@@ -1060,6 +1071,8 @@ static bool SetActiveZipperPath(const char *path)
     CloseZipperStorageWatcher();
     zipperStorageBytes = 0;
     if (snprintf(activeZipperPath, sizeof(activeZipperPath), "%s", path) <= 0) return false;
+    zipperStorageChangeSerial++;
+    if (zipperStorageChangeSerial == 0) zipperStorageChangeSerial = 1;
     RpgExplorerLauncher_SetZipperDirectory(activeZipperPath);
     return true;
 }
@@ -4412,6 +4425,9 @@ void RpgObjectFolders_UpdateDataShotLifetimes(RpgDataShots *shots, const RpgAtta
 #ifdef _WIN32
     int queuedMaterializationsThisFrame = 0;
     RpgObjectFolderMonitor_PollAll();
+    /* Shares the monitor dispatch above; it only scans the Zipper tree after
+       that watcher reports an actual directory change. */
+    RpgZipperAbilities_Update();
     RpgObjectFolder_UpdateZipperStorageAudit();
     if (shots == NULL) return;
     ProcessDataShotFolderWorkerResults(shots);

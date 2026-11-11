@@ -1,4 +1,0 @@
-id=23
-component_count=2
-component=2,68
-component=2,69

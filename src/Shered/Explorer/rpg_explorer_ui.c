@@ -3,6 +3,7 @@
 #include "rpg_explorer_ui.h"
 #include "rpg_explorer_window.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -601,6 +602,59 @@ static void DrawFolderIcon(const RpgExplorerShellCache *cache, Rectangle bounds)
     if (icon.id != 0) DrawTexturePro(icon, (Rectangle){ 0, 0, (float)icon.width, (float)icon.height }, bounds, (Vector2){ 0, 0 }, 0.0f, WHITE);
 }
 
+static bool EntryPathHasExtension(const char *path, const char *extension)
+{
+    const char *dot = path != NULL ? strrchr(path, '.') : NULL;
+    const char *separator = path != NULL ? strrchr(path, '\\') : NULL;
+    const char *forwardSeparator = path != NULL ? strrchr(path, '/') : NULL;
+    if (forwardSeparator != NULL && (separator == NULL || forwardSeparator > separator))
+        separator = forwardSeparator;
+    if (dot == NULL || (separator != NULL && dot < separator)) return false;
+    while (*dot != '\0' && *extension != '\0') {
+        if (tolower((unsigned char)*dot) != tolower((unsigned char)*extension)) return false;
+        dot++;
+        extension++;
+    }
+    return *dot == '\0' && *extension == '\0';
+}
+
+static bool DrawSpecialFileIcon(const RpgExplorerEntry *entry, Rectangle bounds, Color tint)
+{
+    float alpha;
+    if (entry == NULL || entry->isDirectory) return false;
+    alpha = tint.a / 255.0f;
+    if (EntryPathHasExtension(entry->path, ".key")) {
+        Color gold = Fade((Color){ 245, 191, 48, 255 }, alpha);
+        float radius = bounds.width * 0.18f;
+        float lineWidth = bounds.width >= 20.0f ? 2.0f : 1.0f;
+        Vector2 ring = { bounds.x + bounds.width * 0.34f, bounds.y + bounds.height * 0.42f };
+        DrawCircleLines((int)ring.x, (int)ring.y, radius, gold);
+        DrawRectangleLinesEx((Rectangle){ ring.x + radius * 0.52f, ring.y - radius * 0.24f,
+                                          bounds.width * 0.30f, radius * 0.48f }, lineWidth, gold);
+        DrawRectangleLinesEx((Rectangle){ bounds.x + bounds.width * 0.70f, ring.y,
+                                          bounds.width * 0.11f, radius * 0.74f }, lineWidth, gold);
+        return true;
+    }
+    if (EntryPathHasExtension(entry->path, ".ability")) {
+        Vector2 center = { bounds.x + bounds.width * 0.5f, bounds.y + bounds.height * 0.5f };
+        DrawPoly(center, 5, bounds.width * 0.39f, -90.0f, Fade(GOLD, alpha));
+        DrawPolyLines(center, 5, bounds.width * 0.39f, -90.0f, Fade(WHITE, alpha));
+        return true;
+    }
+    return false;
+}
+
+static void DrawEntryIcon(const RpgExplorerEntry *entry, const RpgExplorerShellCache *cache,
+                          Rectangle bounds, Color tint)
+{
+    Texture2D icon;
+    if (DrawSpecialFileIcon(entry, bounds, tint)) return;
+    icon = RpgExplorerShell_GetTexture(cache, entry->iconSlot);
+    if (icon.id != 0)
+        DrawTexturePro(icon, (Rectangle){ 0, 0, (float)icon.width, (float)icon.height }, bounds,
+                       (Vector2){ 0, 0 }, 0.0f, tint);
+}
+
 static void DrawNavigationSelection(Rectangle row, const RpgExplorerTheme *theme, bool hovered)
 {
     const ExplorerMetrics *m = &theme->metrics;
@@ -787,7 +841,7 @@ static void Content(const RpgExplorerUiState *state,const RpgExplorerFilesystem 
     for(int v=0;v<scrollLayout.visibleRows;v++){int i=state->listScroll+v;if(i>=fs->entryCount)break;const RpgExplorerEntry *entry=&fs->entries[i];float y=scrollLayout.rowViewport.y+v*m->rowHeight;Rectangle row=DetailsRowBounds(m,left,scrollLayout.rowViewport.width,y);
         if(state->selectedEntry==i)DrawRectangleRounded(row,.12f,6,theme->selection);else if(CheckCollisionPointRec(GetMousePosition(),row))DrawRectangleRounded(row,.12f,6,theme->hover);
         Rectangle iconBounds={columns.nameLeft + m->detailsNameIconLeftPadding * columns.scale,row.y + (row.height-m->iconSize)*0.5f,m->iconSize,m->iconSize};float textY=y + m->detailsRowTextTopPadding;
-        Texture2D icon=RpgExplorerShell_GetTexture(cache,entry->iconSlot);if(icon.id!=0)DrawTexturePro(icon,(Rectangle){0,0,(float)icon.width,(float)icon.height},iconBounds,(Vector2){0,0},0,state->isDragging&&state->draggedEntry==i?Fade(WHITE,.42f):WHITE);
+        DrawEntryIcon(entry,cache,iconBounds,state->isDragging&&state->draggedEntry==i?Fade(WHITE,.42f):WHITE);
         RpgExplorerTheme_DrawText(theme,entry->name,(Vector2){nameX,textY},m->detailsTextSize,state->isDragging&&state->draggedEntry==i?theme->disabledText:theme->text);char size[24],date[24];SizeText(entry->size,size,sizeof(size));RpgExplorerFilesystem_FormatDate(entry->lastWrite,date,sizeof(date));RpgExplorerTheme_DrawText(theme,date,(Vector2){dateX,textY},m->detailsTextSize,theme->secondaryText);RpgExplorerTheme_DrawText(theme,entry->typeName,(Vector2){typeX,textY},m->detailsTextSize,theme->secondaryText);if(!entry->isDirectory){float sizeTextWidth=RpgExplorerTheme_MeasureText(theme,size,m->detailsTextSize).x;float sizeTextX=columns.tableRight-m->detailsSizeRightPadding*columns.scale-sizeTextWidth;if(sizeTextX<columns.sizeLeft)sizeTextX=columns.sizeLeft;RpgExplorerTheme_DrawText(theme,size,(Vector2){sizeTextX,textY},m->detailsTextSize,theme->secondaryText);}}
     EndScissorMode();
     if(scrollLayout.hasOverflow){bool hovered=CheckCollisionPointRec(GetMousePosition(),scrollLayout.operationBounds);if(hovered||state->isListScrollbarDragging)DrawRectangleRec(scrollLayout.operationBounds,Fade(theme->secondaryText,.05f));DrawRectangleRounded(scrollLayout.thumbBounds,.5f,6,state->isListScrollbarDragging?theme->secondaryText:Fade(theme->secondaryText,hovered?.92f:.78f));}

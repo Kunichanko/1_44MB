@@ -843,10 +843,13 @@ void RpgRuntime_StartFollowingZipper(RpgZipper *zipper, const RpgCharacter *play
     if (zipper == NULL || player == NULL) return;
     /* Keep save-flag starts on the same placement and connected state as a
        normal follower.  This does not start an import animation. */
-    zipper->character.position = (Vector2){ player->position.x - RPG_STAGE_TILE_SIZE * player->scale,
+    zipper->character.position = (Vector2){ player->position.x -
+                                                (player->facingDirection < 0 ? -1.0f : 1.0f) *
+                                                RPG_STAGE_TILE_SIZE * player->scale,
                                             player->position.y };
     zipper->character.verticalSpeed = 0.0f;
     zipper->character.isGrounded = true;
+    zipper->followVelocity = (Vector2){ 0.0f, 0.0f };
     RpgZipper_ClearConnection(zipper);
     if (zipperFollowsPlayer != NULL) *zipperFollowsPlayer = true;
     if (isZipperControllable != NULL) *isZipperControllable = true;
@@ -1524,18 +1527,6 @@ static void UpdateRpgCamera(Camera2D *camera, const RpgStage *stage, int mapInde
                         RPG_STAGE_WORLD_HEIGHT / 2.0f },
             GetRuntimeMapRenderOffset(stage, mapIndex));
     }
-}
-
-static void UpdateZipperFollow(RpgZipper *zipper, const RpgCharacter *player, float deltaTime)
-{
-    // 帰還時は主人公の少し後ろ・同じ足元へ、X/Yをまとめて滑らかに追従させる。
-    Vector2 target = { player->position.x - RPG_STAGE_TILE_SIZE * player->scale, player->position.y };
-    Vector2 distance = Vector2Subtract(target, zipper->character.position);
-    float maximumStep = zipper->followSpeed * deltaTime;
-    float distanceLength = Vector2Length(distance);
-    if (distanceLength <= maximumStep) zipper->character.position = target;
-    else zipper->character.position = Vector2Add(zipper->character.position,
-                                                  Vector2Scale(distance, maximumStep / distanceLength));
 }
 
 static Rectangle GetZipperCollisionBounds(const RpgZipper *zipper)
@@ -2687,7 +2678,7 @@ void RpgRuntime_UpdateAndDraw(RpgRuntimeContext *context)
                                  &(*context->attachedAttachmentIndex), context->attachedDynamicBlockIndex,
                                  context->attachedReferenceObjectIndex);
         else if ((*context->zipperFollowsPlayer) && (*context->inspectTarget) < 0 && (*context->dialogueIndex) < 0 && (*context->stage3IntroIndex) < 0 && !(*context->isReferenceTextOpen))
-            UpdateZipperFollow(&(*context->zipper), &(*context->player), GetFrameTime());
+            RpgZipper_UpdateFollow(&(*context->zipper), &(*context->player), GetFrameTime());
         RpgRuntime_ProcessReferenceFolderZipperCommand(context);
         RpgRuntime_ProcessZipperCommand(context);
         if ((*context->zipperAnimationElapsed) >= 0.0f) {

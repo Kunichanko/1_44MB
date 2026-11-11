@@ -351,6 +351,10 @@ void RpgStage_DrawMapUnavailableOverlay(const RpgStage *stage, int mapIndex,
 void RpgStage_DrawEffects(const RpgStage *stage);
 void RpgStage_DrawMapEffects(const RpgStage *stage, int mapIndex);
 void RpgStage_DrawReferenceObject(Texture2D fileTexture, Rectangle cell, Color tint);
+/* Draws a movable file object.  The path changes visuals only; it does not
+   participate in object storage, collision, or interaction decisions. */
+void RpgStage_DrawReferenceFileObject(Texture2D fileTexture, Rectangle cell,
+                                      const char *sourcePath, Color tint);
 void RpgStage_DrawReferenceFolder(Rectangle cell, Color tint);
 void RpgStage_DrawReferenceObjects(const RpgStage *stage, Texture2D fileTexture);
 void RpgStage_DrawReferenceObjectsExcept(const RpgStage *stage, Texture2D fileTexture,

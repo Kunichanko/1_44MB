@@ -47,6 +47,10 @@ bool RpgObjectFolder_GetZipperInboxDirectory(char *path, size_t pathSize);
 /* Zipper にゲーム操作で入出庫したデータ量を byte 単位で返す。
    描画時のフォルダ再帰走査は行わない。 */
 unsigned long long RpgObjectFolder_GetZipperStorageBytes(void);
+/* Incremented by the existing recursive Zipper-directory watcher (and when
+   the active Zipper root changes).  Consumers use this to refresh their own
+   cached interpretation of Zipper contents without adding another watcher. */
+unsigned int RpgObjectFolder_GetZipperStorageChangeSerial(void);
 /* Advances the low-priority filesystem audit for the active Zipper folder.
  * Gameplay uses the immediate game-owned ledger above; this verifier only
  * reconciles that ledger after a complete, stable background scan. */

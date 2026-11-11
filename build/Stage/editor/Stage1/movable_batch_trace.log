@@ -1,2 +1,9 @@
 batch-begin id=0 detail=direct movable refresh winerr=0
 batch-succeeded id=0 detail=direct movable refresh winerr=183
+batch-begin id=0 detail=direct movable refresh winerr=183
+reference-skip-unselected id=81 detail=file source not selected winerr=183
+batch-succeeded id=0 detail=direct movable refresh winerr=183
+batch-begin id=0 detail=direct movable refresh winerr=183
+batch-succeeded id=0 detail=direct movable refresh winerr=183
+batch-begin id=0 detail=direct movable refresh winerr=183
+batch-succeeded id=0 detail=direct movable refresh winerr=183

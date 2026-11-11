@@ -10,6 +10,7 @@
 #include "rpg_viewport.h"
 
 #include <math.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1677,7 +1678,9 @@ void RpgReferenceObjects_DrawExcept(const RpgReferenceObjects *objects, Texture2
                            (Vector2){ 0 }, 0.0f, WHITE);
         } else if (object->objectKind == RPG_REFERENCE_OBJECT_FOLDER)
             RpgStage_DrawReferenceFolder(destination, WHITE);
-        else RpgStage_DrawReferenceObject(fileTexture, destination, WHITE);
+        else RpgStage_DrawReferenceFileObject(fileTexture, destination,
+                                              object->sourcePath[0] != '\0' ? object->sourcePath : object->path,
+                                              WHITE);
     }
 }
 
@@ -2774,6 +2777,68 @@ void RpgStage_DrawReferenceObject(Texture2D fileTexture, Rectangle cell, Color t
                    (Vector2){ 0.0f, 0.0f }, 0.0f, tint);
 }
 
+static bool RpgStage_PathHasExtension(const char *path, const char *extension)
+{
+    const char *dot;
+    const char *separator;
+    if (path == NULL || extension == NULL) return false;
+    dot = strrchr(path, '.');
+    separator = strrchr(path, '\\');
+    {
+        const char *forwardSeparator = strrchr(path, '/');
+        if (forwardSeparator != NULL && (separator == NULL || forwardSeparator > separator))
+            separator = forwardSeparator;
+    }
+    if (dot == NULL || (separator != NULL && dot < separator)) return false;
+    while (*dot != '\0' && *extension != '\0') {
+        if (tolower((unsigned char)*dot) != tolower((unsigned char)*extension)) return false;
+        dot++;
+        extension++;
+    }
+    return *dot == '\0' && *extension == '\0';
+}
+
+static void RpgStage_DrawReferenceAbilityIcon(Rectangle cell, Color tint)
+{
+    float alpha = tint.a / 255.0f;
+    Vector2 center = { cell.x + cell.width * 0.5f, cell.y + cell.height * 0.5f };
+    DrawRectangleRounded((Rectangle){ cell.x + 7.0f, cell.y + 5.0f,
+                                      cell.width - 14.0f, cell.height - 10.0f },
+                         0.12f, 4, Fade((Color){ 43, 53, 92, 255 }, alpha));
+    DrawPoly(center, 5, cell.width * 0.29f, -90.0f, Fade(GOLD, alpha));
+    DrawPolyLines(center, 5, cell.width * 0.29f, -90.0f, Fade(WHITE, alpha));
+}
+
+static void RpgStage_DrawReferenceKeyIcon(Rectangle cell, Color tint)
+{
+    float alpha = tint.a / 255.0f;
+    Color gold = Fade((Color){ 245, 191, 48, 255 }, alpha);
+    float radius = cell.width * 0.15f;
+    Vector2 ring = { cell.x + cell.width * 0.38f, cell.y + cell.height * 0.43f };
+    float lineWidth = cell.width >= 24.0f ? 2.0f : 1.0f;
+    /* A key is deliberately just one circular bow plus two outlined
+       rectangular pieces: its shaft and the single tooth. */
+    DrawCircleLines((int)ring.x, (int)ring.y, radius, gold);
+    DrawRectangleLinesEx((Rectangle){ ring.x + radius * 0.55f, ring.y - radius * 0.24f,
+                                      cell.width * 0.25f, radius * 0.48f }, lineWidth, gold);
+    DrawRectangleLinesEx((Rectangle){ cell.x + cell.width * 0.72f, ring.y,
+                                      cell.width * 0.09f, radius * 0.72f }, lineWidth, gold);
+}
+
+void RpgStage_DrawReferenceFileObject(Texture2D fileTexture, Rectangle cell,
+                                      const char *sourcePath, Color tint)
+{
+    if (RpgStage_PathHasExtension(sourcePath, ".key")) {
+        RpgStage_DrawReferenceKeyIcon(cell, tint);
+        return;
+    }
+    if (RpgStage_PathHasExtension(sourcePath, ".ability")) {
+        RpgStage_DrawReferenceAbilityIcon(cell, tint);
+        return;
+    }
+    RpgStage_DrawReferenceObject(fileTexture, cell, tint);
+}
+
 void RpgStage_DrawReferenceFolder(Rectangle cell, Color tint)
 {
     /* Windowsã®æ¨æºãã©ã«ããåèE«ããè»½éãªãã¯ã¿ã¼è¡¨ç¤ºãç»åè³E£ãå¢ãããªãEE*/
@@ -2828,7 +2893,9 @@ void RpgStage_DrawMapReferenceObjects(const RpgStage *stage, int mapIndex, Textu
                              object->position.y - mapWorldOrigin.y - size * 0.5f, size, size };
         if (object->objectKind == RPG_REFERENCE_OBJECT_FOLDER)
             RpgStage_DrawReferenceFolder(bounds, WHITE);
-        else RpgStage_DrawReferenceObject(fileTexture, bounds, WHITE);
+        else RpgStage_DrawReferenceFileObject(fileTexture, bounds,
+                                              object->sourcePath[0] != '\0' ? object->sourcePath : object->path,
+                                              WHITE);
     }
     for (int row = 0; row < RPG_STAGE_ROWS; row++) for (int column = 0; column < RPG_STAGE_COLUMNS; column++) {
         if (RpgStage_IsCellUnavailable(stage, row, startColumn + column)) continue;

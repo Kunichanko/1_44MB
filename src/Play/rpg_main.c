@@ -234,18 +234,6 @@ static void UpdateRpgCamera(Camera2D *camera, float playerX, bool followsPlayer)
     camera->target.y = RPG_STAGE_WORLD_HEIGHT / 2.0f;
 }
 
-static void UpdateZipperFollow(RpgZipper *zipper, const RpgCharacter *player, float deltaTime)
-{
-    // 帰還時は主人公の少し後ろ・同じ足元へ、X/Yをまとめて滑らかに追従させる。
-    Vector2 target = { player->position.x - RPG_STAGE_TILE_SIZE * player->scale, player->position.y };
-    Vector2 distance = Vector2Subtract(target, zipper->character.position);
-    float maximumStep = zipper->returnSpeed * deltaTime;
-    float distanceLength = Vector2Length(distance);
-    if (distanceLength <= maximumStep) zipper->character.position = target;
-    else zipper->character.position = Vector2Add(zipper->character.position,
-                                                  Vector2Scale(distance, maximumStep / distanceLength));
-}
-
 static Rectangle GetZipperCollisionBounds(const RpgZipper *zipper)
 {
     // 見た目全体ではなく本体部分だけをブロック判定にし、接触時に確実に停止させる。
@@ -803,7 +791,6 @@ int main(void)
     };
     (void)OpenTextFile;
     (void)UpdateRpgCamera;
-    (void)UpdateZipperFollow;
     (void)DrawRpgWorld;
     while (!WindowShouldClose()) {
         RpgViewport_Update();

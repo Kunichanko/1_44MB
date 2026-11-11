@@ -1,6 +1,7 @@
 // 依存する自プロジェクト内ファイル: rpg_character.h, rpg_stage.h
 #include "rpg_character.h"
 #include "rpg_physics.h"
+#include "rpg_zipper_ability.h"
 
 #include <math.h>
 #include <stddef.h>
@@ -317,7 +318,10 @@ void RpgCharacter_UpdatePlayerWithStageAndMovingSolidsControlled(RpgCharacter *c
         if (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT)) direction += 1.0f;
     }
 
-    if (allowJumpInput && character->isGrounded && IsKeyPressed(KEY_W)) {
+    if (allowJumpInput && IsKeyPressed(KEY_W) &&
+        (character->isGrounded || (!character->doubleJumpUsed &&
+         RpgZipperAbilities_IsEnabled(RPG_ZIPPER_ABILITY_DOUBLE_JUMP)))) {
+        if (!character->isGrounded) character->doubleJumpUsed = true;
         float jumpHeight = Clamp(character->jumpHeight, 1.0f,
                                  (float)(RPG_STAGE_TILE_SIZE * 12));
         /* v² = 2gh: use the configured apex without changing gravity. */
@@ -339,6 +343,7 @@ void RpgCharacter_UpdatePlayerWithStageAndMovingSolidsControlled(RpgCharacter *c
     character->position.x = Clamp(character->position.x, minimumX, maximumX);
     character->verticalSpeed = body.verticalSpeed;
     character->isGrounded = body.isGrounded;
+    if (character->isGrounded) character->doubleJumpUsed = false;
     UpdateAnimationState(character, previousPosition, wasGrounded, deltaTime);
 }
 
@@ -426,7 +431,10 @@ void RpgCharacter_UpdatePlayer(RpgCharacter *character, float deltaTime, float g
     if (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT)) direction += 1.0f;
     character->position.x = Clamp(character->position.x + direction * character->moveSpeed * deltaTime,
                                   minimumX, maximumX);
-    if (character->isGrounded && IsKeyPressed(KEY_W)) {
+    if (IsKeyPressed(KEY_W) &&
+        (character->isGrounded || (!character->doubleJumpUsed &&
+         RpgZipperAbilities_IsEnabled(RPG_ZIPPER_ABILITY_DOUBLE_JUMP)))) {
+        if (!character->isGrounded) character->doubleJumpUsed = true;
         float jumpHeight = Clamp(character->jumpHeight, 1.0f,
                                  (float)(RPG_STAGE_TILE_SIZE * 12));
         character->verticalSpeed = -sqrtf(2.0f * 1200.0f * jumpHeight);
@@ -439,6 +447,7 @@ void RpgCharacter_UpdatePlayer(RpgCharacter *character, float deltaTime, float g
         character->verticalSpeed = 0.0f;
         character->isGrounded = true;
     }
+    if (character->isGrounded) character->doubleJumpUsed = false;
     UpdateAnimationState(character, previousPosition, wasGrounded, deltaTime);
 }
 

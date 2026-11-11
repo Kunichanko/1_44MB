@@ -13,6 +13,58 @@
 #include "rpg_explorer_ui.h"
 #include "rpg_explorer_window.h"
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOGDI
+#define CloseWindow Win32CloseWindow
+#define ShowCursor Win32ShowCursor
+#define DrawText Win32DrawText
+#define DrawTextEx Win32DrawTextEx
+#define LoadImage Win32LoadImage
+#include <windows.h>
+#undef LoadImage
+#undef DrawTextEx
+#undef DrawText
+#undef ShowCursor
+#undef CloseWindow
+
+/* The virtual Explorer is a supporting view, not a replacement game window.
+ * Start it inside the lower-left quarter of its owner, with a small inset so
+ * the game remains visible around it.  Win32 coordinates are deliberately
+ * used end-to-end here because both rectangles are outer window rectangles. */
+static void PlaceInitialVirtualExplorerWindow(void *ownerWindow)
+{
+    HWND owner = (HWND)ownerWindow;
+    HWND explorer = (HWND)GetWindowHandle();
+    RECT ownerRect;
+    int ownerWidth;
+    int ownerHeight;
+    int quarterWidth;
+    int quarterHeight;
+    int width;
+    int height;
+    int x;
+    int y;
+    if (explorer == NULL || owner == NULL || !IsWindow(owner) || !GetWindowRect(owner, &ownerRect)) return;
+    ownerWidth = ownerRect.right - ownerRect.left;
+    ownerHeight = ownerRect.bottom - ownerRect.top;
+    if (ownerWidth <= 0 || ownerHeight <= 0) return;
+    quarterWidth = ownerWidth / 2;
+    quarterHeight = ownerHeight / 2;
+    width = (quarterWidth * 88) / 100;
+    height = (quarterHeight * 88) / 100;
+    x = ownerRect.left + (quarterWidth - width) / 2;
+    y = ownerRect.top + quarterHeight + (quarterHeight - height) / 2;
+    SetWindowPos(explorer, HWND_TOP, x, y, width, height,
+                 SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+}
+#else
+static void PlaceInitialVirtualExplorerWindow(void *ownerWindow)
+{
+    (void)ownerWindow;
+}
+#endif
+
 int main(int argumentCount, char **arguments)
 {
     const char *root = ".";
@@ -37,6 +89,7 @@ int main(int argumentCount, char **arguments)
     SetTargetFPS(60);
     RpgExplorerTheme_Load(&theme, GetWindowHandle());
     RpgExplorerWindow_SetOwner(ownerWindow);
+    PlaceInitialVirtualExplorerWindow(ownerWindow);
     if (!RpgExplorerWindow_Install(GetWindowHandle(), theme.metrics.tabBarHeight)) {
         RpgExplorerTheme_Unload(&theme);
         CloseWindow();

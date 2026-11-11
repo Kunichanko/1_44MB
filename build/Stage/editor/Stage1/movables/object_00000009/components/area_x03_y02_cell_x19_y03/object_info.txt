@@ -1,5 +1,0 @@
-type=42
-cell_row=3
-cell_column=359
-x=11504.0
-y=112.0

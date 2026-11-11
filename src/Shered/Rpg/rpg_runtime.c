@@ -1177,14 +1177,26 @@ static bool CompleteZipperHeldObjectReturn(RpgRuntimeContext *context)
                                        .magnetRuntime = context->magnetRuntime
                                    });
         /* Spit restores an object to the world; it is not a new collision.
-           Never recreate an attachment merely because the returned object is
-           still at Zipper's position.  A later launched-Zipper collision is
-           the only route that may set one of these attachment references. */
+           Attachments and reference objects do not remain attached merely
+           because they were returned at Zipper's position.  A dynamic block
+           is different: its existing attachment is the explicit physical
+           object reference.  Preserve that reference so a block returned
+           into a socket can be eaten again without launching Zipper into it
+           a second time. */
         if (target->kind == RPG_ZIPPER_HELD_OBJECT_MOVABLE) {
             if (context->attachedDataShotIndex != NULL) *context->attachedDataShotIndex = -1;
             if (context->attachedAttachmentIndex != NULL) *context->attachedAttachmentIndex = -1;
-            if (context->attachedDynamicBlockIndex != NULL) *context->attachedDynamicBlockIndex = -1;
             if (context->attachedReferenceObjectIndex != NULL) *context->attachedReferenceObjectIndex = -1;
+            if (context->attachedDynamicBlockIndex != NULL &&
+                target->movableKind == RPG_ZIPPER_MOVABLE_DYNAMIC_BLOCK &&
+                context->magnetRuntime != NULL && target->dynamicBlockIndex >= 0 &&
+                target->dynamicBlockIndex < context->magnetRuntime->metalCount &&
+                context->magnetRuntime->metals[target->dynamicBlockIndex].active) {
+                *context->attachedDynamicBlockIndex = target->dynamicBlockIndex;
+                if (context->zipperFollowsPlayer != NULL) *context->zipperFollowsPlayer = false;
+            } else if (context->attachedDynamicBlockIndex != NULL) {
+                *context->attachedDynamicBlockIndex = -1;
+            }
             RpgZipper_ClearConnection(context->zipper);
         }
         *target = (RpgZipperHeldObject){ .kind = RPG_ZIPPER_HELD_OBJECT_NONE,
@@ -1290,11 +1302,13 @@ static bool CaptureCurrentZipperObject(RpgRuntimeContext *context)
 static void CaptureZipperCommandTarget(RpgRuntimeContext *context)
 {
     if (CaptureCurrentZipperObject(context)) return;
-    /* Repeating eat while the connected block is held must not silently
-       disconnect Zipper.  It stays at the missing/error cell until spit
-       restores that exact target, or the user detaches it with Space. */
-    if (context != NULL && context->zipper != NULL && RpgZipper_HasConnection(context->zipper) &&
-        !IsZipperConnectionResolved(context->zipper, context->stage)) return;
+    /* A connection is Zipper's explicit object reference, not a one-frame
+       collision result.  A just-returned object can reject an eat for one
+       frame while its folder/staging rename settles.  Do not turn that into
+       an implicit detach: keep both resolved and temporarily-missing targets
+       connected until a successful eat/spit sequence or an explicit Space
+       detach.  The next eat request can then retry the same target. */
+    if (context != NULL && context->zipper != NULL && RpgZipper_HasConnection(context->zipper)) return;
     /* 取得対象がなくても、cmd完了後のZipperは必ず帰還状態に統一する。 */
     (*context->zipperFollowsPlayer) = true;
     (*context->isZipperLaunched) = false;
